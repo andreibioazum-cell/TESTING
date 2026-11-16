@@ -26,29 +26,24 @@ public:
 
     uint32_t apiVersion() const { return deviceApiVersion_; }
     bool usesDynamicRendering() const { return useDynamicRendering_; }
-    bool usesSynchronization2() const { return useSync2_; }
-    bool usesPushDescriptors() const { return usePushDescriptors_; }
 
 private:
-    static constexpr uint32_t kMaxFramesInFlight = 2;
+    static constexpr uint32_t kFrames = 2;
 
-    struct FrameResources {
-        VkCommandPool commandPool = VK_NULL_HANDLE;
-        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-        VkSemaphore imageAvailable = VK_NULL_HANDLE;
-        VkFence inFlight = VK_NULL_HANDLE;
-        VkBuffer vertexBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
-        void *vertexMapped = nullptr;
-        VkDeviceSize vertexCapacity = 0;
-        bool vertexHostCoherent = true;
-        VkBuffer stagingBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
-        void *stagingMapped = nullptr;
-        VkDeviceSize stagingCapacity = 0;
-        bool stagingHostCoherent = true;
+    struct Buffer {
+        VkBuffer handle = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        void *mapped = nullptr;
+        VkDeviceSize capacity = 0;
+        bool coherent = true;
     };
-
+    struct Frame {
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkSemaphore acquire = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        Buffer vertices, staging;
+    };
     struct Texture {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -56,16 +51,11 @@ private:
         VkSampler sampler = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        int width = 0;
-        int height = 0;
+        int width = 0, height = 0;
     };
-
-    struct PendingUpload {
+    struct Upload {
         uint32_t id = 0;
-        int x = 0;
-        int y = 0;
-        int width = 0;
-        int height = 0;
+        int x = 0, y = 0, width = 0, height = 0;
         std::vector<unsigned char> rgba;
     };
 
@@ -74,75 +64,57 @@ private:
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
-    uint32_t queueFamily_ = 0;
+    uint32_t queueFamily_ = 0, instanceApiVersion_ = VK_API_VERSION_1_1, deviceApiVersion_ = VK_API_VERSION_1_1, frameIndex_ = 0;
     VkQueue queue_ = VK_NULL_HANDLE;
-    uint32_t instanceApiVersion_ = VK_API_VERSION_1_1;
-    uint32_t deviceApiVersion_ = VK_API_VERSION_1_1;
-    bool useDynamicRendering_ = false;
-    bool useSync2_ = false;
-    bool usePushDescriptors_ = false;
+    bool useDynamicRendering_ = false, useSync2_ = false, usePushDescriptors_ = false;
 
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
-    VkFormat format_ = VK_FORMAT_UNDEFINED;
-    VkFormat pipelineFormat_ = VK_FORMAT_UNDEFINED;
+    VkFormat format_ = VK_FORMAT_UNDEFINED, pipelineFormat_ = VK_FORMAT_UNDEFINED;
     VkExtent2D extent_{};
     std::vector<VkImage> images_;
     std::vector<VkImageView> views_;
     std::vector<VkFramebuffer> framebuffers_;
-    std::vector<VkSemaphore> renderFinishedSemaphores_;
+    std::vector<VkSemaphore> renderFinished_;
     std::vector<VkFence> imagesInFlight_;
-
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
     VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
 
-    std::array<FrameResources, kMaxFramesInFlight> frames_{};
-    uint32_t frameIndex_ = 0;
-
+    std::array<Frame, kFrames> frames_{};
     VkCommandPool uploadPool_ = VK_NULL_HANDLE;
-    VkCommandBuffer uploadCommand_ = VK_NULL_HANDLE;
+    VkCommandBuffer uploadCmd_ = VK_NULL_HANDLE;
     VkFence uploadFence_ = VK_NULL_HANDLE;
 
     std::string shaders_;
     std::vector<Texture> textures_;
-    std::vector<PendingUpload> pendingUploads_;
+    std::vector<Upload> pendingUploads_;
     VkDescriptorSetLayout descriptorLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
 
 #ifdef VK_API_VERSION_1_3
-    PFN_vkCmdBeginRendering pfnCmdBeginRendering_ = nullptr;
-    PFN_vkCmdEndRendering pfnCmdEndRendering_ = nullptr;
-    PFN_vkCmdPipelineBarrier2 pfnCmdPipelineBarrier2_ = nullptr;
-    PFN_vkQueueSubmit2 pfnQueueSubmit2_ = nullptr;
+    PFN_vkCmdBeginRendering pfnBeginRendering_ = nullptr;
+    PFN_vkCmdEndRendering pfnEndRendering_ = nullptr;
+    PFN_vkCmdPipelineBarrier2 pfnBarrier2_ = nullptr;
+    PFN_vkQueueSubmit2 pfnSubmit2_ = nullptr;
 #endif
 #ifdef VK_KHR_push_descriptor
-    PFN_vkCmdPushDescriptorSetKHR pfnCmdPushDescriptorSet_ = nullptr;
+    PFN_vkCmdPushDescriptorSetKHR pfnPushDescriptor_ = nullptr;
 #endif
 
     void createInstance();
     void selectDevice();
     void createSwapchain(VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
-    void destroySwapchainViews();
-    void createDescriptorLayout();
-    void createRenderPassAndPipeline();
-    void destroyPipeline();
+    void createPipeline();
     void createFrameResources();
     void createDefaultTextures();
     void recreateSwapchain();
-
-    uint32_t findMemoryType(uint32_t bits, VkMemoryPropertyFlags required,
-                            VkMemoryPropertyFlags preferred, bool &isCoherent) const;
-    void allocateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool preferDeviceLocal,
-                        VkBuffer &buffer, VkDeviceMemory &memory, void *&mapped, bool &coherent) const;
-    void destroyBuffer(VkBuffer &buffer, VkDeviceMemory &memory, void *&mapped, VkDeviceSize &capacity) const;
-    void ensureVertexBuffer(FrameResources &frame, VkDeviceSize requiredBytes);
-    void ensureStagingBuffer(FrameResources &frame, VkDeviceSize requiredBytes);
-
-    void uploadTextureFull(Texture &texture, int width, int height, const unsigned char *rgba);
-    void recordPendingUploads(FrameResources &frame);
-    void transitionImage(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout,
-                         VkImageLayout newLayout, bool toPresent) const;
-    void destroyTexture(Texture &texture);
+    uint32_t findMemoryType(uint32_t bits, VkMemoryPropertyFlags req, VkMemoryPropertyFlags pref, bool &coherent) const;
+    void ensureBuffer(Buffer &buf, VkDeviceSize bytes, VkBufferUsageFlags usage, bool preferDeviceLocal);
+    void destroyBuffer(Buffer &buf) const;
+    void uploadTextureFull(Texture &tex, int width, int height, const unsigned char *rgba);
+    void transitionImage(VkCommandBuffer cmd, VkImage img, VkImageLayout oldL, VkImageLayout newL, bool syncRender) const;
+    void recordPendingUploads(Frame &frame);
+    void destroyTexture(Texture &tex);
     std::vector<char> readShader(const char *name) const;
 };
