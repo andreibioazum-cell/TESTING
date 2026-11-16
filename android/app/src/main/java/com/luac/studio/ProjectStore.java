@@ -37,66 +37,201 @@ final class ProjectStore {
         return result;
     }
 
+    File createSnakeProject(String requested) throws IOException {
+        String name = safeName(requested, "Змейка");
+        File project = unique(root, name);
+        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) throw new IOException("Cannot create project folders");
+        write(new File(project, "main.lua"),
+            "-- Змейка на LuaC (нативный машинный код + инкрементальный GC)\n" +
+            "snake_mod = require('scripts.snake')\n" +
+            "math.randomseed(os.time())\n\n" +
+            "game = snake_mod.SnakeGame()\n" +
+            "game:reset()\n\n" +
+            "touch_active = false\n" +
+            "touch_start_x = 0.0\n" +
+            "touch_start_y = 0.0\n" +
+            "swiped = false\n\n" +
+            "func on_touch(id, x, y, down):\n" +
+            "    if down:\n" +
+            "        if not touch_active:\n" +
+            "            touch_active = true\n" +
+            "            touch_start_x = x\n" +
+            "            touch_start_y = y\n" +
+            "            swiped = false\n" +
+            "            if not game.alive:\n" +
+            "                game:reset()\n" +
+            "                swiped = true\n" +
+            "                return\n" +
+            "        else:\n" +
+            "            dx = x - touch_start_x\n" +
+            "            dy = y - touch_start_y\n" +
+            "            if not swiped and (math.abs(dx) > 24 or math.abs(dy) > 24):\n" +
+            "                if math.abs(dx) > math.abs(dy):\n" +
+            "                    if dx > 0:\n" +
+            "                        game:set_dir(1, 0)\n" +
+            "                    else:\n" +
+            "                        game:set_dir(-1, 0)\n" +
+            "                else:\n" +
+            "                    if dy > 0:\n" +
+            "                        game:set_dir(0, 1)\n" +
+            "                    else:\n" +
+            "                        game:set_dir(0, -1)\n" +
+            "                swiped = true\n" +
+            "    else:\n" +
+            "        if touch_active and not swiped and game.alive:\n" +
+            "            w = screen_width()\n" +
+            "            h = screen_height()\n" +
+            "            dx = x - w * 0.5\n" +
+            "            dy = y - h * 0.5\n" +
+            "            if math.abs(dx) > math.abs(dy):\n" +
+            "                if dx > 0:\n" +
+            "                    game:set_dir(1, 0)\n" +
+            "                else:\n" +
+            "                    game:set_dir(-1, 0)\n" +
+            "            else:\n" +
+            "                if dy > 0:\n" +
+            "                    game:set_dir(0, 1)\n" +
+            "                else:\n" +
+            "                    game:set_dir(0, -1)\n" +
+            "        touch_active = false\n\n" +
+            "func update(float dt):\n" +
+            "    game:step(dt)\n\n" +
+            "func draw():\n" +
+            "    w = screen_width()\n" +
+            "    h = screen_height()\n" +
+            "    pad = 24.0\n" +
+            "    top_hud = 84.0\n" +
+            "    avail_w = w - pad * 2.0\n" +
+            "    avail_h = h - top_hud - pad\n" +
+            "    cell = math.floor(math.min(avail_w / game.cols, avail_h / game.rows))\n" +
+            "    if cell < 8:\n" +
+            "        cell = 8\n" +
+            "    board_w = cell * game.cols\n" +
+            "    board_h = cell * game.rows\n" +
+            "    ox = math.floor((w - board_w) * 0.5)\n" +
+            "    oy = math.floor(top_hud + (avail_h - board_h) * 0.5)\n\n" +
+            "    clear_screen(0.05, 0.07, 0.11, 1.0)\n" +
+            "    draw_rect(ox, oy, board_w, board_h, 0.09, 0.12, 0.18, 1.0)\n\n" +
+            "    if game.food:\n" +
+            "        fx = ox + game.food.x * cell + cell * 0.5\n" +
+            "        fy = oy + game.food.y * cell + cell * 0.5\n" +
+            "        draw_circle(fx, fy, cell * 0.38, 0.96, 0.32, 0.36, 1.0)\n\n" +
+            "    for i = 1, #game.body:\n" +
+            "        seg = game.body[i]\n" +
+            "        sx = ox + seg.x * cell + 2\n" +
+            "        sy = oy + seg.y * cell + 2\n" +
+            "        sz = cell - 4\n" +
+            "        if i == 1:\n" +
+            "            draw_rect(sx, sy, sz, sz, 0.25, 0.92, 0.62, 1.0)\n" +
+            "        else:\n" +
+            "            draw_rect(sx, sy, sz, sz, 0.16, 0.72, 0.48, 1.0)\n\n" +
+            "    draw_text('Змейка  •  Счёт: ' .. tostring(game.score) .. '   Рекорд: ' .. tostring(game.best), ox, 24, 22, 1, 1, 1, 1)\n" +
+            "    if not game.alive:\n" +
+            "        draw_text('Игра окончена! Коснитесь экрана', ox, oy + board_h * 0.5 - 14, 22, 1.0, 0.45, 0.45, 1.0)\n");
+        write(new File(project, "scripts/snake.lua"),
+            "struct Cell:\n" +
+            "    int x = 0\n" +
+            "    int y = 0\n\n" +
+            "class SnakeGame:\n" +
+            "    int cols = 16\n" +
+            "    int rows = 20\n" +
+            "    int dx = 1\n" +
+            "    int dy = 0\n" +
+            "    int next_dx = 1\n" +
+            "    int next_dy = 0\n" +
+            "    int score = 0\n" +
+            "    int best = 0\n" +
+            "    bool alive = true\n" +
+            "    float timer = 0.0\n" +
+            "    float step_time = 0.14\n" +
+            "    body = nil\n" +
+            "    food = nil\n\n" +
+            "    func reset():\n" +
+            "        self.dx = 1\n" +
+            "        self.dy = 0\n" +
+            "        self.next_dx = 1\n" +
+            "        self.next_dy = 0\n" +
+            "        self.score = 0\n" +
+            "        self.alive = true\n" +
+            "        self.timer = 0.0\n" +
+            "        self.step_time = 0.14\n" +
+            "        cx = math.floor(self.cols / 2)\n" +
+            "        cy = math.floor(self.rows / 2)\n" +
+            "        self.body = {\n" +
+            "            Cell({x = cx, y = cy}),\n" +
+            "            Cell({x = cx - 1, y = cy}),\n" +
+            "            Cell({x = cx - 2, y = cy})\n" +
+            "        }\n" +
+            "        self:spawn_food()\n\n" +
+            "    func spawn_food():\n" +
+            "        for attempt = 1, 200:\n" +
+            "            fx = math.random(0, self.cols - 1)\n" +
+            "            fy = math.random(0, self.rows - 1)\n" +
+            "            free = true\n" +
+            "            for i = 1, #self.body:\n" +
+            "                if self.body[i].x == fx and self.body[i].y == fy:\n" +
+            "                    free = false\n" +
+            "                    break\n" +
+            "            if free:\n" +
+            "                self.food = Cell({x = fx, y = fy})\n" +
+            "                return\n" +
+            "        self.food = Cell({x = 0, y = 0})\n\n" +
+            "    func set_dir(int ndx, int ndy):\n" +
+            "        if ndx == -self.dx and ndy == -self.dy:\n" +
+            "            return\n" +
+            "        self.next_dx = ndx\n" +
+            "        self.next_dy = ndy\n\n" +
+            "    func step(float dt):\n" +
+            "        if not self.alive:\n" +
+            "            return\n" +
+            "        self.timer += dt\n" +
+            "        if self.timer < self.step_time:\n" +
+            "            return\n" +
+            "        self.timer -= self.step_time\n" +
+            "        self.dx = self.next_dx\n" +
+            "        self.dy = self.next_dy\n" +
+            "        head = self.body[1]\n" +
+            "        nx = head.x + self.dx\n" +
+            "        ny = head.y + self.dy\n" +
+            "        if nx < 0 or nx >= self.cols or ny < 0 or ny >= self.rows:\n" +
+            "            self.alive = false\n" +
+            "            return\n" +
+            "        ate = self.food and nx == self.food.x and ny == self.food.y\n" +
+            "        limit = ate and #self.body or (#self.body - 1)\n" +
+            "        for i = 1, limit:\n" +
+            "            if self.body[i].x == nx and self.body[i].y == ny:\n" +
+            "                self.alive = false\n" +
+            "                return\n" +
+            "        table.insert(self.body, 1, Cell({x = nx, y = ny}))\n" +
+            "        if ate:\n" +
+            "            self.score += 1\n" +
+            "            if self.score > self.best:\n" +
+            "                self.best = self.score\n" +
+            "            if self.step_time > 0.065:\n" +
+            "                self.step_time -= 0.004\n" +
+            "            self:spawn_food()\n" +
+            "        else:\n" +
+            "            table.remove(self.body)\n\n" +
+            "return {SnakeGame = SnakeGame, Cell = Cell}\n");
+        return project;
+    }
+
     File createProject(String requested) throws IOException {
         String name = safeName(requested, "Project");
         File project = unique(root, name);
         if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) throw new IOException("Cannot create project folders");
         write(new File(project, "main.lua"),
-            "-- LuaC 0.5 project: indentation blocks, classes, types, direct graphics\n" +
-            "player = require('scripts.player')\n\n" +
-            "world = engine.world()\n" +
-            "sprite = load_sprite('assets/luac_logo.png')\n" +
-            "hero = player.Player({x = 120.0, y = 180.0, vx = 140.0, vy = 110.0})\n" +
-            "score = 0\n\n" +
+            "-- " + name + " (LuaC LÖVE2D-style blank canvas)\n" +
+            "x = 120.0\n" +
+            "y = 180.0\n\n" +
             "func update(float dt):\n" +
-            "    hero:step(dt, 480.0, 560.0)\n" +
-            "    x, y = engine.touch_pos(world, 0)\n" +
-            "    if x:\n" +
-            "        hero.x += (x + 240.0 - hero.x) * 6.0 * dt\n" +
-            "        hero.y += (y + 280.0 - hero.y) * 6.0 * dt\n\n" +
+            "    x += 60.0 * dt\n" +
+            "    if x > screen_width():\n" +
+            "        x = -48.0\n\n" +
             "func draw():\n" +
-            "    clear_screen(0.05, 0.08, 0.13, 1.0)\n" +
-            "    draw_rect(24, 96, 432, 432, 0.09, 0.14, 0.22, 1.0)\n" +
-            "    draw_sprite(sprite, hero.x, hero.y, 72, 72, 0.0)\n" +
-            "    draw_circle(hero.x + 36, hero.y + 36, 8, 0.3, 0.9, 0.7, 0.85)\n" +
-            "    draw_text('LuaC Studio • ' .. (projectName or 'Project'), 24, 24, 22, 1, 1, 1, 1)\n" +
-            "    draw_text('Touch to steer • indentation + class syntax', 24, 56, 15, 0.7, 0.85, 1, 1)\n\n" +
-            "print('Project started:', projectName or 'LuaC')\n");
-        write(new File(project, "scripts/player.lua"),
-            "struct Vec2:\n" +
-            "    float x = 0.0\n" +
-            "    float y = 0.0\n\n" +
-            "class Player(Vec2):\n" +
-            "    float vx = 120.0\n" +
-            "    float vy = 90.0\n" +
-            "    func step(float dt, float max_w, float max_h):\n" +
-            "        self.x += self.vx * dt\n" +
-            "        self.y += self.vy * dt\n" +
-            "        if self.x < 24 or self.x > max_w - 96:\n" +
-            "            self.vx = -self.vx\n" +
-            "        if self.y < 96 or self.y > max_h - 72:\n" +
-            "            self.vy = -self.vy\n\n" +
-            "return {Player = Player, Vec2 = Vec2}\n");
-        write(new File(project, "project.lua"),
-            "-- Optional project settings are ordinary Lua files.\n" +
-            "projectName = " + luaString(project.getName()) + "\n");
-        // Load optional settings before main through a small generated prelude.
-        File main = new File(project, "main.lua");
-        String source = read(main);
-        write(main, "require('project')\n" + source);
-        write(new File(project, "assets/README.txt"),
-            "Import PNG or JPG files with ASSET+. Paths are relative to the project:\n" +
-            "engine.load_texture('assets/luac_logo.png')\n");
-        copyLogo(new File(project, "assets/luac_logo.png"));
+            "    clear_screen(0.0, 0.0, 0.0, 1.0)\n" +
+            "    draw_rect(x, y, 48, 48, 0.25, 0.90, 0.65, 1.0)\n");
         return project;
-    }
-
-    private String luaString(String value) { return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"; }
-
-    private void copyLogo(File destination) throws IOException {
-        try (InputStream input = context.getResources().openRawResource(R.drawable.luac_logo)) {
-            copy(input, destination);
-        }
     }
 
     List<File> children(File directory) {

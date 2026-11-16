@@ -42,6 +42,7 @@ public final class MainActivity extends AppCompatActivity {
     private static native String nativeVersion();
     private static native String nativeOpenProject(String root);
     private static native String nativeStepProject(double dt);
+    private static native void nativeSetViewport(int width, int height);
     private static native void nativeTouchProject(int id, double x, double y, boolean down);
     private static native void nativeCloseProject();
     private static native boolean nativeVulkanCreate(android.view.Surface surface);
@@ -74,7 +75,7 @@ public final class MainActivity extends AppCompatActivity {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES);
         super.onCreate(state);
         store = new ProjectStore(this);
-        try { if (store.projects().isEmpty()) store.createProject("Demo"); }
+        try { if (store.projects().isEmpty()) store.createSnakeProject("Змейка"); }
         catch (Exception error) { toast(error); }
         showProjects();
     }
@@ -287,6 +288,8 @@ public final class MainActivity extends AppCompatActivity {
         });
         runtimeView = new RuntimeView(this, selected, (id, x, y, down) -> {
             if (running) nativeTouchProject(id, x, y, down);
+        }, (w, h) -> {
+            if (running) nativeSetViewport(w, h);
         });
         FrameLayout game = findViewById(R.id.game);
         game.addView(runtimeView, new FrameLayout.LayoutParams(-1, -1));

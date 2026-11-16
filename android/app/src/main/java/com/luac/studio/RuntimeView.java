@@ -17,21 +17,29 @@ import org.json.JSONObject;
 
 final class RuntimeView extends View {
     interface TouchSink { void touch(int id, double x, double y, boolean down); }
+    interface ViewportSink { void resize(int width, int height); }
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final File project;
     private final TouchSink touchSink;
+    private final ViewportSink viewportSink;
     private final HashMap<String, Bitmap> textures = new HashMap<>();
     private final HashSet<String> missingTextures = new HashSet<>();
     private JSONObject frame;
     private double cameraX, cameraY, zoom = 1;
 
-    RuntimeView(Context context, File project, TouchSink touchSink) {
+    RuntimeView(Context context, File project, TouchSink touchSink, ViewportSink viewportSink) {
         super(context);
         this.project = project;
         this.touchSink = touchSink;
-        setBackgroundColor(Color.rgb(7, 13, 20));
+        this.viewportSink = viewportSink;
+        setBackgroundColor(Color.BLACK);
         setFocusable(true);
+    }
+
+    @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        if (viewportSink != null && w > 0 && h > 0) viewportSink.resize(w, h);
     }
 
     void setFrame(JSONObject value) {
@@ -58,20 +66,9 @@ final class RuntimeView extends View {
         if (clearColor != null && clearColor.length() >= 3) {
             canvas.drawColor(color(clearColor));
         } else {
-            canvas.drawColor(Color.rgb(7, 13, 20));
-            paint.setStrokeWidth(1);
-            paint.setColor(Color.rgb(14, 29, 40));
-            float grid = (float) (48 * zoom);
-            if (grid >= 12) {
-                float startX = screenX(Math.floor(cameraX / 48 - getWidth() / zoom / 96) * 48);
-                float startY = screenY(Math.floor(cameraY / 48 - getHeight() / zoom / 96) * 48);
-                for (float x = startX; x < getWidth(); x += grid) canvas.drawLine(x, 0, x, getHeight(), paint);
-                for (float y = startY; y < getHeight(); y += grid) canvas.drawLine(0, y, getWidth(), y, paint);
-            }
+            canvas.drawColor(Color.BLACK);
         }
         if (frame == null) {
-            paint.setColor(Color.LTGRAY); paint.setTextSize(18);
-            canvas.drawText("Starting project…", 24, 42, paint);
             return;
         }
         JSONArray entities = frame.optJSONArray("entities");
@@ -185,13 +182,21 @@ final class RuntimeView extends View {
     @Override public boolean onTouchEvent(MotionEvent event) {
         int action = event.getActionMasked();
         int index = event.getActionIndex();
+        JSONArray entities = frame != null ? frame.optJSONArray("entities") : null;
+        JSONArray drawCmds = frame != null ? frame.optJSONArray("draw_cmds") : null;
+        boolean useWorldCoords = entities != null && entities.length() > 0 && (drawCmds == null || drawCmds.length() == 0);
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_MOVE) {
             int start = action == MotionEvent.ACTION_MOVE ? 0 : index;
             int end = action == MotionEvent.ACTION_MOVE ? event.getPointerCount() : index + 1;
-            for (int pointer = start; pointer < end; ++pointer)
-                touchSink.touch(event.getPointerId(pointer), worldX(event.getX(pointer)), worldY(event.getY(pointer)), true);
+            for (int pointer = start; pointer < end; ++pointer) {
+                double tx = useWorldCoords ? worldX(event.getX(pointer)) : event.getX(pointer);
+                double ty = useWorldCoords ? worldY(event.getY(pointer)) : event.getY(pointer);
+                touchSink.touch(event.getPointerId(pointer), tx, ty, true);
+            }
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_CANCEL) {
-            touchSink.touch(event.getPointerId(index), worldX(event.getX(index)), worldY(event.getY(index)), false);
+            double tx = useWorldCoords ? worldX(event.getX(index)) : event.getX(index);
+            double ty = useWorldCoords ? worldY(event.getY(index)) : event.getY(index);
+            touchSink.touch(event.getPointerId(index), tx, ty, false);
         }
         return true;
     }

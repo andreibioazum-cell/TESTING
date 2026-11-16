@@ -874,9 +874,7 @@ static Symbol global_symbol={"","",SYM_GLOBAL,0};
 static void cf_temp(Cf*f){f->temp_id++;}
 static char *cf_new_temp(Cf*f){
     char buf[32],*name;
-    snprintf(buf,sizeof(buf),"t%d",f->temp_id++);
-    sb_printf(&f->decl,"    LcValue %s = {0};\n",buf);
-    sb_printf(&f->cleanup,"    LC_RELEASE(ctx, %s);\n",buf);
+    snprintf(buf,sizeof(buf),"lc_slots[%d]",f->temp_id++);
     name=xstrdup(buf);
     f->temps=xrealloc(f->temps,sizeof(char*)*(size_t)(f->ntemps+1));
     f->temps[f->ntemps++]=name;
@@ -906,10 +904,8 @@ static int cf_is_explicit_global(Cf *f, const char *name) {
     return 0;
 }
 static Symbol *cf_local(Cf*f,const char*name,int declare){
-    Symbol*s=xmalloc(sizeof(*s));char buf[32];s->name=xstrdup(name);s->kind=SYM_LOCAL;s->vtype=0;snprintf(buf,sizeof(buf),"l%d",f->local_id++);s->cname=xstrdup(buf);
+    Symbol*s=xmalloc(sizeof(*s));char buf[32];s->name=xstrdup(name);s->kind=SYM_LOCAL;s->vtype=0;snprintf(buf,sizeof(buf),"lc_cells[%d]",f->local_id++);s->cname=xstrdup(buf);
     f->all=xrealloc(f->all,sizeof(Symbol*)*(size_t)(f->nall+1));f->all[f->nall++]=s;
-    sb_printf(&f->decl,"    LcCell *%s = NULL;\n",s->cname);
-    sb_printf(&f->cleanup,"    if (%s) { lc_cell_release(ctx, %s); %s = NULL; }\n",s->cname,s->cname,s->cname);
     if(declare){f->locals=xrealloc(f->locals,sizeof(Symbol*)*(size_t)(f->nlocals+1));f->locals[f->nlocals++]=s;}
     return s;
 }
@@ -920,7 +916,7 @@ static Symbol *cf_resolve(Cf*f,const char*name){
     if(f->parent){Symbol*p=cf_resolve(f->parent,name);if(p->kind!=SYM_GLOBAL){for(i=0;i<f->ncaps;++i)if(f->caps[i].source==p)return f->caps[i].symbol;f->caps=xrealloc(f->caps,sizeof(Capture)*(size_t)(f->ncaps+1));{Symbol*s=xmalloc(sizeof(*s));char buf[64];s->name=xstrdup(name);s->kind=SYM_UPVALUE;s->vtype=p->vtype;snprintf(buf,sizeof(buf),"self->upvalues[%d]",f->ncaps);s->cname=xstrdup(buf);f->caps[f->ncaps].source=p;f->caps[f->ncaps].symbol=s;++f->ncaps;return s;}}}
     return &global_symbol;
 }
-static void cg_release(Cf*f,const char*t){sb_printf(&f->body,"    LC_RELEASE(ctx, %s);\n",t);}
+static void cg_release(Cf*f,const char*t){sb_printf(&f->body,"    %s.type = 0;\n",t);}
 static void cg_check(Cf*f){sb_add(&f->body,"    if (ctx->error) goto lc_done;\n");}
 static char *cg_expr(Cf*f,Expr*e);
 static char *cg_function(Cf*parent,Expr*e,const char*name);
@@ -936,7 +932,7 @@ static char *cg_expr(Cf*f,Expr*e){
         case E_NUMBER:t=cf_new_temp(f);if(e->is_integer)sb_printf(&f->body,"    %s = lc_integer((int64_t)%" PRId64 ");\n",t,e->integer);else sb_printf(&f->body,"    %s = lc_number(%.17g);\n",t,e->number);return t;
         case E_STRING:t=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_string_n(ctx, \"",t);{const unsigned char*p=(unsigned char*)e->name;for(;p&&*p;++p){if(*p=='\\'||*p=='\"')sb_printf(&f->body,"\\%c",*p);else if(*p=='\n')sb_add(&f->body,"\\n");else if(*p=='\r')sb_add(&f->body,"\\r");else if(*p=='\t')sb_add(&f->body,"\\t");else if(*p<32||*p>126)sb_printf(&f->body,"\\%03o",*p);else sb_n(&f->body,(const char*)p,1);}}sb_printf(&f->body,"\", %zu);\n",strlen(e->name));return t;
         case E_VAR:return cg_var(f,e);
-        case E_VARARG:t=cf_new_temp(f);if(!f->vararg){f->cg->failed=1;fprintf(stderr,"%s:%d: cannot use '...' outside a vararg function\n",f->cg->parser->filename,e->line);sb_printf(&f->body,"    %s = lc_nil();\n",t);}else sb_printf(&f->body,"    %s = lc_retain(lc_varargs);\n",t);return t;
+        case E_VARARG:t=cf_new_temp(f);if(!f->vararg){f->cg->failed=1;fprintf(stderr,"%s:%d: cannot use '...' outside a vararg function\n",f->cg->parser->filename,e->line);sb_printf(&f->body,"    %s = lc_nil();\n",t);}else sb_printf(&f->body,"    %s = lc_slots[0];\n",t);return t;
         case E_UNARY:
             a=cg_expr(f,e->a);t=cf_new_temp(f);if(e->op==3)sb_printf(&f->body,"    %s = lc_first(%s);\n",t,a);else sb_printf(&f->body,"    %s = lc_unary(ctx, %d, %s);\n",t,e->op,a);cg_release(f,a);return t;
         case E_BINARY:
@@ -1006,7 +1002,7 @@ static void cg_stmt(Cf*f,Stmt*s){
                 char *bk = cf_new_temp(f), *bfn = cf_new_temp(f);
                 sb_printf(&f->body,"        %s = lc_string(ctx, \"%s\");\n",bk,bname);
                 sb_printf(&f->body,"        %s = lc_table_get(ctx, ctx->globals, %s);\n",bfn,bk);
-                sb_printf(&f->body,"        if (%s.type == LC_FUNCTION && %s.as.function->upvalue_count > 0) base_desc = (LcStructDesc *)%s.as.function->upvalues[0];\n",bfn,bfn,bfn);
+                sb_printf(&f->body,"        if (%s.type == LC_FUNCTION) base_desc = %s.as.function->struct_desc;\n",bfn,bfn);
                 cg_release(f,bk); cg_release(f,bfn);
             }
             sb_printf(&f->body,"        desc = lc_struct_desc_new(ctx, \"%s\", base_desc, %d, %d);\n",sname,s->nfields,s->nexprs);
@@ -1092,16 +1088,16 @@ static void cg_stmt(Cf*f,Stmt*s){
         case S_IF:
             cg_if_branch(f,s,0);
             break;
-        case S_WHILE:sb_add(&f->body,"    for (;;) {\n");t=cg_expr(f,s->expr);sb_printf(&f->body,"    if (!lc_truthy(%s)) { LC_RELEASE(ctx, %s); break; }\n",t,t);cg_release(f,t);++f->loop_depth;cg_stmts(f,s->body);--f->loop_depth;sb_add(&f->body,"    }\n");break;
-        case S_REPEAT:{int mark=cg_mark(f);Stmt*it;sb_add(&f->body,"    for (;;) {\n");++f->loop_depth;for(it=s->body;it;it=it->next)cg_stmt(f,it);t=cg_expr(f,s->expr);--f->loop_depth;sb_printf(&f->body,"    if (lc_truthy(%s)) { LC_RELEASE(ctx, %s); break; }\n",t,t);cg_release(f,t);sb_add(&f->body,"    }\n");f->nlocals=mark;break;}
+        case S_WHILE:sb_add(&f->body,"    for (;;) {\n    lc_gc_check(ctx);\n");t=cg_expr(f,s->expr);sb_printf(&f->body,"    if (!lc_truthy(%s)) break;\n",t);cg_release(f,t);++f->loop_depth;cg_stmts(f,s->body);--f->loop_depth;sb_add(&f->body,"    }\n");break;
+        case S_REPEAT:{int mark=cg_mark(f);Stmt*it;sb_add(&f->body,"    for (;;) {\n    lc_gc_check(ctx);\n");++f->loop_depth;for(it=s->body;it;it=it->next)cg_stmt(f,it);t=cg_expr(f,s->expr);--f->loop_depth;sb_printf(&f->body,"    if (lc_truthy(%s)) break;\n",t);cg_release(f,t);sb_add(&f->body,"    }\n");f->nlocals=mark;break;}
         case S_DO:sb_add(&f->body,"    {\n");cg_stmts(f,s->body);sb_add(&f->body,"    }\n");break;
         case S_FORNUM:{
             int mark=cg_mark(f);
             char*start=cg_expr(f,s->expr),*limit=cg_expr(f,s->expr2),*step=s->expr3?cg_expr(f,s->expr3):NULL;Symbol*var=cf_local(f,s->names[0],1);char*id=xstrdup(var->cname);
             if(!step){step=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_number(1);\n",step);}
-            sb_printf(&f->body,"    { double start_%s = lc_to_number(ctx, %s, &(int){0});\n      double limit_%s = lc_to_number(ctx, %s, &(int){0});\n      double step_%s = lc_to_number(ctx, %s, &(int){0});\n      double i_%s;\n",id,start,id,limit,id,step,id);
-            sb_printf(&f->body,"      for (i_%s = start_%s; (step_%s >= 0 ? i_%s <= limit_%s : i_%s >= limit_%s); i_%s += step_%s) {\n",id,id,id,id,id,id,id,id,id);
-            sb_printf(&f->body,"        lc_cell_replace(ctx, &%s, lc_number(i_%s));\n",id,id);++f->loop_depth;cg_stmts(f,s->body);--f->loop_depth;sb_add(&f->body,"    } }\n");cg_release(f,start);cg_release(f,limit);cg_release(f,step);free(id);f->nlocals=mark;break;}
+            sb_printf(&f->body,"    { double start_%d = lc_to_number(ctx, %s, &(int){0});\n      double limit_%d = lc_to_number(ctx, %s, &(int){0});\n      double step_%d = lc_to_number(ctx, %s, &(int){0});\n      double i_%d;\n",f->local_id,start,f->local_id,limit,f->local_id,step,f->local_id);
+            sb_printf(&f->body,"      for (i_%d = start_%d; (step_%d >= 0 ? i_%d <= limit_%d : i_%d >= limit_%d); i_%d += step_%d) {\n",f->local_id,f->local_id,f->local_id,f->local_id,f->local_id,f->local_id,f->local_id,f->local_id,f->local_id);
+            sb_printf(&f->body,"        lc_gc_check(ctx); lc_cell_replace(ctx, &%s, lc_number(i_%d));\n",id,f->local_id);++f->loop_depth;cg_stmts(f,s->body);--f->loop_depth;sb_add(&f->body,"    } }\n");cg_release(f,start);cg_release(f,limit);cg_release(f,step);free(id);f->nlocals=mark;break;}
         case S_FORIN:{
             int mark=cg_mark(f);
             Stmt tmp;memset(&tmp,0,sizeof(tmp));tmp.exprs=s->exprs;tmp.nexprs=s->nexprs;tmp.nnames=3;
@@ -1110,8 +1106,8 @@ static void cg_stmt(Cf*f,Stmt*s){
              for(i=0;i<3;++i){int ri=i<s->nexprs-1?i:s->nexprs-1,idx=i<s->nexprs-1?0:i-(s->nexprs-1);vals[i]=cf_new_temp(f);if(ri<0)sb_printf(&f->body,"    %s = lc_nil();\n",vals[i]);else sb_printf(&f->body,"    %s = lc_nth(%s, %d);\n",vals[i],raw[ri],idx);}
              for(i=0;i<s->nexprs;++i){cg_release(f,raw[i]);}free(raw);
              /* Normalize iterator/state/control from the expression list. */
-             sb_add(&f->body,"    for (;;) {\n");t=cf_new_temp(f);sb_printf(&f->body,"    { LcValue args[] = { %s, %s }; %s = lc_call_list(ctx, %s, 2, args); }\n",vals[1],vals[2],t,vals[0]);
-             {char*first=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_nth(%s, 0);\n",first,t);sb_printf(&f->body,"    if (%s.type == LC_NIL) { LC_RELEASE(ctx, %s); break; }\n",first,first);cg_release(f,vals[2]);sb_printf(&f->body,"    %s = lc_retain(%s);\n",vals[2],first);cg_release(f,first);}
+             sb_add(&f->body,"    for (;;) {\n    lc_gc_check(ctx);\n");t=cf_new_temp(f);sb_printf(&f->body,"    { LcValue args[] = { %s, %s }; %s = lc_call_list(ctx, %s, 2, args); }\n",vals[1],vals[2],t,vals[0]);
+             {char*first=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_nth(%s, 0);\n",first,t);sb_printf(&f->body,"    if (%s.type == LC_NIL) break;\n",first);sb_printf(&f->body,"    %s = %s;\n",vals[2],first);}
              for(i=0;i<s->nnames;++i){Symbol*var=cf_local(f,s->names[i],1);char*v=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_nth(%s, %d);\n",v,t,i);sb_printf(&f->body,"    lc_cell_replace(ctx, &%s, %s); %s = lc_nil();\n",var->cname,v,v);}
              cg_release(f,t);++f->loop_depth;cg_stmts(f,s->body);--f->loop_depth;sb_add(&f->body,"    }\n");for(i=0;i<3;++i){cg_release(f,vals[i]);}free(vals);}
             f->nlocals=mark;break;}
@@ -1131,17 +1127,26 @@ static void cg_stmt(Cf*f,Stmt*s){
 }
 static void cg_stmts(Cf*f,Stmt*s){int mark=cg_mark(f);for(;s;s=s->next)cg_stmt(f,s);f->nlocals=mark;}
 
+static void cg_emit_frame_prologue(Str *out, Cf *f) {
+    int ns = f->temp_id > 0 ? f->temp_id : 1;
+    int nc = f->local_id > 0 ? f->local_id : 1;
+    sb_printf(out, "    LcValue lc_slots[%d];\n    LcCell *lc_cells[%d];\n    LcGcFrame lc_frame;\n", ns, nc);
+    sb_add(out, "    memset(lc_slots, 0, sizeof(lc_slots));\n    memset(lc_cells, 0, sizeof(lc_cells));\n");
+    sb_printf(out, "    lc_frame.prev = ctx->gc_frames; lc_frame.slots = lc_slots; lc_frame.slot_count = %d; lc_frame.cells = lc_cells; lc_frame.cell_count = %d; ctx->gc_frames = &lc_frame;\n",
+              f->temp_id, f->local_id);
+}
+
 static char *cg_function(Cf*parent,Expr*e,const char*name){
-    Cg*cg=parent->cg;Cf f;int i,id=++cg->function_id;char cname[64],*result;Str out;memset(&f,0,sizeof(f));f.cg=cg;f.parent=parent;f.vararg=e->flag;sb_init(&f.decl);sb_init(&f.body);sb_init(&f.cleanup);snprintf(cname,sizeof(cname),"lc_fn_%d",id);
+    Cg*cg=parent->cg;Cf f;int i,id=++cg->function_id;char cname[64],*result;Str out;memset(&f,0,sizeof(f));f.cg=cg;f.parent=parent;f.vararg=e->flag;if(e->flag)f.temp_id=1;sb_init(&f.decl);sb_init(&f.body);sb_init(&f.cleanup);snprintf(cname,sizeof(cname),"lc_fn_%d",id);
     for(i=0;i<e->nparams;++i){Symbol*s=cf_local(&f,e->params[i],1);int pt=(e->param_types?e->param_types[i]:0);s->vtype=pt;if(pt)sb_printf(&f.body,"    lc_cell_replace(ctx, &%s, lc_check_type(ctx, %d < argc ? lc_first(argv[%d]) : lc_nil(), %d, \"%s\"));\n",s->cname,i,i,pt,s->name);else sb_printf(&f.body,"    lc_cell_replace(ctx, &%s, %d < argc ? lc_first(argv[%d]) : lc_nil());\n",s->cname,i,i);}
-    if(e->flag)sb_add(&f.body,"    { int n = argc > LC_PARAM_COUNT ? argc - LC_PARAM_COUNT : 0; lc_varargs = lc_tuple_new(ctx, n, argv + LC_PARAM_COUNT, 0); }\n");
+    if(e->flag)sb_add(&f.body,"    { int n = argc > LC_PARAM_COUNT ? argc - LC_PARAM_COUNT : 0; lc_slots[0] = lc_tuple_new(ctx, n, argv + LC_PARAM_COUNT, 0); }\n");
     cg_stmts(&f,e->body);
     sb_init(&out);sb_printf(&out,"static LcValue %s(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {\n",cname);
+    cg_emit_frame_prologue(&out, &f);
     sb_add(&out,f.decl.data?f.decl.data:"");
-    if(e->flag)sb_add(&out,"    LcValue lc_varargs = {0};\n");
-    sb_add(&out,"    LcValue lc_return_value = {0};\n    (void)self;\n");
+    sb_add(&out,"    LcValue lc_return_value = {0};\n    (void)self; (void)argc; (void)argv;\n");
     if(f.body.data&&e->flag){const char*src=f.body.data;while(*src){const char*hit=strstr(src,"LC_PARAM_COUNT");if(!hit){sb_add(&out,src);break;}sb_n(&out,src,(size_t)(hit-src));sb_printf(&out,"%d",e->nparams);src=hit+strlen("LC_PARAM_COUNT");}}else sb_add(&out,f.body.data?f.body.data:"");
-    sb_add(&out,"lc_done:\n");if(e->flag)sb_add(&out,"    LC_RELEASE(ctx, lc_varargs);\n");sb_add(&out,f.cleanup.data?f.cleanup.data:"");sb_add(&out,"    return lc_return_value;\n}\n\n");
+    sb_add(&out,"lc_done:\n    ctx->gc_frames = lc_frame.prev;\n");sb_add(&out,f.cleanup.data?f.cleanup.data:"");sb_add(&out,"    return lc_return_value;\n}\n\n");
     sb_add(&cg->functions,out.data);sb_free(&out);
     result=cf_new_temp(parent);if(f.ncaps){sb_printf(&parent->body,"    { LcCell *caps[] = { ");for(i=0;i<f.ncaps;++i)sb_printf(&parent->body,"%s%s",i?", ":"",f.caps[i].source->cname);sb_printf(&parent->body," };\n      %s = lc_function_new(ctx, %s, %d, caps, \"%s\"); }\n",result,cname,f.ncaps,name);}else sb_printf(&parent->body,"    %s = lc_function_new(ctx, %s, 0, NULL, \"%s\");\n",result,cname,name);
     cf_dispose(&f);
@@ -1320,10 +1325,11 @@ static void generate_disk_module(Cg *cg, DiskModule *module) {
     Cf root; cg->parser = &module->parser; memset(&root, 0, sizeof(root)); root.cg = cg;
     sb_init(&root.decl); sb_init(&root.body); sb_init(&root.cleanup); cg_stmts(&root, module->program);
     sb_printf(&cg->functions, "static LcValue lc_disk_module_%d(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {\n", module->id);
+    cg_emit_frame_prologue(&cg->functions, &root);
     sb_add(&cg->functions, root.decl.data ? root.decl.data : "");
     sb_add(&cg->functions, "    LcValue lc_return_value = {0};\n    (void)self; (void)argc; (void)argv;\n");
     sb_add(&cg->functions, root.body.data ? root.body.data : "");
-    sb_add(&cg->functions, "lc_done:\n"); sb_add(&cg->functions, root.cleanup.data ? root.cleanup.data : "");
+    sb_add(&cg->functions, "lc_done:\n    ctx->gc_frames = lc_frame.prev;\n"); sb_add(&cg->functions, root.cleanup.data ? root.cleanup.data : "");
     sb_add(&cg->functions, "    return lc_return_value;\n}\n\n"); cf_dispose(&root);
 }
 static void dispose_disk_modules(ModuleBuild *build) {
@@ -1344,13 +1350,13 @@ static char *generate_c(Parser*p,Stmt*program,const char*source){
     cg.parser=p;
     memset(&root,0,sizeof(root));root.cg=&cg;sb_init(&root.decl);sb_init(&root.body);sb_init(&root.cleanup);memset(&mainexpr,0,sizeof(mainexpr));mainexpr.kind=E_FUNCTION;mainexpr.body=program;mainexpr.line=1;
     /* Root has no parent and acts as the main native function. */
-    {Cf*f=&root;f->vararg=0;cg_stmts(f,program);sb_init(&out);sb_add(&out,"/* Generated by LuaC. Ownership cleanup is emitted automatically. */\n#include \"");
+    {Cf*f=&root;f->vararg=0;cg_stmts(f,program);sb_init(&out);sb_add(&out,"/* Generated by LuaC. Incremental GC shadow frames are emitted automatically. */\n#include \"");
     sb_add(&out,runtime_header_path());
-    sb_add(&out,"\"\n\n#ifndef LC_RELEASE\n#define LC_RELEASE(ctx, v) do { lc_release((ctx), (v)); (v) = lc_nil(); } while (0)\n#endif\n\n");sb_add(&out,cg.functions.data?cg.functions.data:"");sb_add(&out,"static LcValue lc_user_main(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {\n");sb_add(&out,f->decl.data?f->decl.data:"");sb_add(&out,"    LcValue lc_return_value = {0};\n    (void)self; (void)argc; (void)argv;\n");sb_add(&out,f->body.data?f->body.data:"");sb_add(&out,"lc_done:\n");sb_add(&out,f->cleanup.data?f->cleanup.data:"");sb_add(&out,"    return lc_return_value;\n}\n\n");
-    sb_add(&out,"int lc_program_main(LcContext *ctx) {\n    LcValue r;\n");
+    sb_add(&out,"\"\n\n");sb_add(&out,cg.functions.data?cg.functions.data:"");sb_add(&out,"static LcValue lc_user_main(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {\n");cg_emit_frame_prologue(&out, f);sb_add(&out,f->decl.data?f->decl.data:"");sb_add(&out,"    LcValue lc_return_value = {0};\n    (void)self; (void)argc; (void)argv;\n");sb_add(&out,f->body.data?f->body.data:"");sb_add(&out,"lc_done:\n    ctx->gc_frames = lc_frame.prev;\n");sb_add(&out,f->cleanup.data?f->cleanup.data:"");sb_add(&out,"    return lc_return_value;\n}\n\n");
+    sb_add(&out,"int lc_program_main(LcContext *ctx) {\n");
     for(i=0;i<modules.count;++i){int j;sb_printf(&out,"    lc_preload_native(ctx, \"");
         for(j=0;modules.items[i].name[j];++j){char c=modules.items[i].name[j];if(c=='\\'||c=='\"')sb_printf(&out,"\\%c",c);else sb_n(&out,&c,1);}sb_printf(&out,"\", lc_disk_module_%d);\n",modules.items[i].id);}
-    sb_add(&out,"    r = lc_user_main(ctx, NULL, 0, NULL);\n    lc_release(ctx, r);\n    return lc_report_error(ctx);\n}\n\n#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\nint lc_jit_main(void) {\n    LcContext *ctx = lc_context_new(\"");sb_add(&out,source);sb_add(&out,"\");\n    int status;\n    if (!ctx) return 1;\n    status = lc_program_main(ctx);\n    lc_context_destroy(ctx);\n    return status;\n}\n\n#ifdef LUAC_STANDALONE\nint main(void) { return lc_jit_main(); }\n#endif\n");}
+    sb_add(&out,"    (void)lc_user_main(ctx, NULL, 0, NULL);\n    return lc_report_error(ctx);\n}\n\n#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\nint lc_jit_main(void) {\n    LcContext *ctx = lc_context_new(\"");sb_add(&out,source);sb_add(&out,"\");\n    int status;\n    if (!ctx) return 1;\n    status = lc_program_main(ctx);\n    lc_context_destroy(ctx);\n    return status;\n}\n\n#ifdef LUAC_STANDALONE\nint main(void) { return lc_jit_main(); }\n#endif\n");}
     entry=out.data;cf_dispose(&root);sb_free(&cg.functions);dispose_disk_modules(&modules);cg_free_top_globals(&cg);(void)entry;
     if(cg.failed){sb_free(&out);return NULL;}
     return out.data;
@@ -1365,7 +1371,7 @@ static void api_parse(Parser *p, const char *source, const char *filename, Stmt 
 }
 
 #ifdef LUAC_EMBEDDED_RUNTIME
-#include "luac_interpreter.h"
+#include "luac_jit.h"
 #endif
 
 LUAC_API char *luac_compile_c(const char *source, const char *filename, char **error_message) {
@@ -1466,7 +1472,7 @@ static int run_command(const char*cmd){int r=system(cmd);if(r==-1)return -1;retu
 #ifndef LUAC_DEFAULT_LDFLAGS
 #define LUAC_DEFAULT_LDFLAGS ""
 #endif
-static void usage(void){puts("LuaC "LUAC_VERSION" — Native compiler with arena memory, structs/classes, and direct graphics\n\nUsage:\n  luac file.lua              JIT compile and run\n  luac --check file.lua      Parse and validate\n  luac --emit-c file.lua [-o out.c]\n  luac --aot file.lua -o program\n\nOptions: --cc COMPILER  --cflags FLAGS  --ldflags FLAGS  --keep-c PATH  --version\nEnvironment: CC, LUAC_CFLAGS and LUAC_LDFLAGS append native compiler flags.");}
+static void usage(void){puts("LuaC "LUAC_VERSION" — Native compiler with incremental GC, structs/classes, and direct graphics\n\nUsage:\n  luac file.lua              JIT compile and run\n  luac --check file.lua      Parse and validate\n  luac --emit-c file.lua [-o out.c]\n  luac --aot file.lua -o program\n\nOptions: --cc COMPILER  --cflags FLAGS  --ldflags FLAGS  --keep-c PATH  --version\nEnvironment: CC, LUAC_CFLAGS and LUAC_LDFLAGS append native compiler flags.");}
 
 int main(int argc,char**argv){
     const char*input=NULL,*output=NULL,*keep=NULL,*cc=getenv("CC");Str extra_cflags,extra_ldflags;sb_init(&extra_cflags);sb_init(&extra_ldflags);sb_add(&extra_cflags,LUAC_DEFAULT_CFLAGS);sb_add(&extra_ldflags,LUAC_DEFAULT_LDFLAGS);{const char*flags=getenv("LUAC_CFLAGS");if(flags){sb_add(&extra_cflags," ");sb_add(&extra_cflags,flags);}flags=getenv("LUAC_LDFLAGS");if(flags){sb_add(&extra_ldflags," ");sb_add(&extra_ldflags,flags);}}enum{MODE_JIT,MODE_CHECK,MODE_C,MODE_AOT}mode=MODE_JIT;int i,status=1;size_t length;char*source,*generated;Parser p;Stmt*program;

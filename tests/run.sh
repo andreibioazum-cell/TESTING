@@ -103,7 +103,7 @@ tests/.tmp/api-test
 ./luac --emit-c tests/game.lua -o tests/.tmp/game.c >/dev/null
 ./luac --emit-c tests/runtime.lua -o tests/.tmp/runtime.c >/dev/null
 grep -q 'lc_jit_main' tests/.tmp/demo.c
-grep -q 'LC_RELEASE' tests/.tmp/demo.c
+grep -q 'LcGcFrame' tests/.tmp/demo.c
 
 if ./luac --check tests/invalid.lua >/dev/null 2>&1; then
   echo 'invalid.lua was accepted' >&2

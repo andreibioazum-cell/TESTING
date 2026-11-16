@@ -45,7 +45,7 @@ Java_com_luac_studio_MainActivity_nativeCheck(JNIEnv *env, jclass, jstring sourc
     std::string code = fromJava(env, source);
     char *error = nullptr;
     int valid = luac_check(code.c_str(), "AndroidEditor.lua", &error);
-    std::string result = valid ? "Syntax OK\nNative C ready; runtime uses Arena memory, classes/structs, and direct graphics." : error;
+    std::string result = valid ? "Syntax OK\nNative machine-code JIT ready; tri-color incremental GC, classes/structs, and direct graphics." : error;
     luac_free(error);
     return env->NewStringUTF(result.c_str());
 }
@@ -85,6 +85,11 @@ Java_com_luac_studio_MainActivity_nativeStepProject(JNIEnv *env, jclass, jdouble
     jstring result = env->NewStringUTF(frame ? frame : "{\"ok\":false,\"error\":\"runtime failure\"}");
     luac_free(frame);
     return result;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_luac_studio_MainActivity_nativeSetViewport(JNIEnv *, jclass, jint width, jint height) {
+    if (projectHandle) luac_project_set_viewport(projectHandle, width, height);
 }
 
 extern "C" JNIEXPORT void JNICALL

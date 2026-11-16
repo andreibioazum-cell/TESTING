@@ -73,7 +73,7 @@ typedef struct LcFFILibrary LcFFILibrary;
 typedef struct LcWebsocket LcWebsocket;
 
 typedef enum {
-    LC_NIL = 0, LC_BOOL, LC_NUMBER, LC_INTEGER, LC_STRING, LC_TABLE, LC_FUNCTION, LC_TUPLE, LC_FILE, LC_SOCKET, LC_AUDIO, LC_COROUTINE, LC_FFI, LC_WEBSOCKET, LC_STRUCT
+    LC_NIL = 0, LC_BOOL, LC_NUMBER, LC_INTEGER, LC_STRING, LC_TABLE, LC_FUNCTION, LC_TUPLE, LC_FILE, LC_SOCKET, LC_AUDIO, LC_COROUTINE, LC_FFI, LC_WEBSOCKET, LC_STRUCT, LC_CELL
 } LcType;
 
 typedef enum {
@@ -95,6 +95,7 @@ typedef struct LcValue {
         LcStruct *strukt;
         LcFunction *function;
         LcTuple *tuple;
+        LcCell *cell;
         LcFile *file;
         LcSocket *socket;
         LcAudio *audio;
@@ -106,10 +107,37 @@ typedef struct LcValue {
 
 typedef LcValue (*LcNative)(LcContext *, LcFunction *, int, LcValue *);
 
-struct LcObject {
-    int kind;
-    LcObject *next;
+enum {
+    LC_GC_WHITE0 = 0x01,
+    LC_GC_WHITE1 = 0x02,
+    LC_GC_WHITES = 0x03,
+    LC_GC_BLACK  = 0x04,
+    LC_GC_FIXED  = 0x08
 };
+
+typedef enum {
+    LC_GCS_PAUSE = 0,
+    LC_GCS_PROPAGATE,
+    LC_GCS_ATOMIC,
+    LC_GCS_SWEEP
+} LcGcState;
+
+struct LcObject {
+    uint8_t kind;
+    uint8_t marked;
+    uint16_t gc_flags;
+    uint32_t obj_size;
+    LcObject *next;
+    LcObject *gc_list;
+};
+
+typedef struct LcGcFrame {
+    struct LcGcFrame *prev;
+    LcValue *slots;
+    int slot_count;
+    LcCell **cells;
+    int cell_count;
+} LcGcFrame;
 
 struct LcCoroutine {
     LcObject object;
@@ -117,6 +145,8 @@ struct LcCoroutine {
     void *stack;
     size_t stack_size;
     int state, started;
+    LcGcFrame *saved_frames;
+    LcGcFrame *caller_frames;
 #ifdef _WIN32
     void *fiber, *caller_fiber;
 #elif defined(__ANDROID__)
@@ -158,6 +188,8 @@ struct LcFunction {
     const char *name;
     LcValue bound_self;
     int has_bound_self;
+    LcStructDesc *struct_desc;
+    void *jit_proto;
 };
 
 typedef struct {
@@ -174,6 +206,7 @@ struct LcStructDesc {
     const char **method_names;
     LcValue *methods;
     int method_count;
+    LcStructDesc *next;
 };
 
 struct LcStruct {
@@ -219,31 +252,20 @@ struct LcCell {
     LcValue value;
 };
 
-#define LC_ARENA_CHUNK_SIZE (4u * 1024u * 1024u)
+#define LC_SLAB_SIZE (64u * 1024u)
 
-typedef struct LcArenaBlock {
-    struct LcArenaBlock *prev;
-    size_t cap;
+typedef struct LcSlab {
+    struct LcSlab *next;
     size_t used;
-    char data[];
-} LcArenaBlock;
-
-typedef struct {
-    LcArenaBlock *head;
-    size_t total_allocated;
-} LcArena;
-
-typedef struct {
-    LcArenaBlock *block;
-    size_t used;
-} LcArenaMark;
+    char data[LC_SLAB_SIZE];
+} LcSlab;
 
 typedef struct {
     int kind; /* 0 = sprite, 1 = rect, 2 = circle, 3 = text */
     int sprite_id;
     double x, y, w, h, rot;
     double r, g, b, a;
-    const char *text;
+    char *text;
 } LcDrawCmd;
 
 typedef struct {
@@ -253,9 +275,32 @@ typedef struct {
 } LcSpriteAsset;
 
 struct LcContext {
-    LcArena arena;
-    LcArenaMark scene_mark;
-    LcObject *resources; /* OS handles only (file, socket, audio, coroutine, ffi, websocket). */
+    /* Lua-style incremental tri-color GC + size-classed slab allocator. */
+    LcObject *gc_all;
+    LcObject **gc_sweep;
+    LcObject *gc_gray;
+    LcObject *gc_gray_again;
+    LcObject *gc_weak_v;
+    LcObject *gc_weak_k;
+    LcObject *gc_weak_kv;
+    LcGcFrame *gc_frames;
+    LcValue *c_roots;
+    int c_root_count, c_root_cap;
+    LcSlab *slabs;
+    void *cell_free;
+    void *table_free;
+    void *fn_free;
+    size_t gc_bytes;
+    size_t gc_estimate;
+    size_t gc_threshold;
+    intptr_t gc_debt;
+    int gc_state;
+    uint8_t gc_current_white;
+    int gc_running;
+    int gc_pause;
+    int gc_stepmul;
+    LcStructDesc *struct_descs;
+
     LcCoroutine *active_coroutine;
     LcValue globals;
     LcValue string_library; /* Context-owned default __index for strings. */
@@ -278,6 +323,7 @@ struct LcContext {
     int sprite_count, sprite_cap;
     double bg_r, bg_g, bg_b;
     int has_bg;
+    int screen_w, screen_h;
     /* Optional embedder-owned print capture (Android project runner). */
     int warnings_enabled;
     int capture_output;
@@ -310,93 +356,6 @@ static void lc_websocket_dispose(LcWebsocket *websocket);
 static int lc_websocket_is_closed(LcWebsocket *websocket);
 static LcValue lc_websocket_socket(LcWebsocket *websocket);
 static void lc_websocket_clear_socket(LcWebsocket *websocket);
-
-static void *lc_arena_alloc(LcContext *ctx, size_t size) {
-    size_t aligned = (size + 7u) & ~(size_t)7u;
-    LcArenaBlock *b = ctx->arena.head;
-    if (aligned == 0) aligned = 8;
-    if (!b || b->used + aligned > b->cap) {
-        size_t cap = aligned > LC_ARENA_CHUNK_SIZE ? aligned : LC_ARENA_CHUNK_SIZE;
-        LcArenaBlock *nb = (LcArenaBlock *)malloc(sizeof(*nb) + cap);
-        if (!nb) { lc_error(ctx, "out of memory"); return NULL; }
-        nb->prev = b;
-        nb->cap = cap;
-        nb->used = 0;
-        ctx->arena.head = nb;
-        b = nb;
-    }
-    {
-        void *ptr = b->data + b->used;
-        b->used += aligned;
-        ctx->arena.total_allocated += aligned;
-        memset(ptr, 0, aligned);
-        return ptr;
-    }
-}
-
-static LcArenaMark lc_arena_mark(LcContext *ctx) {
-    LcArenaMark m;
-    m.block = ctx->arena.head;
-    m.used = ctx->arena.head ? ctx->arena.head->used : 0;
-    return m;
-}
-
-static void lc_arena_reset_to(LcContext *ctx, LcArenaMark mark) {
-    while (ctx->arena.head && ctx->arena.head != mark.block) {
-        LcArenaBlock *prev = ctx->arena.head->prev;
-        ctx->arena.total_allocated -= ctx->arena.head->used;
-        free(ctx->arena.head);
-        ctx->arena.head = prev;
-    }
-    if (ctx->arena.head) {
-        if (ctx->arena.head->used > mark.used)
-            ctx->arena.total_allocated -= (ctx->arena.head->used - mark.used);
-        ctx->arena.head->used = mark.used;
-    }
-}
-
-static void lc_arena_reset(LcContext *ctx) {
-    if (ctx->scene_mark.block) lc_arena_reset_to(ctx, ctx->scene_mark);
-}
-
-static int lc_kind_has_resource(int kind) {
-    return kind == LC_FILE || kind == LC_SOCKET || kind == LC_AUDIO ||
-           kind == LC_COROUTINE || kind == LC_FFI || kind == LC_WEBSOCKET;
-}
-
-static void *lc_alloc(LcContext *ctx, size_t size, int kind) {
-    LcObject *o = (LcObject *)lc_arena_alloc(ctx, size);
-    if (!o) return NULL;
-    o->kind = kind;
-    if (lc_kind_has_resource(kind)) {
-        o->next = ctx->resources;
-        ctx->resources = o;
-    }
-    return o;
-}
-
-static LcObject *lc_value_object(LcValue v) {
-    switch (v.type) {
-        case LC_STRING: return (LcObject *)v.as.string;
-        case LC_TABLE: return (LcObject *)v.as.table;
-        case LC_STRUCT: return (LcObject *)v.as.strukt;
-        case LC_FUNCTION: return (LcObject *)v.as.function;
-        case LC_TUPLE: return (LcObject *)v.as.tuple;
-        case LC_FILE: return (LcObject *)v.as.file;
-        case LC_SOCKET: return (LcObject *)v.as.socket;
-        case LC_AUDIO: return (LcObject *)v.as.audio;
-        case LC_COROUTINE: return (LcObject *)v.as.coroutine;
-        case LC_FFI: return (LcObject *)v.as.ffi;
-        case LC_WEBSOCKET: return (LcObject *)v.as.websocket;
-        default: return NULL;
-    }
-}
-
-/* Arena allocator handles lifetime in one bump chunk; retain/release are no-ops. */
-static LcValue lc_retain(LcValue v) { return v; }
-static void lc_release(LcContext *ctx, LcValue v) { (void)ctx; (void)v; }
-static void lc_cell_release(LcContext *ctx, LcCell *cell) { (void)ctx; (void)cell; }
-
 static void lc_audio_dispose(LcAudio *audio);
 static void lc_socket_close_handle(LcSocket *socket) {
     if (!socket || socket->closed) return;
@@ -407,6 +366,118 @@ static void lc_socket_close_handle(LcSocket *socket) {
 #endif
     socket->closed = 1;
     socket->handle = LC_INVALID_SOCKET;
+}
+
+static void *lc_slab_alloc(LcContext *ctx, void **free_list, size_t size) {
+    size_t aligned = (size + 7u) & ~(size_t)7u;
+    if (aligned < sizeof(void *)) aligned = sizeof(void *);
+    if (*free_list) {
+        void *p = *free_list;
+        *free_list = *(void **)p;
+        memset(p, 0, aligned);
+        return p;
+    }
+    if (!ctx->slabs || ctx->slabs->used + aligned > LC_SLAB_SIZE) {
+        LcSlab *ns = (LcSlab *)malloc(sizeof(*ns));
+        if (!ns) { lc_error(ctx, "out of memory"); return NULL; }
+        ns->used = 0;
+        ns->next = ctx->slabs;
+        ctx->slabs = ns;
+    }
+    {
+        void *p = ctx->slabs->data + ctx->slabs->used;
+        ctx->slabs->used += aligned;
+        memset(p, 0, aligned);
+        return p;
+    }
+}
+
+static void *lc_alloc(LcContext *ctx, size_t size, int kind) {
+    LcObject *o;
+    if (kind == LC_CELL) o = (LcObject *)lc_slab_alloc(ctx, &ctx->cell_free, size);
+    else if (kind == LC_TABLE) o = (LcObject *)lc_slab_alloc(ctx, &ctx->table_free, size);
+    else if (kind == LC_FUNCTION) o = (LcObject *)lc_slab_alloc(ctx, &ctx->fn_free, size);
+    else {
+        o = (LcObject *)calloc(1, size);
+        if (!o) lc_error(ctx, "out of memory");
+    }
+    if (!o) return NULL;
+    o->kind = (uint8_t)kind;
+    o->marked = ctx->gc_current_white;
+    o->gc_flags = 0;
+    o->obj_size = (uint32_t)size;
+    o->next = ctx->gc_all;
+    ctx->gc_all = o;
+    ctx->gc_bytes += size;
+    ctx->gc_debt += (intptr_t)size;
+    return o;
+}
+
+static LcObject *lc_value_object(LcValue v) {
+    switch (v.type) {
+        case LC_STRING: return (LcObject *)v.as.string;
+        case LC_TABLE: return (LcObject *)v.as.table;
+        case LC_STRUCT: return (LcObject *)v.as.strukt;
+        case LC_FUNCTION: return (LcObject *)v.as.function;
+        case LC_TUPLE: return (LcObject *)v.as.tuple;
+        case LC_CELL: return (LcObject *)v.as.cell;
+        case LC_FILE: return (LcObject *)v.as.file;
+        case LC_SOCKET: return (LcObject *)v.as.socket;
+        case LC_AUDIO: return (LcObject *)v.as.audio;
+        case LC_COROUTINE: return (LcObject *)v.as.coroutine;
+        case LC_FFI: return (LcObject *)v.as.ffi;
+        case LC_WEBSOCKET: return (LcObject *)v.as.websocket;
+        default: return NULL;
+    }
+}
+
+/* Tri-color incremental mark-and-sweep GC (zero refcounting overhead). */
+static LcValue lc_retain(LcValue v) { return v; }
+static void lc_release(LcContext *ctx, LcValue v) { (void)ctx; (void)v; }
+static void lc_cell_release(LcContext *ctx, LcCell *cell) { (void)ctx; (void)cell; }
+
+static void lc_gc_mark_obj(LcContext *ctx, LcObject *o) {
+    if (!o || !(o->marked & LC_GC_WHITES)) return;
+    o->marked &= (uint8_t)~LC_GC_WHITES;
+    o->gc_list = ctx->gc_gray;
+    ctx->gc_gray = o;
+}
+
+static void lc_gc_mark_value(LcContext *ctx, LcValue v) {
+    LcObject *o = lc_value_object(v);
+    if (o) lc_gc_mark_obj(ctx, o);
+}
+
+static void lc_gc_barrier(LcContext *ctx, LcObject *parent, LcValue child) {
+    if (ctx->gc_state == LC_GCS_PROPAGATE && parent && (parent->marked & LC_GC_BLACK)) {
+        LcObject *c = lc_value_object(child);
+        if (c && (c->marked & LC_GC_WHITES)) lc_gc_mark_obj(ctx, c);
+    }
+}
+
+static void lc_gc_barrier_back(LcContext *ctx, LcObject *tbl) {
+    if (ctx->gc_state == LC_GCS_PROPAGATE && tbl && (tbl->marked & LC_GC_BLACK)) {
+        tbl->marked &= (uint8_t)~LC_GC_BLACK;
+        tbl->gc_list = ctx->gc_gray_again;
+        ctx->gc_gray_again = tbl;
+    }
+}
+
+static int lc_gc_push_root(LcContext *ctx, LcValue v) {
+    if (ctx->c_root_count >= ctx->c_root_cap) {
+        int cap = ctx->c_root_cap ? ctx->c_root_cap * 2 : 32;
+        LcValue *p = (LcValue *)realloc(ctx->c_roots, (size_t)cap * sizeof(*p));
+        if (!p) return ctx->c_root_count;
+        ctx->c_roots = p;
+        ctx->c_root_cap = cap;
+    }
+    ctx->c_roots[ctx->c_root_count++] = v;
+    return ctx->c_root_count - 1;
+}
+
+static void lc_gc_step(LcContext *ctx);
+static void lc_gc_check(LcContext *ctx) {
+    if (ctx->gc_running && ctx->gc_debt > 0) lc_gc_step(ctx);
 }
 
 static LcValue lc_string_n(LcContext *ctx, const char *s, size_t n) {
@@ -433,7 +504,7 @@ static LcValue lc_table(LcContext *ctx) {
 }
 
 static LcCell *lc_cell_new(LcContext *ctx, LcValue value) {
-    LcCell *cell = (LcCell *)lc_alloc(ctx, sizeof(*cell), 100);
+    LcCell *cell = (LcCell *)lc_alloc(ctx, sizeof(*cell), LC_CELL);
     if (!cell) return NULL;
     cell->value = value;
     return cell;
@@ -446,6 +517,7 @@ static void lc_cell_replace(LcContext *ctx, LcCell **slot, LcValue value) {
 static void lc_cell_set(LcContext *ctx, LcCell *cell, LcValue value) {
     if (!cell) { lc_error(ctx, "invalid local variable"); return; }
     cell->value = value;
+    lc_gc_barrier(ctx, &cell->object, value);
 }
 
 static LcValue lc_cell_get(LcCell *cell) { return cell ? cell->value : lc_nil(); }
@@ -577,9 +649,11 @@ static int lc_table_reserve(LcContext *ctx, LcTable *t, size_t needed) {
     if (needed <= t->capacity) return 1;
     cap = t->capacity ? t->capacity * 2 : 8;
     while (cap < needed) cap *= 2;
-    p = (LcEntry *)lc_arena_alloc(ctx, cap * sizeof(*p));
-    if (!p) return 0;
-    if (t->entries && t->capacity) memcpy(p, t->entries, t->capacity * sizeof(*p));
+    p = (LcEntry *)realloc(t->entries, cap * sizeof(*p));
+    if (!p) { lc_error(ctx, "out of memory"); return 0; }
+    memset(p + t->capacity, 0, (cap - t->capacity) * sizeof(*p));
+    ctx->gc_bytes += (cap - t->capacity) * sizeof(*p);
+    ctx->gc_debt += (intptr_t)((cap - t->capacity) * sizeof(*p));
     t->entries = p;
     t->capacity = cap;
     return 1;
@@ -587,31 +661,40 @@ static int lc_table_reserve(LcContext *ctx, LcTable *t, size_t needed) {
 
 static void lc_table_raw_set(LcContext *ctx, LcValue table, LcValue key, LcValue value) {
     LcTable *t;
-    int at;
+    int at, free_slot = -1;
+    size_t i;
     table = lc_first_value(table); key = lc_first_value(key); value = lc_first_value(value);
     if (table.type != LC_TABLE) { lc_error(ctx, "attempt to index a %s value", table.type == LC_NIL ? "nil" : "non-table"); return; }
     if (key.type == LC_NIL) { lc_error(ctx, "table index is nil"); return; }
     if (key.type == LC_NUMBER && isnan(key.as.number)) { lc_error(ctx, "table index is NaN"); return; }
     if (key.type == LC_NUMBER && isfinite(key.as.number) && floor(key.as.number) == key.as.number && key.as.number >= -9223372036854775808.0 && key.as.number < 9223372036854775808.0) key = lc_integer((int64_t)key.as.number);
     t = table.as.table;
-    at = lc_table_find(t, key);
-    if (value.type == LC_NIL) {
-        if (at >= 0) {
-            lc_release(ctx, t->entries[at].key);
-            lc_release(ctx, t->entries[at].value);
-            memset(&t->entries[at], 0, sizeof(t->entries[at]));
+    at = -1;
+    for (i = 0; i < t->capacity; ++i) {
+        if (!t->entries[i].used) {
+            if (free_slot < 0) free_slot = (int)i;
+        } else if (lc_value_equal(t->entries[i].key, key)) {
+            at = (int)i;
+            break;
         }
+    }
+    if (value.type == LC_NIL) {
+        if (at >= 0) memset(&t->entries[at], 0, sizeof(t->entries[at]));
         return;
     }
     if (at < 0) {
-        if (!lc_table_reserve(ctx, t, t->length + 1)) return;
-        at = (int)t->length++;
+        if (free_slot >= 0) {
+            at = free_slot;
+            if ((size_t)(at + 1) > t->length) t->length = (size_t)(at + 1);
+        } else {
+            if (!lc_table_reserve(ctx, t, t->length + 1)) return;
+            at = (int)t->length++;
+        }
         t->entries[at].used = 1;
-        t->entries[at].key = lc_retain(key);
+        t->entries[at].key = key;
     }
-    value = lc_retain(value);
-    lc_release(ctx, t->entries[at].value);
     t->entries[at].value = value;
+    lc_gc_barrier_back(ctx, &t->object);
 }
 
 static LcValue lc_table_raw_get(LcContext *ctx, LcValue table, LcValue key) {
@@ -750,8 +833,8 @@ static LcValue lc_function_new(LcContext *ctx, LcNative native, int n, LcCell **
     f->name = name;
     f->upvalue_count = n;
     if (n) {
-        f->upvalues = (LcCell **)lc_arena_alloc(ctx, sizeof(LcCell *) * (size_t)n);
-        if (!f->upvalues) return lc_nil();
+        f->upvalues = (LcCell **)malloc(sizeof(LcCell *) * (size_t)n);
+        if (!f->upvalues) { lc_error(ctx, "out of memory"); return lc_nil(); }
         for (i = 0; i < n; ++i) f->upvalues[i] = upvalues[i];
     }
     v.type = LC_FUNCTION;
@@ -765,8 +848,16 @@ static LcValue lc_function_bound(LcContext *ctx, LcFunction *fn, LcValue self) {
     if (!fn) return v;
     f = (LcFunction *)lc_alloc(ctx, sizeof(*f), LC_FUNCTION);
     if (!f) return v;
-    *f = *fn;
-    f->object.next = NULL;
+    f->native = fn->native;
+    f->name = fn->name;
+    f->upvalue_count = fn->upvalue_count;
+    f->struct_desc = fn->struct_desc;
+    f->jit_proto = fn->jit_proto;
+    if (fn->upvalue_count > 0 && fn->upvalues) {
+        f->upvalues = (LcCell **)malloc(sizeof(LcCell *) * (size_t)fn->upvalue_count);
+        if (!f->upvalues) { lc_error(ctx, "out of memory"); return lc_nil(); }
+        memcpy(f->upvalues, fn->upvalues, sizeof(LcCell *) * (size_t)fn->upvalue_count);
+    }
     f->bound_self = self;
     f->has_bound_self = 1;
     v.type = LC_FUNCTION;
@@ -775,26 +866,28 @@ static LcValue lc_function_bound(LcContext *ctx, LcFunction *fn, LcValue self) {
 }
 
 static LcStructDesc *lc_struct_desc_new(LcContext *ctx, const char *name, LcStructDesc *base, int own_fields, int own_methods) {
-    LcStructDesc *desc = (LcStructDesc *)lc_arena_alloc(ctx, sizeof(*desc));
+    LcStructDesc *desc = (LcStructDesc *)calloc(1, sizeof(*desc));
     int base_fields = base ? base->field_count : 0;
     int base_methods = base ? base->method_count : 0;
-    if (!desc) return NULL;
+    if (!desc) { lc_error(ctx, "out of memory"); return NULL; }
     desc->name = name;
     desc->base = base;
     desc->field_count = base_fields + own_fields;
     desc->method_count = base_methods + own_methods;
     if (desc->field_count > 0) {
-        desc->fields = (LcStructField *)lc_arena_alloc(ctx, sizeof(LcStructField) * (size_t)desc->field_count);
+        desc->fields = (LcStructField *)calloc((size_t)desc->field_count, sizeof(LcStructField));
         if (base_fields > 0) memcpy(desc->fields, base->fields, sizeof(LcStructField) * (size_t)base_fields);
     }
     if (desc->method_count > 0) {
-        desc->method_names = (const char **)lc_arena_alloc(ctx, sizeof(const char *) * (size_t)desc->method_count);
-        desc->methods = (LcValue *)lc_arena_alloc(ctx, sizeof(LcValue) * (size_t)desc->method_count);
+        desc->method_names = (const char **)calloc((size_t)desc->method_count, sizeof(const char *));
+        desc->methods = (LcValue *)calloc((size_t)desc->method_count, sizeof(LcValue));
         if (base_methods > 0) {
             memcpy(desc->method_names, base->method_names, sizeof(const char *) * (size_t)base_methods);
             memcpy(desc->methods, base->methods, sizeof(LcValue) * (size_t)base_methods);
         }
     }
+    desc->next = ctx->struct_descs;
+    ctx->struct_descs = desc;
     return desc;
 }
 
@@ -909,7 +1002,9 @@ static void lc_struct_set(LcContext *ctx, LcStruct *s, LcValue key, LcValue valu
     name = key.as.string->data;
     for (i = s->desc->field_count - 1; i >= 0; --i) {
         if (s->desc->fields[i].name && !strcmp(s->desc->fields[i].name, name)) {
-            s->fields[i] = lc_check_type(ctx, value, s->desc->fields[i].vtype, name);
+            LcValue checked = lc_check_type(ctx, value, s->desc->fields[i].vtype, name);
+            s->fields[i] = checked;
+            lc_gc_barrier(ctx, &s->object, checked);
             return;
         }
     }
@@ -917,32 +1012,37 @@ static void lc_struct_set(LcContext *ctx, LcStruct *s, LcValue key, LcValue valu
 }
 
 static LcValue lc_struct_ctor_call(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
-    LcStructDesc *desc = (LcStructDesc *)self->upvalues[0];
-    return lc_struct_new(ctx, desc, argc, argv);
+    return lc_struct_new(ctx, self->struct_desc, argc, argv);
 }
 
 static LcValue lc_struct_register(LcContext *ctx, LcStructDesc *desc) {
-    LcValue fn = lc_function_new(ctx, lc_struct_ctor_call, 1, (LcCell **)&desc, desc->name);
+    LcValue fn = lc_function_new(ctx, lc_struct_ctor_call, 0, NULL, desc->name);
     LcValue key = lc_string(ctx, desc->name);
+    if (fn.type == LC_FUNCTION) fn.as.function->struct_desc = desc;
     lc_table_set(ctx, ctx->globals, key, fn);
     return fn;
 }
 
 static LcValue lc_call(LcContext *ctx, LcValue fn, int argc, LcValue *argv) {
+    int root_mark = ctx->c_root_count;
+    int i;
     fn = lc_first_value(fn);
     if (ctx->error) return lc_nil();
+    lc_gc_push_root(ctx, fn);
+    for (i = 0; i < argc; ++i) lc_gc_push_root(ctx, argv[i]);
+    lc_gc_check(ctx);
     if (fn.type != LC_FUNCTION || !fn.as.function->native) {
         LcValue method = lc_metamethod(ctx, fn, "__call");
         if (method.type == LC_FUNCTION) {
             LcValue *args = (LcValue *)malloc(sizeof(LcValue) * (size_t)(argc + 1));
             LcValue result;
-            if (!args) { lc_release(ctx, method); lc_error(ctx, "out of memory in __call"); return lc_nil(); }
+            if (!args) { ctx->c_root_count = root_mark; lc_error(ctx, "out of memory in __call"); return lc_nil(); }
             args[0] = fn;
             if (argc) memcpy(args + 1, argv, sizeof(LcValue) * (size_t)argc);
             result = lc_call(ctx, method, argc + 1, args);
-            free(args); lc_release(ctx, method); return result;
+            free(args); ctx->c_root_count = root_mark; return result;
         }
-        lc_release(ctx, method);
+        ctx->c_root_count = root_mark;
         lc_error(ctx, "attempt to call a non-function value");
         return lc_nil();
     }
@@ -950,14 +1050,19 @@ static LcValue lc_call(LcContext *ctx, LcValue fn, int argc, LcValue *argv) {
         LcValue stack_args[33];
         LcValue *call_args = argc < 32 ? stack_args : (LcValue *)malloc(sizeof(LcValue) * (size_t)(argc + 1));
         LcValue res;
-        if (!call_args) { lc_error(ctx, "out of memory"); return lc_nil(); }
+        if (!call_args) { ctx->c_root_count = root_mark; lc_error(ctx, "out of memory"); return lc_nil(); }
         call_args[0] = fn.as.function->bound_self;
         if (argc > 0) memcpy(call_args + 1, argv, sizeof(LcValue) * (size_t)argc);
         res = fn.as.function->native(ctx, fn.as.function, argc + 1, call_args);
         if (call_args != stack_args) free(call_args);
+        ctx->c_root_count = root_mark;
         return res;
     }
-    return fn.as.function->native(ctx, fn.as.function, argc, argv);
+    {
+        LcValue res = fn.as.function->native(ctx, fn.as.function, argc, argv);
+        ctx->c_root_count = root_mark;
+        return res;
+    }
 }
 
 /* Lua expands only the final expression of an argument list. */
@@ -1297,11 +1402,14 @@ static LcValue lc_coroutine_pack(LcContext *ctx, int success, LcValue values) {
 }
 static LcValue lc_coroutine_resume_value(LcContext *ctx, LcCoroutine *co, int argc, LcValue *argv) {
     LcCoroutine *parent = ctx->active_coroutine; LcValue out;
+    LcGcFrame *caller_frames = ctx->gc_frames;
     if (!co || co->state == 2) { out = lc_string(ctx, "cannot resume dead coroutine"); return lc_coroutine_pack(ctx, 0, out); }
     if (co->state == 1 || co == parent) { out = lc_string(ctx, "cannot resume running coroutine"); return lc_coroutine_pack(ctx, 0, out); }
     if (co->state == 3) { out = lc_string(ctx, "cannot resume failed coroutine"); return lc_coroutine_pack(ctx, 0, out); }
-    lc_release(ctx, co->resume_args); co->resume_args = lc_tuple_new(ctx, argc, argv, 0);
-    lc_release(ctx, co->yielded); co->yielded = lc_nil(); lc_release(ctx, co->result); co->result = lc_nil();
+    co->resume_args = lc_tuple_new(ctx, argc, argv, 0);
+    co->yielded = lc_nil(); co->result = lc_nil();
+    co->caller_frames = caller_frames;
+    ctx->gc_frames = co->saved_frames;
     co->state = 1; ctx->active_coroutine = co;
 #ifdef __ANDROID__
     pthread_mutex_lock(&co->mutex);
@@ -1312,16 +1420,26 @@ static LcValue lc_coroutine_resume_value(LcContext *ctx, LcCoroutine *co, int ar
 #elif !defined(_WIN32)
     lc_coroutine_boot_context = ctx;
     if (swapcontext(&co->caller, &co->context) != 0) {
+        ctx->gc_frames = caller_frames; co->caller_frames = NULL;
         ctx->active_coroutine = parent; co->state = 3;
         out = lc_string(ctx, "coroutine context switch failed"); return lc_coroutine_pack(ctx, 0, out);
     }
 #else
     lc_windows_coroutine_context = ctx;
-    if (!IsThreadAFiber() && !ConvertThreadToFiber(NULL)) { ctx->active_coroutine = parent; out = lc_string(ctx, "cannot convert thread to a fiber"); return lc_coroutine_pack(ctx, 0, out); }
+    if (!IsThreadAFiber() && !ConvertThreadToFiber(NULL)) {
+        ctx->gc_frames = caller_frames; co->caller_frames = NULL;
+        ctx->active_coroutine = parent; out = lc_string(ctx, "cannot convert thread to a fiber"); return lc_coroutine_pack(ctx, 0, out);
+    }
     co->caller_fiber = GetCurrentFiber();
-    if (!co->caller_fiber) { ctx->active_coroutine = parent; out = lc_string(ctx, "coroutine resume requires a fiber thread"); return lc_coroutine_pack(ctx, 0, out); }
+    if (!co->caller_fiber) {
+        ctx->gc_frames = caller_frames; co->caller_frames = NULL;
+        ctx->active_coroutine = parent; out = lc_string(ctx, "coroutine resume requires a fiber thread"); return lc_coroutine_pack(ctx, 0, out);
+    }
     SwitchToFiber(co->fiber);
 #endif
+    if (co->state != 0) co->saved_frames = NULL;
+    ctx->gc_frames = caller_frames;
+    co->caller_frames = NULL;
     ctx->active_coroutine = parent;
     if (ctx->error || co->state == 3) {
         out = lc_string(ctx, ctx->error ? ctx->message : "coroutine failed");
@@ -1341,8 +1459,9 @@ static LcValue lc_builtin_coroutine_resume(LcContext *ctx, LcFunction *self, int
 static LcValue lc_builtin_coroutine_yield(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     LcCoroutine *co = ctx->active_coroutine; LcValue result; (void)self;
     if (!co) { lc_error(ctx, "attempt to yield from outside a coroutine"); return lc_nil(); }
-    lc_release(ctx, co->yielded); co->yielded = lc_tuple_new(ctx, argc, argv, 0);
-    lc_release(ctx, co->resume_args); co->resume_args = lc_nil(); co->state = 0;
+    co->yielded = lc_tuple_new(ctx, argc, argv, 0);
+    co->resume_args = lc_nil(); co->state = 0;
+    co->saved_frames = ctx->gc_frames;
 #ifdef __ANDROID__
     pthread_mutex_lock(&co->mutex);
     co->turn = 0;
@@ -1678,8 +1797,10 @@ static LcValue lc_builtin_rawlen(LcContext *ctx, LcFunction *self, int argc, LcV
     if (value.type == LC_STRING) return lc_number((double)value.as.string->length);
     lc_error(ctx, "table or string expected"); return lc_nil();
 }
+static void lc_gc_collect(LcContext *ctx);
+
 static LcValue lc_builtin_setmetatable(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
-    LcValue table, meta, old, guard;
+    LcValue table, meta, guard;
     (void)self;
     if (argc < 2) { lc_error(ctx, "setmetatable expects a table and metatable/nil"); return lc_nil(); }
     table = lc_first_value(argv[0]); meta = lc_first_value(argv[1]);
@@ -1687,12 +1808,10 @@ static LcValue lc_builtin_setmetatable(LcContext *ctx, LcFunction *self, int arg
         lc_error(ctx, "invalid setmetatable arguments"); return lc_nil();
     }
     guard = lc_metamethod(ctx, table, "__metatable");
-    if (guard.type != LC_NIL) { lc_release(ctx, guard); lc_error(ctx, "cannot change a protected metatable"); return lc_nil(); }
-    lc_release(ctx, guard);
-    old = table.as.table->metatable;
-    table.as.table->metatable = lc_retain(meta);
-    lc_release(ctx, old);
-    return lc_retain(table);
+    if (guard.type != LC_NIL) { lc_error(ctx, "cannot change a protected metatable"); return lc_nil(); }
+    table.as.table->metatable = meta;
+    lc_gc_barrier_back(ctx, &table.as.table->object);
+    return table;
 }
 static LcValue lc_builtin_getmetatable(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     LcValue value, key, guard;
@@ -1702,16 +1821,35 @@ static LcValue lc_builtin_getmetatable(LcContext *ctx, LcFunction *self, int arg
     if (value.type != LC_TABLE || value.as.table->metatable.type != LC_TABLE) return lc_nil();
     key = lc_string(ctx, "__metatable");
     guard = lc_table_raw_get(ctx, value.as.table->metatable, key);
-    lc_release(ctx, key);
-    return guard.type != LC_NIL ? guard : lc_retain(value.as.table->metatable);
+    return guard.type != LC_NIL ? guard : value.as.table->metatable;
 }
 static LcValue lc_builtin_collectgarbage(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
-    const char *option = argc && lc_first_value(argv[0]).type == LC_STRING ? lc_first_value(argv[0]).as.string->data : "count";
+    const char *option = argc && lc_first_value(argv[0]).type == LC_STRING ? lc_first_value(argv[0]).as.string->data : "collect";
     (void)self;
-    if (!strcmp(option, "isrunning")) return lc_bool(0);
-    if (!strcmp(option, "reset")) { lc_arena_reset(ctx); return lc_number(0); }
+    if (!strcmp(option, "isrunning")) return lc_bool(ctx->gc_running);
+    if (!strcmp(option, "stop")) { ctx->gc_running = 0; return lc_number(0); }
+    if (!strcmp(option, "restart")) { ctx->gc_running = 1; return lc_number(0); }
+    if (!strcmp(option, "collect")) { lc_gc_collect(ctx); return lc_number(0); }
+    if (!strcmp(option, "step")) {
+        int prev = ctx->gc_running;
+        ctx->gc_running = 1;
+        ctx->gc_debt = (argc > 1 ? (intptr_t)lc_to_integer(ctx, argv[1]) * 1024 : 4096);
+        lc_gc_step(ctx);
+        ctx->gc_running = prev;
+        return lc_bool(ctx->gc_state == LC_GCS_PAUSE);
+    }
+    if (!strcmp(option, "setpause")) {
+        int old = ctx->gc_pause;
+        if (argc > 1) ctx->gc_pause = (int)lc_to_integer(ctx, argv[1]);
+        return lc_integer(old);
+    }
+    if (!strcmp(option, "setstepmul")) {
+        int old = ctx->gc_stepmul;
+        if (argc > 1) ctx->gc_stepmul = (int)lc_to_integer(ctx, argv[1]);
+        return lc_integer(old);
+    }
     if (!strcmp(option, "count")) {
-        size_t bytes = ctx->arena.total_allocated;
+        size_t bytes = ctx->gc_bytes;
         LcValue out[2];
         out[0] = lc_number((double)bytes / 1024.0);
         out[1] = lc_number((double)(bytes % 1024));
@@ -1721,11 +1859,21 @@ static LcValue lc_builtin_collectgarbage(LcContext *ctx, LcFunction *self, int a
 }
 static LcValue lc_builtin_gcinfo(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     (void)self; (void)argc; (void)argv;
-    return lc_number((double)ctx->arena.total_allocated / 1024.0);
+    return lc_number((double)ctx->gc_bytes / 1024.0);
+}
+static void lc_clear_draw_cmds(LcContext *ctx) {
+    int i;
+    for (i = 0; i < ctx->draw_count; ++i) {
+        free(ctx->draw_cmds[i].text);
+        ctx->draw_cmds[i].text = NULL;
+    }
+    ctx->draw_count = 0;
+    ctx->has_bg = 0;
 }
 static LcValue lc_builtin_scene_reset(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     (void)self; (void)argc; (void)argv;
-    lc_arena_reset(ctx);
+    lc_clear_draw_cmds(ctx);
+    lc_gc_collect(ctx);
     return lc_bool(1);
 }
 
@@ -1733,7 +1881,7 @@ static void lc_push_draw_cmd(LcContext *ctx, LcDrawCmd cmd) {
     if (ctx->draw_count >= ctx->draw_cap) {
         int cap = ctx->draw_cap ? ctx->draw_cap * 2 : 64;
         LcDrawCmd *p = (LcDrawCmd *)realloc(ctx->draw_cmds, (size_t)cap * sizeof(*p));
-        if (!p) { lc_error(ctx, "out of memory in draw queue"); return; }
+        if (!p) { free(cmd.text); lc_error(ctx, "out of memory in draw queue"); return; }
         ctx->draw_cmds = p;
         ctx->draw_cap = cap;
     }
@@ -1750,11 +1898,11 @@ static double lc_arg_num(LcContext *ctx, int argc, LcValue *argv, int idx, doubl
 }
 static LcValue lc_builtin_clear_screen(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     (void)self;
-    ctx->draw_count = 0;
+    lc_clear_draw_cmds(ctx);
     if (argc >= 3) {
-        ctx->bg_r = lc_arg_num(ctx, argc, argv, 0, 0.03);
-        ctx->bg_g = lc_arg_num(ctx, argc, argv, 1, 0.05);
-        ctx->bg_b = lc_arg_num(ctx, argc, argv, 2, 0.08);
+        ctx->bg_r = lc_arg_num(ctx, argc, argv, 0, 0.0);
+        ctx->bg_g = lc_arg_num(ctx, argc, argv, 1, 0.0);
+        ctx->bg_b = lc_arg_num(ctx, argc, argv, 2, 0.0);
         ctx->has_bg = 1;
     }
     return lc_nil();
@@ -1765,9 +1913,9 @@ static LcValue lc_builtin_draw_sprite(LcContext *ctx, LcFunction *self, int argc
     (void)self;
     memset(&c, 0, sizeof(c));
     c.kind = 0;
-    c.x = lc_arg_num(ctx, argc, argv, 0, 0);
-    c.y = lc_arg_num(ctx, argc, argv, 1, 0);
-    id = (int)lc_arg_num(ctx, argc, argv, 2, 1);
+    id = (int)lc_arg_num(ctx, argc, argv, 0, 1);
+    c.x = lc_arg_num(ctx, argc, argv, 1, 0);
+    c.y = lc_arg_num(ctx, argc, argv, 2, 0);
     c.sprite_id = id;
     c.w = 32; c.h = 32;
     if (id >= 1 && id <= ctx->sprite_count) {
@@ -1789,8 +1937,8 @@ static LcValue lc_builtin_draw_rect(LcContext *ctx, LcFunction *self, int argc, 
     c.y = lc_arg_num(ctx, argc, argv, 1, 0);
     c.w = lc_arg_num(ctx, argc, argv, 2, 32);
     c.h = lc_arg_num(ctx, argc, argv, 3, 32);
-    c.r = lc_arg_num(ctx, argc, argv, 4, 0.3);
-    c.g = lc_arg_num(ctx, argc, argv, 5, 0.8);
+    c.r = lc_arg_num(ctx, argc, argv, 4, 1.0);
+    c.g = lc_arg_num(ctx, argc, argv, 5, 1.0);
     c.b = lc_arg_num(ctx, argc, argv, 6, 1.0);
     c.a = lc_arg_num(ctx, argc, argv, 7, 1.0);
     lc_push_draw_cmd(ctx, c);
@@ -1805,19 +1953,22 @@ static LcValue lc_builtin_draw_circle(LcContext *ctx, LcFunction *self, int argc
     rad = lc_arg_num(ctx, argc, argv, 2, 16);
     c.w = rad * 2.0; c.h = rad * 2.0;
     c.r = lc_arg_num(ctx, argc, argv, 3, 1.0);
-    c.g = lc_arg_num(ctx, argc, argv, 4, 0.8);
-    c.b = lc_arg_num(ctx, argc, argv, 5, 0.3);
+    c.g = lc_arg_num(ctx, argc, argv, 4, 1.0);
+    c.b = lc_arg_num(ctx, argc, argv, 5, 1.0);
     c.a = lc_arg_num(ctx, argc, argv, 6, 1.0);
     lc_push_draw_cmd(ctx, c);
     return lc_nil();
 }
 static LcValue lc_builtin_draw_text(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
-    LcDrawCmd c; LcValue s; (void)self;
+    LcDrawCmd c; LcValue s; const char *txt; size_t len; (void)self;
     if (argc < 1) return lc_nil();
     memset(&c, 0, sizeof(c));
     c.kind = 3;
     s = lc_to_string(ctx, argv[0]);
-    c.text = s.type == LC_STRING ? s.as.string->data : "";
+    txt = s.type == LC_STRING ? s.as.string->data : "";
+    len = s.type == LC_STRING ? s.as.string->length : 0;
+    c.text = (char *)malloc(len + 1);
+    if (c.text) { memcpy(c.text, txt, len); c.text[len] = '\0'; }
     c.x = lc_arg_num(ctx, argc, argv, 1, 16);
     c.y = lc_arg_num(ctx, argc, argv, 2, 32);
     c.w = lc_arg_num(ctx, argc, argv, 3, 18);
@@ -1827,6 +1978,14 @@ static LcValue lc_builtin_draw_text(LcContext *ctx, LcFunction *self, int argc, 
     c.a = lc_arg_num(ctx, argc, argv, 7, 1.0);
     lc_push_draw_cmd(ctx, c);
     return lc_nil();
+}
+static LcValue lc_builtin_screen_width(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
+    (void)self; (void)argc; (void)argv;
+    return lc_integer(ctx->screen_w > 0 ? ctx->screen_w : 480);
+}
+static LcValue lc_builtin_screen_height(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
+    (void)self; (void)argc; (void)argv;
+    return lc_integer(ctx->screen_h > 0 ? ctx->screen_h : 800);
 }
 
 static LcValue lc_package_table(LcContext *ctx, const char *name) {
@@ -3066,6 +3225,330 @@ static void lc_audio_init(LcContext *ctx);
 #include "luac_libraries.h"
 #include "luac_audio.h"
 
+static void lc_gc_mark_frames(LcContext *ctx, LcGcFrame *f) {
+    int i;
+    for (; f; f = f->prev) {
+        for (i = 0; i < f->slot_count; ++i) lc_gc_mark_value(ctx, f->slots[i]);
+        for (i = 0; i < f->cell_count; ++i) if (f->cells[i]) lc_gc_mark_obj(ctx, (LcObject *)f->cells[i]);
+    }
+}
+
+static void lc_gc_table_mode(LcTable *t, int *wk, int *wv) {
+    *wk = 0; *wv = 0;
+    if (t->metatable.type == LC_TABLE) {
+        LcTable *mt = t->metatable.as.table;
+        size_t i;
+        for (i = 0; i < mt->capacity; ++i) {
+            if (mt->entries[i].used && mt->entries[i].key.type == LC_STRING &&
+                mt->entries[i].key.as.string->length == 6 &&
+                !memcmp(mt->entries[i].key.as.string->data, "__mode", 6) &&
+                mt->entries[i].value.type == LC_STRING) {
+                const char *m = mt->entries[i].value.as.string->data;
+                *wk = strchr(m, 'k') != NULL;
+                *wv = strchr(m, 'v') != NULL;
+                break;
+            }
+        }
+    }
+}
+
+static size_t lc_gc_propagate_one(LcContext *ctx, LcObject *o) {
+    o->marked |= LC_GC_BLACK;
+    switch (o->kind) {
+        case LC_CELL:
+            lc_gc_mark_value(ctx, ((LcCell *)o)->value);
+            return sizeof(LcCell);
+        case LC_TUPLE: {
+            LcTuple *tp = (LcTuple *)o;
+            int i;
+            for (i = 0; i < tp->count; ++i) lc_gc_mark_value(ctx, tp->items[i]);
+            return sizeof(LcTuple) + (size_t)tp->count * sizeof(LcValue);
+        }
+        case LC_STRUCT: {
+            LcStruct *st = (LcStruct *)o;
+            int i, n = st->desc ? st->desc->field_count : 0;
+            for (i = 0; i < n; ++i) lc_gc_mark_value(ctx, st->fields[i]);
+            return sizeof(LcStruct) + (size_t)n * sizeof(LcValue);
+        }
+        case LC_FUNCTION: {
+            LcFunction *fn = (LcFunction *)o;
+            int i;
+            for (i = 0; i < fn->upvalue_count; ++i)
+                if (fn->upvalues[i]) lc_gc_mark_obj(ctx, (LcObject *)fn->upvalues[i]);
+            if (fn->has_bound_self) lc_gc_mark_value(ctx, fn->bound_self);
+            return sizeof(LcFunction) + (size_t)fn->upvalue_count * sizeof(LcCell *);
+        }
+        case LC_COROUTINE: {
+            LcCoroutine *co = (LcCoroutine *)o;
+            lc_gc_mark_value(ctx, co->function);
+            lc_gc_mark_value(ctx, co->resume_args);
+            lc_gc_mark_value(ctx, co->yielded);
+            lc_gc_mark_value(ctx, co->result);
+            lc_gc_mark_frames(ctx, co->saved_frames);
+            lc_gc_mark_frames(ctx, co->caller_frames);
+            return sizeof(LcCoroutine);
+        }
+        case LC_TABLE: {
+            LcTable *t = (LcTable *)o;
+            int wk, wv;
+            size_t i;
+            lc_gc_mark_value(ctx, t->metatable);
+            lc_gc_table_mode(t, &wk, &wv);
+            if (!wk && !wv) {
+                for (i = 0; i < t->capacity; ++i) {
+                    if (t->entries[i].used) {
+                        lc_gc_mark_value(ctx, t->entries[i].key);
+                        lc_gc_mark_value(ctx, t->entries[i].value);
+                    }
+                }
+            } else if (wv && !wk) {
+                for (i = 0; i < t->capacity; ++i) {
+                    if (t->entries[i].used) lc_gc_mark_value(ctx, t->entries[i].key);
+                }
+                if (!(o->gc_flags & 2)) {
+                    o->gc_flags |= 2;
+                    o->gc_list = ctx->gc_weak_v;
+                    ctx->gc_weak_v = o;
+                }
+            } else if (wk && !wv) {
+                if (!(o->gc_flags & 2)) {
+                    o->gc_flags |= 2;
+                    o->gc_list = ctx->gc_weak_k;
+                    ctx->gc_weak_k = o;
+                }
+            } else {
+                if (!(o->gc_flags & 2)) {
+                    o->gc_flags |= 2;
+                    o->gc_list = ctx->gc_weak_kv;
+                    ctx->gc_weak_kv = o;
+                }
+            }
+            return sizeof(LcTable) + t->capacity * sizeof(LcEntry);
+        }
+        default:
+            return o->obj_size ? o->obj_size : 16;
+    }
+}
+
+static size_t lc_gc_drain_gray(LcContext *ctx, size_t budget) {
+    size_t work = 0;
+    while (ctx->gc_gray && work < budget) {
+        LcObject *o = ctx->gc_gray;
+        ctx->gc_gray = o->gc_list;
+        o->gc_list = NULL;
+        work += lc_gc_propagate_one(ctx, o);
+    }
+    return work;
+}
+
+static int lc_gc_is_cleared(uint8_t dead_white, LcValue v) {
+    LcObject *o = lc_value_object(v);
+    if (!o) return 0;
+    return (o->marked & dead_white) != 0;
+}
+
+static void lc_gc_clear_weak_list(LcObject *list, uint8_t dead_white, int wk, int wv) {
+    while (list) {
+        LcTable *t = (LcTable *)list;
+        LcObject *next = list->gc_list;
+        size_t i;
+        list->gc_list = NULL;
+        list->gc_flags &= (uint16_t)~2;
+        for (i = 0; i < t->capacity; ++i) {
+            if (!t->entries[i].used) continue;
+            if ((wk && lc_gc_is_cleared(dead_white, t->entries[i].key)) ||
+                (wv && lc_gc_is_cleared(dead_white, t->entries[i].value))) {
+                memset(&t->entries[i], 0, sizeof(t->entries[i]));
+            }
+        }
+        list = next;
+    }
+}
+
+static void lc_gc_mark_roots(LcContext *ctx) {
+    LcStructDesc *sd;
+    int i;
+    lc_gc_mark_value(ctx, ctx->globals);
+    lc_gc_mark_value(ctx, ctx->string_library);
+    lc_gc_mark_value(ctx, ctx->file_methods);
+    lc_gc_mark_value(ctx, ctx->socket_methods);
+    lc_gc_mark_value(ctx, ctx->audio_methods);
+    lc_gc_mark_value(ctx, ctx->websocket_methods);
+    lc_gc_mark_value(ctx, ctx->input);
+    lc_gc_mark_value(ctx, ctx->output);
+    lc_gc_mark_value(ctx, ctx->error_output);
+    for (i = 0; i < ctx->c_root_count; ++i) lc_gc_mark_value(ctx, ctx->c_roots[i]);
+    lc_gc_mark_frames(ctx, ctx->gc_frames);
+    if (ctx->active_coroutine) lc_gc_mark_obj(ctx, (LcObject *)ctx->active_coroutine);
+    for (sd = ctx->struct_descs; sd; sd = sd->next) {
+        for (i = 0; i < sd->field_count; ++i) lc_gc_mark_value(ctx, sd->fields[i].default_value);
+        for (i = 0; i < sd->method_count; ++i) lc_gc_mark_value(ctx, sd->methods[i]);
+    }
+}
+
+static void lc_gc_atomic(LcContext *ctx) {
+    LcObject *again;
+    int changed;
+    uint8_t dead_white;
+    lc_gc_drain_gray(ctx, (size_t)-1);
+    again = ctx->gc_gray_again;
+    ctx->gc_gray_again = NULL;
+    while (again) {
+        LcObject *o = again;
+        again = o->gc_list;
+        o->gc_list = NULL;
+        lc_gc_propagate_one(ctx, o);
+    }
+    lc_gc_drain_gray(ctx, (size_t)-1);
+    do {
+        LcObject *w;
+        changed = 0;
+        for (w = ctx->gc_weak_k; w; w = w->gc_list) {
+            LcTable *t = (LcTable *)w;
+            size_t i;
+            for (i = 0; i < t->capacity; ++i) {
+                LcObject *ko, *vo;
+                if (!t->entries[i].used) continue;
+                ko = lc_value_object(t->entries[i].key);
+                vo = lc_value_object(t->entries[i].value);
+                if ((!ko || !(ko->marked & LC_GC_WHITES)) && vo && (vo->marked & LC_GC_WHITES)) {
+                    lc_gc_mark_obj(ctx, vo);
+                    changed = 1;
+                }
+            }
+        }
+        if (changed) lc_gc_drain_gray(ctx, (size_t)-1);
+    } while (changed);
+    dead_white = ctx->gc_current_white;
+    ctx->gc_current_white ^= LC_GC_WHITES;
+    lc_gc_clear_weak_list(ctx->gc_weak_v, dead_white, 0, 1);
+    lc_gc_clear_weak_list(ctx->gc_weak_k, dead_white, 1, 0);
+    lc_gc_clear_weak_list(ctx->gc_weak_kv, dead_white, 1, 1);
+    ctx->gc_weak_v = ctx->gc_weak_k = ctx->gc_weak_kv = NULL;
+    ctx->gc_sweep = &ctx->gc_all;
+    ctx->gc_estimate = ctx->gc_bytes;
+    ctx->gc_state = LC_GCS_SWEEP;
+}
+
+static void lc_gc_free_obj(LcContext *ctx, LcObject *o) {
+    if (o->kind == LC_FILE) {
+        LcFile *file = (LcFile *)o;
+        if (!file->closed && !file->standard) {
+#ifdef _WIN32
+            if (file->pipe) _pclose(file->handle); else
+#else
+            if (file->pipe) pclose(file->handle); else
+#endif
+            fclose(file->handle);
+        }
+        file->closed = 1;
+    } else if (o->kind == LC_SOCKET) {
+        lc_socket_close_handle((LcSocket *)o);
+    } else if (o->kind == LC_AUDIO) {
+        lc_audio_dispose((LcAudio *)o);
+        free(((LcAudio *)o)->samples);
+    } else if (o->kind == LC_WEBSOCKET) {
+        lc_websocket_dispose((LcWebsocket *)o);
+    } else if (o->kind == LC_FFI) {
+        lc_ffi_dispose((LcFFILibrary *)o);
+    } else if (o->kind == LC_COROUTINE) {
+#ifdef _WIN32
+        if (((LcCoroutine *)o)->fiber) DeleteFiber(((LcCoroutine *)o)->fiber);
+#elif defined(__ANDROID__)
+        lc_android_coroutine_dispose((LcCoroutine *)o);
+#else
+        free(((LcCoroutine *)o)->stack);
+#endif
+    }
+    if (ctx->gc_bytes >= o->obj_size) ctx->gc_bytes -= o->obj_size;
+    else ctx->gc_bytes = 0;
+
+    if (o->kind == LC_TABLE) {
+        LcTable *t = (LcTable *)o;
+        size_t eb = t->capacity * sizeof(LcEntry);
+        if (ctx->gc_bytes >= eb) ctx->gc_bytes -= eb;
+        else ctx->gc_bytes = 0;
+        free(t->entries);
+        *(void **)o = ctx->table_free;
+        ctx->table_free = o;
+    } else if (o->kind == LC_FUNCTION) {
+        LcFunction *f = (LcFunction *)o;
+        free(f->upvalues);
+        *(void **)o = ctx->fn_free;
+        ctx->fn_free = o;
+    } else if (o->kind == LC_CELL) {
+        *(void **)o = ctx->cell_free;
+        ctx->cell_free = o;
+    } else {
+        free(o);
+    }
+}
+
+static int lc_gc_sweep_step(LcContext *ctx, int count) {
+    uint8_t other_white = (uint8_t)(ctx->gc_current_white ^ LC_GC_WHITES);
+    while (*ctx->gc_sweep && count-- > 0) {
+        LcObject *curr = *ctx->gc_sweep;
+        if ((curr->marked & other_white) && !(curr->marked & LC_GC_FIXED)) {
+            *ctx->gc_sweep = curr->next;
+            lc_gc_free_obj(ctx, curr);
+        } else {
+            curr->marked = (uint8_t)((curr->marked & ~(LC_GC_WHITES | LC_GC_BLACK)) | ctx->gc_current_white);
+            ctx->gc_sweep = &curr->next;
+        }
+    }
+    return *ctx->gc_sweep == NULL;
+}
+
+static void lc_gc_step(LcContext *ctx) {
+    size_t budget;
+    if (!ctx->gc_running) return;
+    budget = (ctx->gc_debt > 0 ? (size_t)ctx->gc_debt : 1024u) * (size_t)(ctx->gc_stepmul > 0 ? ctx->gc_stepmul : 200) / 100u;
+    if (budget < 2048u) budget = 2048u;
+    if (budget > 262144u) budget = 262144u;
+    ctx->gc_debt = 0;
+
+    if (ctx->gc_state == LC_GCS_PAUSE) {
+        ctx->gc_gray = ctx->gc_gray_again = NULL;
+        ctx->gc_weak_v = ctx->gc_weak_k = ctx->gc_weak_kv = NULL;
+        lc_gc_mark_roots(ctx);
+        ctx->gc_state = LC_GCS_PROPAGATE;
+    }
+    if (ctx->gc_state == LC_GCS_PROPAGATE) {
+        lc_gc_drain_gray(ctx, budget);
+        if (!ctx->gc_gray) lc_gc_atomic(ctx);
+    } else if (ctx->gc_state == LC_GCS_ATOMIC) {
+        lc_gc_atomic(ctx);
+    }
+    if (ctx->gc_state == LC_GCS_SWEEP) {
+        if (lc_gc_sweep_step(ctx, 96)) {
+            ctx->gc_state = LC_GCS_PAUSE;
+            ctx->gc_threshold = (ctx->gc_estimate / 100u) * (size_t)(ctx->gc_pause > 100 ? ctx->gc_pause : 150);
+            if (ctx->gc_threshold < 64u * 1024u) ctx->gc_threshold = 64u * 1024u;
+            ctx->gc_debt = (intptr_t)ctx->gc_bytes - (intptr_t)ctx->gc_threshold;
+        }
+    }
+}
+
+static void lc_gc_collect(LcContext *ctx) {
+    int prev = ctx->gc_running;
+    ctx->gc_running = 1;
+    if (ctx->gc_state == LC_GCS_SWEEP) {
+        lc_gc_sweep_step(ctx, 0x7fffffff);
+        ctx->gc_state = LC_GCS_PAUSE;
+    }
+    ctx->gc_gray = ctx->gc_gray_again = NULL;
+    ctx->gc_weak_v = ctx->gc_weak_k = ctx->gc_weak_kv = NULL;
+    lc_gc_mark_roots(ctx);
+    ctx->gc_state = LC_GCS_PROPAGATE;
+    lc_gc_atomic(ctx);
+    lc_gc_sweep_step(ctx, 0x7fffffff);
+    ctx->gc_state = LC_GCS_PAUSE;
+    ctx->gc_threshold = (ctx->gc_estimate / 100u) * (size_t)(ctx->gc_pause > 100 ? ctx->gc_pause : 150);
+    if (ctx->gc_threshold < 64u * 1024u) ctx->gc_threshold = 64u * 1024u;
+    ctx->gc_debt = (intptr_t)ctx->gc_bytes - (intptr_t)ctx->gc_threshold;
+    ctx->gc_running = prev;
+}
+
 static LcContext *lc_context_new(const char *source) {
     LcContext *ctx = (LcContext *)calloc(1, sizeof(*ctx));
     LcValue math, str, tab, io, os, bit, bit32, utf8, package, loaded, preload, searchers;
@@ -3074,6 +3557,15 @@ static LcContext *lc_context_new(const char *source) {
     if (!ctx) return NULL;
     ctx->source = source;
     ctx->tls_verify = 1;
+    ctx->gc_current_white = LC_GC_WHITE0;
+    ctx->gc_state = LC_GCS_PAUSE;
+    ctx->gc_running = 1;
+    ctx->gc_pause = 200;
+    ctx->gc_stepmul = 200;
+    ctx->gc_threshold = 128u * 1024u;
+    ctx->gc_debt = -(intptr_t)ctx->gc_threshold;
+    ctx->screen_w = 480;
+    ctx->screen_h = 800;
     ctx->globals = lc_table(ctx);
     lc_set_global(ctx, "print", lc_function_new(ctx, lc_builtin_print, 0, NULL, "print"));
     lc_set_global(ctx, "warn", lc_function_new(ctx, lc_builtin_warn, 0, NULL, "warn"));
@@ -3102,9 +3594,11 @@ static LcContext *lc_context_new(const char *source) {
     lc_set_global(ctx, "draw_rect", lc_function_new(ctx, lc_builtin_draw_rect, 0, NULL, "draw_rect"));
     lc_set_global(ctx, "draw_circle", lc_function_new(ctx, lc_builtin_draw_circle, 0, NULL, "draw_circle"));
     lc_set_global(ctx, "draw_text", lc_function_new(ctx, lc_builtin_draw_text, 0, NULL, "draw_text"));
+    lc_set_global(ctx, "screen_width", lc_function_new(ctx, lc_builtin_screen_width, 0, NULL, "screen_width"));
+    lc_set_global(ctx, "screen_height", lc_function_new(ctx, lc_builtin_screen_height, 0, NULL, "screen_height"));
     lc_set_global(ctx, "require", lc_function_new(ctx, lc_builtin_require, 0, NULL, "require"));
     lc_set_global(ctx, "_G", lc_retain(ctx->globals));
-    lc_set_global(ctx, "_VERSION", lc_string(ctx, "LuaC 0.5 (Arena + Structs/Classes + Native C)"));
+    lc_set_global(ctx, "_VERSION", lc_string(ctx, "LuaC 0.5 (Incremental GC + Machine Code)"));
     math = lc_table(ctx);
     for (i = 0; unary[i]; ++i) lc_add_native(ctx, math, unary[i], lc_math_unary);
     lc_add_native(ctx, math, "min", lc_math_minmax); lc_add_native(ctx, math, "max", lc_math_minmax);
@@ -3183,50 +3677,35 @@ static LcContext *lc_context_new(const char *source) {
 #endif
     lc_set_global(ctx, "package", package);
     lc_register_libraries(ctx);
-    ctx->scene_mark = lc_arena_mark(ctx);
+    ctx->gc_debt = -(intptr_t)ctx->gc_threshold;
     return ctx;
 }
 
 static void lc_context_destroy(LcContext *ctx) {
     LcObject *o, *next;
-    LcArenaBlock *b, *bnext;
+    LcSlab *s, *snext;
+    LcStructDesc *sd, *sdnext;
     int i;
     if (!ctx) return;
-    o = ctx->resources; ctx->resources = NULL;
+    o = ctx->gc_all; ctx->gc_all = NULL;
     while (o) {
         next = o->next;
-        if (o->kind == LC_FILE) {
-            LcFile *file = (LcFile *)o;
-            if (!file->closed && !file->standard) {
-#ifdef _WIN32
-                if (file->pipe) _pclose(file->handle); else
-#else
-                if (file->pipe) pclose(file->handle); else
-#endif
-                fclose(file->handle);
-            }
-            file->closed = 1;
-        }
-        else if (o->kind == LC_SOCKET) lc_socket_close_handle((LcSocket *)o);
-        else if (o->kind == LC_AUDIO) { lc_audio_dispose((LcAudio *)o); free(((LcAudio *)o)->samples); }
-        else if (o->kind == LC_WEBSOCKET) lc_websocket_dispose((LcWebsocket *)o);
-        else if (o->kind == LC_FFI) lc_ffi_dispose((LcFFILibrary *)o);
-        else if (o->kind == LC_COROUTINE) {
-#ifdef _WIN32
-            if (((LcCoroutine *)o)->fiber) DeleteFiber(((LcCoroutine *)o)->fiber);
-#elif defined(__ANDROID__)
-            lc_android_coroutine_dispose((LcCoroutine *)o);
-#else
-            free(((LcCoroutine *)o)->stack);
-#endif
-        }
+        lc_gc_free_obj(ctx, o);
         o = next;
+    }
+    for (s = ctx->slabs; s; s = snext) { snext = s->next; free(s); }
+    for (sd = ctx->struct_descs; sd; sd = sdnext) {
+        sdnext = sd->next;
+        free(sd->fields);
+        free((void *)sd->method_names);
+        free(sd->methods);
+        free(sd);
     }
     for (i = 0; i < ctx->sprite_count; ++i) free(ctx->sprites[i].path);
     free(ctx->sprites);
+    lc_clear_draw_cmds(ctx);
     free(ctx->draw_cmds);
-    b = ctx->arena.head;
-    while (b) { bnext = b->prev; free(b); b = bnext; }
+    free(ctx->c_roots);
 #ifdef _WIN32
     if (ctx->socket_initialized) WSACleanup();
 #endif
