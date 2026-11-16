@@ -42,41 +42,41 @@ final class ProjectStore {
         File project = unique(root, name);
         if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) throw new IOException("Cannot create project folders");
         write(new File(project, "main.lua"),
-            "-- LuaC project: main.lua is the entry point\n" +
-            "local player = require('scripts.player')\n\n" +
+            "-- LuaC 0.5 project: indentation blocks, classes, types, direct graphics\n" +
+            "player = require('scripts.player')\n\n" +
             "world = engine.world()\n" +
-            "engine.set_gravity(world, 0, 420)\n\n" +
-            "local floor = engine.create(world, 'Floor', 0, 180)\n" +
-            "engine.set_size(floor, 520, 32)\n" +
-            "engine.set_color(floor, 0.12, 0.25, 0.30, 1)\n" +
-            "engine.set_body(floor, {kinematic = true, solid = true})\n\n" +
-            "local texture, textureError = engine.load_texture('assets/luac_logo.png')\n" +
-            "assert(texture, textureError)\n" +
-            "hero = player.create(world, texture)\n" +
-            "engine.text(world, 'LuaC • multi-file project', 18, 28, 22)\n" +
-            "engine.text(world, 'Touch the scene to move the sprite', 18, 56, 15)\n\n" +
-            "function update(dt)\n" +
-            "  player.update(hero, dt)\n" +
-            "  local x, y = engine.touch_pos(world, 0)\n" +
-            "  if x then engine.set_velocity(hero, (x - hero.x) * 5, hero.vy) end\n" +
-            "end\n\n" +
-            "print('Project started:', projectName or 'LuaC')\n" +
-            "print('main.lua + scripts/player.lua + PNG asset')\n");
+            "sprite = load_sprite('assets/luac_logo.png')\n" +
+            "hero = player.Player({x = 120.0, y = 180.0, vx = 140.0, vy = 110.0})\n" +
+            "score = 0\n\n" +
+            "func update(float dt):\n" +
+            "    hero:step(dt, 480.0, 560.0)\n" +
+            "    x, y = engine.touch_pos(world, 0)\n" +
+            "    if x:\n" +
+            "        hero.x += (x + 240.0 - hero.x) * 6.0 * dt\n" +
+            "        hero.y += (y + 280.0 - hero.y) * 6.0 * dt\n\n" +
+            "func draw():\n" +
+            "    clear_screen(0.05, 0.08, 0.13, 1.0)\n" +
+            "    draw_rect(24, 96, 432, 432, 0.09, 0.14, 0.22, 1.0)\n" +
+            "    draw_sprite(sprite, hero.x, hero.y, 72, 72, 0.0)\n" +
+            "    draw_circle(hero.x + 36, hero.y + 36, 8, 0.3, 0.9, 0.7, 0.85)\n" +
+            "    draw_text('LuaC Studio • ' .. (projectName or 'Project'), 24, 24, 22, 1, 1, 1, 1)\n" +
+            "    draw_text('Touch to steer • indentation + class syntax', 24, 56, 15, 0.7, 0.85, 1, 1)\n\n" +
+            "print('Project started:', projectName or 'LuaC')\n");
         write(new File(project, "scripts/player.lua"),
-            "local player = {}\n\n" +
-            "function player.create(world, texture)\n" +
-            "  local entity = engine.create(world, 'Player', 0, -100)\n" +
-            "  engine.set_sprite(entity, texture, 64, 64)\n" +
-            "  engine.set_velocity(entity, 90, 0)\n" +
-            "  engine.set_body(entity, {solid = true, restitution = 0.72, damping = 0.02})\n" +
-            "  return entity\n" +
-            "end\n\n" +
-            "function player.update(entity, dt)\n" +
-            "  if entity.x < -230 or entity.x > 230 then\n" +
-            "    engine.set_velocity(entity, -entity.vx, entity.vy)\n" +
-            "  end\n" +
-            "end\n\n" +
-            "return player\n");
+            "struct Vec2:\n" +
+            "    float x = 0.0\n" +
+            "    float y = 0.0\n\n" +
+            "class Player(Vec2):\n" +
+            "    float vx = 120.0\n" +
+            "    float vy = 90.0\n" +
+            "    func step(float dt, float max_w, float max_h):\n" +
+            "        self.x += self.vx * dt\n" +
+            "        self.y += self.vy * dt\n" +
+            "        if self.x < 24 or self.x > max_w - 96:\n" +
+            "            self.vx = -self.vx\n" +
+            "        if self.y < 96 or self.y > max_h - 72:\n" +
+            "            self.vy = -self.vy\n\n" +
+            "return {Player = Player, Vec2 = Vec2}\n");
         write(new File(project, "project.lua"),
             "-- Optional project settings are ordinary Lua files.\n" +
             "projectName = " + luaString(project.getName()) + "\n");

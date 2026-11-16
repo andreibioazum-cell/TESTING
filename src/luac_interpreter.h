@@ -14,11 +14,14 @@ typedef struct LiModule LiModule;
 struct LiBinding {
     char *name;
     LcCell *cell;
+    int vtype;
     LiBinding *next;
 };
 struct LiEnv {
     LiEnv *parent;
     LiBinding *bindings;
+    char **explicit_globals;
+    int n_explicit_globals;
     int refs;
 };
 struct LiFunction {
@@ -44,10 +47,13 @@ typedef struct {
     char *previous_cwd;
     size_t output_offset;
     long budget;
+    char **top_globals;
+    int ntop_globals;
 } LiSession;
 typedef struct {
     LiSession *session;
     LcValue varargs;
+    int in_function;
 } LiFrame;
 typedef enum { LI_NORMAL, LI_BREAK, LI_RETURN } LiFlow;
 
@@ -73,14 +79,31 @@ static LiEnv *li_env_new(LiEnv *parent) {
 }
 static void li_env_release(LcContext *ctx, LiEnv *env) {
     LiBinding *binding, *next;
+    int i;
     if (!env || --env->refs) return;
     for (binding = env->bindings; binding; binding = next) {
         next = binding->next;
         lc_cell_release(ctx, binding->cell);
         free(binding->name); free(binding);
     }
+    for (i = 0; i < env->n_explicit_globals; ++i) free(env->explicit_globals[i]);
+    free(env->explicit_globals);
     li_env_release(ctx, env->parent);
     free(env);
+}
+static void li_declare_global(LiEnv *env, const char *name) {
+    int i;
+    if (!env || !name) return;
+    for (i = 0; i < env->n_explicit_globals; ++i) if (!strcmp(env->explicit_globals[i], name)) return;
+    env->explicit_globals = (char **)xrealloc(env->explicit_globals, sizeof(char *) * (size_t)(env->n_explicit_globals + 1));
+    env->explicit_globals[env->n_explicit_globals++] = xstrdup(name);
+}
+static int li_is_explicit_global(LiEnv *env, const char *name) {
+    for (; env; env = env->parent) {
+        int i;
+        for (i = 0; i < env->n_explicit_globals; ++i) if (!strcmp(env->explicit_globals[i], name)) return 1;
+    }
+    return 0;
 }
 static LiBinding *li_local(LiEnv *env, const char *name) {
     LiBinding *binding;
@@ -89,16 +112,52 @@ static LiBinding *li_local(LiEnv *env, const char *name) {
     return NULL;
 }
 static LiBinding *li_resolve(LiEnv *env, const char *name) {
+    if (li_is_explicit_global(env, name)) return NULL;
     for (; env; env = env->parent) {
         LiBinding *binding = li_local(env, name);
         if (binding) return binding;
     }
     return NULL;
 }
+static void li_add_top_global(LiSession *session, const char *name) {
+    int i;
+    if (!name) return;
+    for (i = 0; i < session->ntop_globals; ++i)
+        if (!strcmp(session->top_globals[i], name)) return;
+    session->top_globals = (char **)xrealloc(session->top_globals, sizeof(char *) * (size_t)(session->ntop_globals + 1));
+    session->top_globals[session->ntop_globals++] = xstrdup(name);
+}
+static int li_is_top_global(LiSession *session, const char *name) {
+    int i;
+    for (i = 0; i < session->ntop_globals; ++i)
+        if (!strcmp(session->top_globals[i], name)) return 1;
+    return 0;
+}
+static void li_collect_top_globals(LiSession *session, Stmt *program) {
+    Stmt *s;
+    int i;
+    for (s = program; s; s = s->next) {
+        if (s->kind == S_STRUCT && s->nnames > 0) li_add_top_global(session, s->names[0]);
+        else if (s->kind == S_ASSIGN) {
+            if (s->flag == 0 && s->expr && s->expr->kind == E_VAR) li_add_top_global(session, s->expr->name);
+            for (i = 0; i < s->flag; ++i) if (s->exprs[i]->kind == E_VAR) li_add_top_global(session, s->exprs[i]->name);
+        }
+    }
+}
 static int li_declare(LiFrame *frame, LiEnv *env, const char *name, LcValue value) {
     LiBinding *binding = (LiBinding *)calloc(1, sizeof(*binding));
     if (!binding) { lc_release(frame->session->ctx, value); lc_error(frame->session->ctx, "out of memory"); return 0; }
     binding->name = xstrdup(name);
+    binding->cell = lc_cell_new(frame->session->ctx, value);
+    binding->next = env->bindings; env->bindings = binding;
+    return binding->cell != NULL;
+}
+static int li_declare_typed(LiFrame *frame, LiEnv *env, const char *name, int vtype, LcValue value) {
+    LiBinding *binding = (LiBinding *)calloc(1, sizeof(*binding));
+    if (vtype) value = lc_check_type(frame->session->ctx, value, vtype, name);
+    if (!binding) { lc_release(frame->session->ctx, value); lc_error(frame->session->ctx, "out of memory"); return 0; }
+    binding->name = xstrdup(name);
+    binding->vtype = vtype;
     binding->cell = lc_cell_new(frame->session->ctx, value);
     binding->next = env->bindings; env->bindings = binding;
     return binding->cell != NULL;
@@ -129,11 +188,14 @@ static LcValue li_call_function(LcContext *ctx, LcFunction *self, int argc, LcVa
     if (!function) { lc_error(ctx, "invalid interpreted function"); return result; }
     env = li_env_new(function->closure);
     if (!env) { lc_error(ctx, "out of memory"); return result; }
-    for (i = 0; i < function->definition->nparams; ++i)
-        li_declare(&(LiFrame){session, lc_nil()}, env, function->definition->params[i],
+    for (i = 0; i < function->definition->nparams; ++i) {
+        int pt = function->definition->param_types ? function->definition->param_types[i] : 0;
+        li_declare_typed(&(LiFrame){session, lc_nil(), 1}, env, function->definition->params[i], pt,
             i < argc ? lc_first(argv[i]) : lc_nil());
+    }
     vararg_count = argc > function->definition->nparams ? argc - function->definition->nparams : 0;
     frame.session = session;
+    frame.in_function = 1;
     frame.varargs = function->definition->flag
         ? lc_tuple_new(ctx, vararg_count, vararg_count ? argv + function->definition->nparams : NULL, 0) : lc_nil();
     li_exec_statements(&frame, env, function->definition->body, &result);
@@ -154,14 +216,22 @@ static LcValue li_closure(LiFrame *frame, LiEnv *env, Expr *definition) {
 }
 static LcValue li_index(LiFrame *frame, LcValue object, const char *name) {
     LcValue key = lc_string(frame->session->ctx, name);
-    LcValue value = lc_table_get(frame->session->ctx, object, key);
+    LcValue value = lc_method_get(frame->session->ctx, object, key);
     lc_release(frame->session->ctx, key); return value;
 }
-static void li_assign(LiFrame *frame, LiEnv *env, Expr *target, LcValue value) {
+static void li_assign_ex(LiFrame *frame, LiEnv *env, Expr *target, LcValue value, int force_global) {
     LcContext *ctx = frame->session->ctx;
     if (target->kind == E_VAR) {
         LiBinding *binding = li_resolve(env, target->name);
-        if (binding) { lc_cell_set(ctx, binding->cell, value); return; }
+        if (binding) {
+            if (binding->vtype) value = lc_check_type(ctx, value, binding->vtype, target->name);
+            lc_cell_set(ctx, binding->cell, value);
+            return;
+        }
+        if (!force_global && frame->in_function && !li_is_top_global(frame->session, target->name)) {
+            li_declare(frame, env, target->name, value);
+            return;
+        }
         li_set_global(frame->session, target->name, value); return;
     }
     if (target->kind == E_INDEX) {
@@ -171,6 +241,9 @@ static void li_assign(LiFrame *frame, LiEnv *env, Expr *target, LcValue value) {
         lc_release(ctx, object); lc_release(ctx, key); lc_release(ctx, value); return;
     }
     lc_release(ctx, value); lc_error(ctx, "invalid assignment target");
+}
+static void li_assign(LiFrame *frame, LiEnv *env, Expr *target, LcValue value) {
+    li_assign_ex(frame, env, target, value, 0);
 }
 static LcValue li_eval_call(LiFrame *frame, LiEnv *env, Expr *expr) {
     LcContext *ctx = frame->session->ctx;
@@ -263,8 +336,10 @@ static void li_assign_results(LiFrame *frame, LiEnv *env, Stmt *stmt, int declar
         int ri = i < count - 1 ? i : count - 1;
         int index = i < count - 1 ? 0 : i - (count - 1);
         LcValue value = ri < 0 ? lc_nil() : lc_nth(values[ri], index);
-        if (declare) li_declare(frame, env, stmt->names[i], value);
-        else li_assign(frame, env, stmt->exprs[i], value);
+        if (declare) {
+            int vt = stmt->var_types ? stmt->var_types[i] : 0;
+            li_declare_typed(frame, env, stmt->names[i], vt, value);
+        } else li_assign_ex(frame, env, stmt->exprs[i], value, stmt->is_global);
     }
     li_release_list(ctx, values, count);
 }
@@ -288,7 +363,68 @@ static LiFlow li_exec_statement(LiFrame *frame, LiEnv *env, Stmt *stmt, LcValue 
             li_declare(frame, env, stmt->names[0], lc_nil());
             value = li_closure(frame, env, stmt->expr);
             lc_cell_set(ctx, li_local(env, stmt->names[0])->cell, value); break;
+        case S_STRUCT: {
+            LcStructDesc *base_desc = NULL, *desc;
+            const char *sname = stmt->names[0];
+            const char *bname = stmt->nnames > 1 ? stmt->names[1] : NULL;
+            int fbase, mbase;
+            if (bname) {
+                LcValue bfn = li_global(session, bname);
+                if (bfn.type == LC_FUNCTION && bfn.as.function->upvalue_count > 0)
+                    base_desc = (LcStructDesc *)bfn.as.function->upvalues[0];
+                lc_release(ctx, bfn);
+            }
+            desc = lc_struct_desc_new(ctx, sname, base_desc, stmt->nfields, stmt->nexprs);
+            fbase = base_desc ? base_desc->field_count : 0;
+            mbase = base_desc ? base_desc->method_count : 0;
+            for (i = 0; i < stmt->nfields; ++i) {
+                LcValue dv;
+                if (stmt->fields[i].def) dv = li_eval(frame, env, stmt->fields[i].def);
+                else if (stmt->fields[i].vtype == 1) dv = lc_integer(0);
+                else if (stmt->fields[i].vtype == 2) dv = lc_number(0);
+                else if (stmt->fields[i].vtype == 3) dv = lc_string(ctx, "");
+                else if (stmt->fields[i].vtype == 4) dv = lc_bool(0);
+                else dv = lc_nil();
+                lc_struct_desc_add_field(desc, fbase + i, stmt->fields[i].name, stmt->fields[i].vtype, dv);
+                lc_release(ctx, dv);
+            }
+            for (i = 0; i < stmt->nexprs; ++i) {
+                LcValue fn = li_closure(frame, env, stmt->exprs[i]);
+                lc_struct_desc_add_method(desc, mbase + i, stmt->method_names[i], fn);
+                lc_release(ctx, fn);
+            }
+            lc_struct_register(ctx, desc);
+            break;
+        }
+        case S_COMPOUND: {
+            Expr *target = stmt->expr;
+            LcValue rhs = li_eval(frame, env, stmt->expr2);
+            if (target->kind == E_VAR) {
+                LiBinding *b = li_resolve(env, target->name);
+                LcValue cur = b ? lc_cell_get(b->cell) : li_global(session, target->name);
+                LcValue res = lc_binary(ctx, stmt->flag, cur, rhs);
+                lc_release(ctx, cur);
+                if (b) {
+                    if (b->vtype) res = lc_check_type(ctx, res, b->vtype, target->name);
+                    lc_cell_set(ctx, b->cell, res);
+                } else li_set_global(session, target->name, res);
+            } else if (target->kind == E_INDEX) {
+                LcValue obj = li_eval(frame, env, target->a);
+                LcValue key = li_eval(frame, env, target->b);
+                LcValue cur = lc_table_get(ctx, obj, key);
+                LcValue res = lc_binary(ctx, stmt->flag, cur, rhs);
+                lc_table_set(ctx, obj, key, res);
+                lc_release(ctx, cur); lc_release(ctx, res); lc_release(ctx, obj); lc_release(ctx, key);
+            } else lc_error(ctx, "invalid compound assignment target");
+            lc_release(ctx, rhs);
+            break;
+        }
         case S_ASSIGN:
+            if (stmt->is_global) {
+                for (i = 0; i < stmt->flag; ++i)
+                    if (stmt->exprs[i]->kind == E_VAR) li_declare_global(env, stmt->exprs[i]->name);
+                if (stmt->nexprs <= stmt->flag) break;
+            }
             if (!stmt->flag && stmt->expr && stmt->expr2) {
                 value = li_eval(frame, env, stmt->expr2); li_assign(frame, env, stmt->expr, value);
             } else li_assign_results(frame, env, stmt, 0);
@@ -507,7 +643,7 @@ static LcValue li_load_text(LiSession *session, const char *source, size_t lengt
     module->chunk->kind = E_FUNCTION; module->chunk->flag = 1;
     module->chunk->body = module->program;
     module->next = session->modules; session->modules = module;
-    frame.session = session; frame.varargs = lc_nil();
+    frame.session = session; frame.varargs = lc_nil(); frame.in_function = 0;
     return li_closure(&frame, session->root, module->chunk);
 }
 static LcValue li_load_error(LcContext *ctx, const char *message) {
@@ -578,7 +714,8 @@ static LcValue li_execute_module(LiSession *session, LiModule *module) {
     LiFrame frame;
     LcValue result = lc_nil();
     if (!env) { lc_error(session->ctx,"out of memory");return result; }
-    frame.session = session; frame.varargs = lc_nil();
+    li_collect_top_globals(session, module->program);
+    frame.session = session; frame.varargs = lc_nil(); frame.in_function = 0;
     if (!session->ctx->error) li_exec_statements(&frame, env, module->program, &result);
     lc_release(session->ctx, frame.varargs); li_env_release(session->ctx, env);
     return result;
@@ -704,11 +841,38 @@ static void li_json_scene(LiSession *session, Str *json) {
         }
     }
     lc_release(ctx,overlay);lc_release(ctx,world);sb_add(json,"]");
+    sb_add(json,",\"clear_color\":");
+    if (ctx->has_bg) sb_printf(json,"[%.4g,%.4g,%.4g,1]",ctx->bg_r,ctx->bg_g,ctx->bg_b);
+    else sb_add(json,"null");
+    sb_add(json,",\"draw_cmds\":[");
+    for (i = 0; i < ctx->draw_count; ++i) {
+        LcDrawCmd *cmd = &ctx->draw_cmds[i];
+        const char *sprite_path = (cmd->kind == 0 && cmd->sprite_id >= 0 && cmd->sprite_id < ctx->sprite_count)
+            ? ctx->sprites[cmd->sprite_id].path : NULL;
+        if (i > 0) sb_add(json, ",");
+        sb_add(json, "{\"kind\":");
+        sb_printf(json, "%d", cmd->kind);
+        sb_add(json, ",\"x\":"); sb_printf(json, "%.8g", cmd->x);
+        sb_add(json, ",\"y\":"); sb_printf(json, "%.8g", cmd->y);
+        sb_add(json, ",\"w\":"); sb_printf(json, "%.8g", cmd->w);
+        sb_add(json, ",\"h\":"); sb_printf(json, "%.8g", cmd->h);
+        sb_add(json, ",\"rot\":"); sb_printf(json, "%.8g", cmd->rot);
+        sb_add(json, ",\"color\":[");
+        sb_printf(json, "%.4g,%.4g,%.4g,%.4g", cmd->r, cmd->g, cmd->b, cmd->a);
+        sb_add(json, "],\"path\":");
+        if (sprite_path) li_json_string(json, sprite_path); else sb_add(json, "null");
+        sb_add(json, ",\"text\":");
+        if (cmd->text) li_json_string(json, cmd->text); else sb_add(json, "null");
+        sb_add(json, "}");
+    }
+    sb_add(json,"]");
 }
 static char *li_project_frame(LiSession *session, double dt) {
     LcContext *ctx = session->ctx;
     Str json;
     session->budget = 250000;
+    ctx->draw_count = 0;
+    ctx->has_bg = 0;
     if (!ctx->error && dt > 0) {
         LcValue update = li_global(session,"update");
         if (update.type == LC_FUNCTION) {
@@ -724,6 +888,14 @@ static char *li_project_frame(LiSession *session, double dt) {
                 lc_release(ctx,method);
             }
             lc_release(ctx,world);lc_release(ctx,engine);
+        }
+        if (!ctx->error) {
+            LcValue draw = li_global(session,"draw");
+            if (draw.type == LC_FUNCTION) {
+                LcValue ignored = lc_call(ctx,draw,0,NULL);
+                lc_release(ctx,ignored);
+            }
+            lc_release(ctx,draw);
         }
     }
     sb_init(&json);sb_add(&json,"{\"ok\":");sb_add(&json,ctx->error?"false":"true");
@@ -795,6 +967,8 @@ LUAC_API void luac_project_close(void *handle) {
     li_env_release(session->ctx,session->root);
     for(module=session->modules;module;module=next_module){next_module=module->next;token_clear(&module->parser.token);free_stmt(module->program);free(module->chunk);free(module->source);free(module->name);free(module);}
     lc_context_destroy(session->ctx);
+    for (int i = 0; i < session->ntop_globals; ++i) free(session->top_globals[i]);
+    free(session->top_globals);
     if(session->previous_cwd)chdir(session->previous_cwd);
     free(session->previous_cwd);free(session->root_path);free(session);li_current=NULL;
 }

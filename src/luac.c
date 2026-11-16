@@ -55,7 +55,10 @@ typedef enum {
     T_HASH, T_EQ, T_NE, T_LE, T_GE, T_LT, T_GT, T_ASSIGN,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_LBRACKET, T_RBRACKET,
     T_SEMI, T_COLON, T_COMMA, T_DOT, T_CONCAT, T_DOTS,
-    T_BAND, T_BOR, T_BNOT, T_SHL, T_SHR, T_GOTO, T_DBCOLON
+    T_BAND, T_BOR, T_BNOT, T_SHL, T_SHR, T_GOTO, T_DBCOLON,
+    T_NEWLINE, T_INDENT, T_DEDENT,
+    T_FUNC, T_STRUCT, T_CLASS, T_ELIF, T_GLOBAL,
+    T_PLUS_EQ, T_MINUS_EQ, T_STAR_EQ, T_SLASH_EQ, T_PERCENT_EQ
 } TokenKind;
 
 typedef struct {
@@ -74,6 +77,11 @@ typedef struct {
     Token token;
     char error[512];
     int failed;
+    int indent_stack[64];
+    int indent_top;
+    int pending_dedents;
+    int at_line_start;
+    int paren_depth;
 } Parser;
 
 static int is_name_start(int c) { return isalpha((unsigned char)c) || c == '_'; }
@@ -99,7 +107,9 @@ static const char *token_name(TokenKind k) {
         "eof","name","number","string","nil","true","false","function","local","end","if","then",
         "elseif","else","while","do","for","in","repeat","until","return","break","and","or","not",
         "+","-","*","/","//","%","^","#","==","~=","<=",">=","<",">","=","(",")","{","}","[","]",
-        ";",":",",",".","..","...","&","|","~","<<",">>","goto","::"
+        ";",":",",",".","..","...","&","|","~","<<",">>","goto","::",
+        "newline","indent","dedent","func","struct","class","elif","global",
+        "+=","-=","*=","/=","%="
     };
     return names[(int)k];
 }
@@ -130,8 +140,78 @@ static void skip_long(Parser *p, int level, int keep, Str *out) {
 static void next_token(Parser *p) {
     int start_line, start_col;
     token_clear(&p->token);
+    if (p->pending_dedents > 0) {
+        p->pending_dedents--;
+        p->token.line = p->line; p->token.column = p->column;
+        p->token.kind = T_DEDENT;
+        return;
+    }
 again:
-    while (peek(p) && isspace((unsigned char)peek(p))) take(p);
+    if (p->at_line_start && p->paren_depth == 0) {
+        int indent = 0;
+        for (;;) {
+            indent = 0;
+            while (peek(p) == ' ' || peek(p) == '\t' || peek(p) == '\r') {
+                char c = take(p);
+                if (c == ' ') indent += 1;
+                else if (c == '\t') indent += 4;
+            }
+            if (peek(p) == '\n') { take(p); continue; }
+            if (peek(p) == '-' && peek_n(p, 1) == '-') {
+                take(p); take(p);
+                { int level = long_bracket_level(p, p->pos);
+                  if (level >= 0) { Str dummy; sb_init(&dummy); skip_long(p, level, 0, &dummy); sb_free(&dummy); }
+                  else while (peek(p) && peek(p) != '\n') take(p); }
+                if (peek(p) == '\n') { take(p); continue; }
+            }
+            break;
+        }
+        p->at_line_start = 0;
+        if (!peek(p)) {
+            if (p->indent_top > 0) {
+                p->pending_dedents = p->indent_top - 1;
+                p->indent_top = 0;
+                p->token.line = p->line; p->token.column = p->column;
+                p->token.kind = T_DEDENT;
+                return;
+            }
+            p->token.line = p->line; p->token.column = p->column;
+            p->token.kind = T_EOF;
+            return;
+        }
+        if (indent > p->indent_stack[p->indent_top]) {
+            if (p->indent_top + 1 >= 64) parse_error(p, "indentation too deep");
+            else p->indent_stack[++p->indent_top] = indent;
+            p->token.line = p->line; p->token.column = p->column;
+            p->token.kind = T_INDENT;
+            return;
+        }
+        if (indent < p->indent_stack[p->indent_top]) {
+            int popped = 0;
+            while (p->indent_top > 0 && indent < p->indent_stack[p->indent_top]) {
+                p->indent_top--;
+                popped++;
+            }
+            if (indent != p->indent_stack[p->indent_top]) {
+                parse_error(p, "inconsistent indentation");
+            }
+            if (popped > 0) {
+                p->pending_dedents = popped - 1;
+                p->token.line = p->line; p->token.column = p->column;
+                p->token.kind = T_DEDENT;
+                return;
+            }
+        }
+    }
+    while (peek(p) == ' ' || peek(p) == '\t' || peek(p) == '\r' || peek(p) == '\v' || peek(p) == '\f') take(p);
+    if (peek(p) == '\n') {
+        if (p->paren_depth > 0) { take(p); goto again; }
+        p->token.line = p->line; p->token.column = p->column;
+        take(p);
+        p->at_line_start = 1;
+        p->token.kind = T_NEWLINE;
+        return;
+    }
     if (peek(p) == '-' && peek_n(p, 1) == '-') {
         take(p); take(p);
         { int level = long_bracket_level(p, p->pos);
@@ -141,14 +221,24 @@ again:
     }
     start_line = p->line; start_col = p->column;
     p->token.line = start_line; p->token.column = start_col;
-    if (!peek(p)) { p->token.kind = T_EOF; return; }
+    if (!peek(p)) {
+        if (p->indent_top > 0) {
+            p->pending_dedents = p->indent_top - 1;
+            p->indent_top = 0;
+            p->token.kind = T_DEDENT;
+            return;
+        }
+        p->token.kind = T_EOF; return;
+    }
     if (is_name_start(peek(p))) {
         size_t start = p->pos;
         static const struct { const char *s; TokenKind k; } kw[] = {
-            {"nil",T_NIL},{"true",T_TRUE},{"false",T_FALSE},{"function",T_FUNCTION},{"local",T_LOCAL},
-            {"end",T_END},{"if",T_IF},{"then",T_THEN},{"elseif",T_ELSEIF},{"else",T_ELSE},{"while",T_WHILE},
-            {"do",T_DO},{"for",T_FOR},{"in",T_IN},{"repeat",T_REPEAT},{"until",T_UNTIL},{"return",T_RETURN},
-            {"break",T_BREAK},{"goto",T_GOTO},{"and",T_AND},{"or",T_OR},{"not",T_NOT},{NULL,T_EOF}
+            {"nil",T_NIL},{"true",T_TRUE},{"false",T_FALSE},{"function",T_FUNCTION},{"func",T_FUNC},
+            {"local",T_LOCAL},{"global",T_GLOBAL},{"end",T_END},{"if",T_IF},{"then",T_THEN},
+            {"elseif",T_ELSEIF},{"elif",T_ELIF},{"else",T_ELSE},{"while",T_WHILE},
+            {"do",T_DO},{"for",T_FOR},{"in",T_IN},{"repeat",T_REPEAT},{"until",T_UNTIL},
+            {"return",T_RETURN},{"break",T_BREAK},{"goto",T_GOTO},{"and",T_AND},{"or",T_OR},
+            {"not",T_NOT},{"struct",T_STRUCT},{"class",T_CLASS},{NULL,T_EOF}
         };
         int i;
         while (is_name_char(peek(p))) take(p);
@@ -205,12 +295,20 @@ again:
     }
 #define OP1(ch, k) case ch: take(p); p->token.kind = (k); return
     switch (peek(p)) {
-        OP1('+',T_PLUS); OP1('-',T_MINUS); OP1('*',T_STAR); OP1('%',T_PERCENT); OP1('^',T_CARET);
-        OP1('#',T_HASH); OP1('&',T_BAND); OP1('|',T_BOR); OP1('(',T_LPAREN); OP1(')',T_RPAREN);
-        OP1('{',T_LBRACE); OP1('}',T_RBRACE); OP1('[',T_LBRACKET); OP1(']',T_RBRACKET);
+        OP1('^',T_CARET); OP1('#',T_HASH); OP1('&',T_BAND); OP1('|',T_BOR);
         OP1(';',T_SEMI); OP1(',',T_COMMA);
+        case '(': take(p); p->paren_depth++; p->token.kind=T_LPAREN; return;
+        case ')': take(p); if(p->paren_depth>0)p->paren_depth--; p->token.kind=T_RPAREN; return;
+        case '{': take(p); p->paren_depth++; p->token.kind=T_LBRACE; return;
+        case '}': take(p); if(p->paren_depth>0)p->paren_depth--; p->token.kind=T_RBRACE; return;
+        case '[': take(p); p->paren_depth++; p->token.kind=T_LBRACKET; return;
+        case ']': take(p); if(p->paren_depth>0)p->paren_depth--; p->token.kind=T_RBRACKET; return;
+        case '+': take(p); if (peek(p)=='=') { take(p); p->token.kind=T_PLUS_EQ; } else p->token.kind=T_PLUS; return;
+        case '-': take(p); if (peek(p)=='=') { take(p); p->token.kind=T_MINUS_EQ; } else p->token.kind=T_MINUS; return;
+        case '*': take(p); if (peek(p)=='=') { take(p); p->token.kind=T_STAR_EQ; } else p->token.kind=T_STAR; return;
+        case '%': take(p); if (peek(p)=='=') { take(p); p->token.kind=T_PERCENT_EQ; } else p->token.kind=T_PERCENT; return;
         case ':': take(p); if (peek(p)==':') { take(p); p->token.kind=T_DBCOLON; } else p->token.kind=T_COLON; return;
-        case '/': take(p); if (peek(p)=='/') { take(p); p->token.kind=T_DSLASH; } else p->token.kind=T_SLASH; return;
+        case '/': take(p); if (peek(p)=='/') { take(p); p->token.kind=T_DSLASH; } else if (peek(p)=='=') { take(p); p->token.kind=T_SLASH_EQ; } else p->token.kind=T_SLASH; return;
         case '=': take(p); if (peek(p)=='=') { take(p); p->token.kind=T_EQ; } else p->token.kind=T_ASSIGN; return;
         case '~': take(p); if (peek(p)=='=') { take(p); p->token.kind=T_NE; } else p->token.kind=T_BNOT; return;
         case '<': take(p); if (peek(p)=='=') { take(p); p->token.kind=T_LE; } else if (peek(p)=='<') { take(p); p->token.kind=T_SHL; } else p->token.kind=T_LT; return;
@@ -229,24 +327,33 @@ static char *expect_name(Parser *p) { char *s; if (p->token.kind != T_NAME) { pa
 typedef enum { E_NIL,E_BOOL,E_NUMBER,E_STRING,E_VAR,E_VARARG,E_BINARY,E_UNARY,E_TABLE,E_INDEX,E_CALL,E_FUNCTION } ExprKind;
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
+typedef struct {
+    char *name;
+    int vtype; /* 0=any, 1=int, 2=float, 3=str, 4=bool */
+    Expr *def;
+} FieldDef;
 struct Expr {
     ExprKind kind; int line, op, flag;
     double number; int64_t integer; int is_integer; char *name;
     Expr *a,*b;
     Expr **items, **keys; int count;
-    char **params; int nparams;
+    char **params; int *param_types; int nparams;
     Stmt *body;
 };
-typedef enum { S_LOCAL,S_ASSIGN,S_EXPR,S_IF,S_WHILE,S_REPEAT,S_FORNUM,S_FORIN,S_RETURN,S_BREAK,S_DO,S_LOCALFUNC,S_GOTO,S_LABEL } StmtKind;
+typedef enum { S_LOCAL,S_ASSIGN,S_EXPR,S_IF,S_WHILE,S_REPEAT,S_FORNUM,S_FORIN,S_RETURN,S_BREAK,S_DO,S_LOCALFUNC,S_GOTO,S_LABEL,S_STRUCT,S_COMPOUND } StmtKind;
 struct Stmt {
     StmtKind kind; int line; Stmt *next;
     char **names; int nnames;
     unsigned char *attributes; /* Per-local declaration: 1 means <const>. */
+    unsigned char *var_types;  /* Per-variable strict type: 0=any,1=int,2=float,3=str,4=bool. */
     Expr **exprs; int nexprs;
     Expr *expr,*expr2,*expr3;
     Stmt *body;
     Stmt **blocks; Expr **conds; int nblocks;
+    FieldDef *fields; int nfields;
+    char **method_names;
     int flag;
+    int is_global;
 };
 
 static Expr *new_expr(Parser *p, ExprKind k) { Expr *e=xmalloc(sizeof(*e)); memset(e,0,sizeof(*e)); e->kind=k; e->line=p->token.line; return e; }
@@ -258,19 +365,67 @@ static Expr *parse_suffix(Parser *p, Expr *e);
 static Expr *parse_subexpr(Parser *p, int limit);
 static Expr *parse_subexpr_tail(Parser *p, Expr *left, int limit);
 static Stmt *parse_block(Parser *p);
+static Stmt *parse_block_indented(Parser *p);
+static Stmt *parse_statement(Parser *p);
+static Stmt *stmt_append(Stmt *head, Stmt *s);
+
+static void parser_init(Parser *p, const char *source, const char *filename, size_t length) {
+    memset(p, 0, sizeof(*p));
+    p->source = source ? source : "";
+    p->filename = filename ? filename : "input.lua";
+    p->length = length;
+    p->line = p->column = 1;
+    p->at_line_start = 1;
+    next_token(p);
+}
+
+static int vtype_from_name(const char *name) {
+    if (!name) return 0;
+    if (!strcmp(name, "int")) return 1;
+    if (!strcmp(name, "float")) return 2;
+    if (!strcmp(name, "str")) return 3;
+    if (!strcmp(name, "bool")) return 4;
+    return 0;
+}
+
+static int parse_vtype_prefix(Parser *p) {
+    int vt;
+    size_t i;
+    if (p->token.kind != T_NAME) return 0;
+    vt = vtype_from_name(p->token.text);
+    if (!vt) return 0;
+    i = p->pos;
+    while (i < p->length && (p->source[i] == ' ' || p->source[i] == '\t')) ++i;
+    if (i < p->length && is_name_start(p->source[i])) {
+        next_token(p);
+        return vt;
+    }
+    return 0;
+}
 
 static Expr *parse_function_body(Parser *p, int line, int method) {
     Expr *e=new_expr(p,E_FUNCTION); e->line=line;
     expect(p,T_LPAREN);
-    if (method) name_list_add(&e->params,&e->nparams,xstrdup("self"));
+    if (method) {
+        name_list_add(&e->params,&e->nparams,xstrdup("self"));
+        e->param_types=xrealloc(e->param_types,sizeof(int)*(size_t)e->nparams);
+        e->param_types[e->nparams-1]=0;
+    }
     if (p->token.kind!=T_RPAREN) {
         for (;;) {
+            int ptype;
             if (accept_token(p,T_DOTS)) { e->flag=1; break; }
+            ptype=parse_vtype_prefix(p);
             name_list_add(&e->params,&e->nparams,expect_name(p));
+            e->param_types=xrealloc(e->param_types,sizeof(int)*(size_t)e->nparams);
+            e->param_types[e->nparams-1]=ptype;
             if (!accept_token(p,T_COMMA)) break;
         }
     }
-    expect(p,T_RPAREN); e->body=parse_block(p); expect(p,T_END); return e;
+    expect(p,T_RPAREN);
+    if (accept_token(p,T_COLON)) e->body=parse_block_indented(p);
+    else { e->body=parse_block(p); expect(p,T_END); }
+    return e;
 }
 
 static Expr *parse_table(Parser *p) {
@@ -292,11 +447,22 @@ static Expr *parse_table(Parser *p) {
     expect(p,T_RBRACE); return e;
 }
 
+static int colon_is_method_call(Parser *p) {
+    size_t i = p->pos;
+    if (p->token.kind != T_COLON) return 0;
+    while (i < p->length && (p->source[i] == ' ' || p->source[i] == '\t')) ++i;
+    if (i >= p->length || !is_name_start(p->source[i])) return 0;
+    while (i < p->length && is_name_char(p->source[i])) ++i;
+    while (i < p->length && (p->source[i] == ' ' || p->source[i] == '\t')) ++i;
+    if (i >= p->length) return 0;
+    return p->source[i] == '(' || p->source[i] == '{' || p->source[i] == '"' || p->source[i] == '\'' || p->source[i] == '[';
+}
+
 static Expr *parse_suffix(Parser *p, Expr *e) {
     for (;;) {
         if (accept_token(p,T_DOT)) { Expr *ix=new_expr(p,E_INDEX),*k=new_expr(p,E_STRING); ix->a=e; k->name=expect_name(p); ix->b=k; e=ix; }
         else if (accept_token(p,T_LBRACKET)) { Expr *ix=new_expr(p,E_INDEX); ix->a=e; ix->b=parse_expr(p); expect(p,T_RBRACKET); e=ix; }
-        else if (p->token.kind==T_COLON || p->token.kind==T_LPAREN || p->token.kind==T_STRING || p->token.kind==T_LBRACE) {
+        else if (colon_is_method_call(p) || p->token.kind==T_LPAREN || p->token.kind==T_STRING || p->token.kind==T_LBRACE) {
             Expr *call=new_expr(p,E_CALL); call->a=e;
             if (accept_token(p,T_COLON)) { call->flag=1; call->name=expect_name(p); }
             if (accept_token(p,T_LPAREN)) {
@@ -319,7 +485,7 @@ static Expr *parse_primary(Parser *p) {
     else if (p->token.kind==T_STRING) { e=new_expr(p,E_STRING); e->name=xstrdup(p->token.text?p->token.text:""); next_token(p); }
     else if (p->token.kind==T_DOTS) { e=new_expr(p,E_VARARG); next_token(p); }
     else if (p->token.kind==T_NAME) { e=new_expr(p,E_VAR); e->name=xstrdup(p->token.text); next_token(p); }
-    else if (p->token.kind==T_FUNCTION) { int line=p->token.line; next_token(p); return parse_function_body(p,line,0); }
+    else if (p->token.kind==T_FUNCTION || p->token.kind==T_FUNC) { int line=p->token.line; next_token(p); return parse_function_body(p,line,0); }
     else if (p->token.kind==T_LBRACE) return parse_table(p);
     else if (accept_token(p,T_LPAREN)) { e=parse_expr(p); expect(p,T_RPAREN); /* Parentheses force one result. */ { Expr *u=new_expr(p,E_UNARY); u->op=3; u->a=e; e=u; } }
     else { parse_error(p,"expected expression, got '%s'",token_name(p->token.kind)); return new_expr(p,E_NIL); }
@@ -356,19 +522,104 @@ static Expr *parse_subexpr(Parser *p,int limit) {
 static Expr *parse_expr(Parser *p) { return parse_subexpr(p,0); }
 static void parse_expr_list(Parser *p,Expr ***list,int *n) { do { expr_list_add(list,n,parse_expr(p)); } while(accept_token(p,T_COMMA)); }
 
-static int block_end(TokenKind k) { return k==T_EOF||k==T_END||k==T_ELSE||k==T_ELSEIF||k==T_UNTIL; }
+static int block_end(TokenKind k) { return k==T_EOF||k==T_END||k==T_ELSE||k==T_ELSEIF||k==T_ELIF||k==T_UNTIL; }
+static int stmt_end(TokenKind k) { return block_end(k)||k==T_SEMI||k==T_NEWLINE||k==T_DEDENT; }
 static Stmt *stmt_append(Stmt *head,Stmt *s) { Stmt *p=head; if(!head)return s; while(p->next)p=p->next; p->next=s; return head; }
+
+static Stmt *parse_block_indented(Parser *p) {
+    Stmt *head = NULL;
+    if (accept_token(p, T_NEWLINE)) {
+        while (accept_token(p, T_NEWLINE)) {}
+        expect(p, T_INDENT);
+        while (p->token.kind != T_DEDENT && p->token.kind != T_EOF && !p->failed) {
+            Stmt *s;
+            while (accept_token(p, T_NEWLINE) || accept_token(p, T_SEMI)) {}
+            if (p->token.kind == T_DEDENT || p->token.kind == T_EOF) break;
+            s = parse_statement(p);
+            if (s) head = stmt_append(head, s);
+            if (s && s->kind == S_RETURN) {
+                while (accept_token(p, T_NEWLINE) || accept_token(p, T_SEMI)) {}
+                break;
+            }
+        }
+        accept_token(p, T_DEDENT);
+    } else {
+        Stmt *s = parse_statement(p);
+        if (s) head = stmt_append(head, s);
+    }
+    return head;
+}
+
+static int compound_op(TokenKind k) {
+    switch (k) {
+        case T_PLUS_EQ: return 0;
+        case T_MINUS_EQ: return 1;
+        case T_STAR_EQ: return 2;
+        case T_SLASH_EQ: return 3;
+        case T_PERCENT_EQ: return 4;
+        default: return -1;
+    }
+}
 
 static Stmt *parse_statement(Parser *p) {
     int line=p->token.line;
-    if (accept_token(p,T_SEMI)) return NULL;
+    if (accept_token(p,T_SEMI) || accept_token(p,T_NEWLINE)) return NULL;
+    if (accept_token(p,T_STRUCT) || accept_token(p,T_CLASS)) {
+        Stmt *s=new_stmt(p,S_STRUCT); s->line=line;
+        name_list_add(&s->names,&s->nnames,expect_name(p));
+        if (accept_token(p,T_LPAREN)) {
+            name_list_add(&s->names,&s->nnames,expect_name(p));
+            expect(p,T_RPAREN);
+        }
+        expect(p,T_COLON);
+        if (accept_token(p,T_NEWLINE)) {
+            while (accept_token(p,T_NEWLINE)) {}
+            expect(p,T_INDENT);
+            while (p->token.kind!=T_DEDENT && p->token.kind!=T_EOF && !p->failed) {
+                while (accept_token(p,T_NEWLINE) || accept_token(p,T_SEMI)) {}
+                if (p->token.kind==T_DEDENT || p->token.kind==T_EOF) break;
+                if (accept_token(p,T_FUNC) || accept_token(p,T_FUNCTION)) {
+                    int mline=p->token.line;
+                    char *mname=expect_name(p);
+                    Expr *fn=parse_function_body(p,mline,1);
+                    expr_list_add(&s->exprs,&s->nexprs,fn);
+                    s->method_names=xrealloc(s->method_names,sizeof(char*)*(size_t)s->nexprs);
+                    s->method_names[s->nexprs-1]=mname;
+                } else if (p->token.kind==T_NAME && !strcmp(p->token.text,"pass")) {
+                    next_token(p);
+                } else {
+                    int vt=parse_vtype_prefix(p);
+                    char *fname=expect_name(p);
+                    Expr *def=NULL;
+                    if (accept_token(p,T_ASSIGN)) def=parse_expr(p);
+                    s->fields=xrealloc(s->fields,sizeof(FieldDef)*(size_t)(s->nfields+1));
+                    s->fields[s->nfields].name=fname;
+                    s->fields[s->nfields].vtype=vt;
+                    s->fields[s->nfields].def=def;
+                    s->nfields++;
+                }
+            }
+            accept_token(p,T_DEDENT);
+        } else {
+            parse_error(p,"expected newline after struct/class ':'");
+        }
+        return s;
+    }
+    if (accept_token(p,T_GLOBAL)) {
+        Stmt *s=new_stmt(p,S_ASSIGN); s->line=line; s->is_global=1;
+        { Expr *var=new_expr(p,E_VAR); var->name=expect_name(p); expr_list_add(&s->exprs,&s->nexprs,var); }
+        while (accept_token(p,T_COMMA)) { Expr *var=new_expr(p,E_VAR); var->name=expect_name(p); expr_list_add(&s->exprs,&s->nexprs,var); }
+        s->flag=s->nexprs;
+        if (accept_token(p,T_ASSIGN)) parse_expr_list(p,&s->exprs,&s->nexprs);
+        return s;
+    }
     if (accept_token(p,T_LOCAL)) {
-        if (accept_token(p,T_FUNCTION)) {
+        if (accept_token(p,T_FUNCTION) || accept_token(p,T_FUNC)) {
             Stmt *s=new_stmt(p,S_LOCALFUNC); s->line=line; name_list_add(&s->names,&s->nnames,expect_name(p)); s->expr=parse_function_body(p,line,0); return s;
         }
         { Stmt *s=new_stmt(p,S_LOCAL); s->line=line;
           do {
-              int attribute = 0;
+              int attribute = 0, vt = parse_vtype_prefix(p);
               name_list_add(&s->names,&s->nnames,expect_name(p));
               if (accept_token(p,T_LT)) {
                   char *attr=expect_name(p);
@@ -378,44 +629,88 @@ static Stmt *parse_statement(Parser *p) {
               }
               s->attributes=xrealloc(s->attributes,(size_t)s->nnames);
               s->attributes[s->nnames-1]=(unsigned char)attribute;
+              s->var_types=xrealloc(s->var_types,(size_t)s->nnames);
+              s->var_types[s->nnames-1]=(unsigned char)vt;
           } while(accept_token(p,T_COMMA));
           if(accept_token(p,T_ASSIGN)) parse_expr_list(p,&s->exprs,&s->nexprs);
           return s; }
     }
-    if (accept_token(p,T_FUNCTION)) {
+    {
+        int vt = parse_vtype_prefix(p);
+        if (vt) {
+            Stmt *s=new_stmt(p,S_LOCAL); s->line=line;
+            do {
+                name_list_add(&s->names,&s->nnames,expect_name(p));
+                s->attributes=xrealloc(s->attributes,(size_t)s->nnames);
+                s->attributes[s->nnames-1]=0;
+                s->var_types=xrealloc(s->var_types,(size_t)s->nnames);
+                s->var_types[s->nnames-1]=(unsigned char)vt;
+            } while(accept_token(p,T_COMMA));
+            if(accept_token(p,T_ASSIGN)) parse_expr_list(p,&s->exprs,&s->nexprs);
+            return s;
+        }
+    }
+    if (accept_token(p,T_FUNCTION) || accept_token(p,T_FUNC)) {
         Stmt *s=new_stmt(p,S_ASSIGN); Expr *var=new_expr(p,E_VAR); var->name=expect_name(p); s->line=line;
         while(accept_token(p,T_DOT)){Expr *ix=new_expr(p,E_INDEX),*k=new_expr(p,E_STRING);ix->a=var;k->name=expect_name(p);ix->b=k;var=ix;}
         { int method=accept_token(p,T_COLON); char *method_name=NULL; if(method)method_name=expect_name(p);
           if(method){Expr *ix=new_expr(p,E_INDEX),*k=new_expr(p,E_STRING);ix->a=var;k->name=method_name;ix->b=k;var=ix;}
           expr_list_add(&s->exprs,&s->nexprs,var); expr_list_add(&s->exprs,&s->nexprs,parse_function_body(p,line,method));
-          /* Assignment uses first half as targets and second as values; mark one target. */
-          s->nexprs=1; s->expr=var; s->expr2=s->exprs[1]; free(s->exprs);s->exprs=NULL;s->nexprs=0; return s; }
+          s->expr=var; s->expr2=s->exprs[1]; free(s->exprs);s->exprs=NULL;s->nexprs=0; return s; }
     }
     if (accept_token(p,T_IF)) {
-        Stmt *s=new_stmt(p,S_IF); s->line=line;
+        Stmt *s=new_stmt(p,S_IF); int indented=0; s->line=line;
         for(;;){
-            Expr *cond=parse_expr(p); Stmt *body; expect(p,T_THEN); body=parse_block(p);
+            Expr *cond=parse_expr(p); Stmt *body;
+            if (accept_token(p,T_COLON)) { indented=1; body=parse_block_indented(p); }
+            else { expect(p,T_THEN); body=parse_block(p); }
             s->conds=xrealloc(s->conds,sizeof(Expr*)*(size_t)(s->nblocks+1));s->blocks=xrealloc(s->blocks,sizeof(Stmt*)*(size_t)(s->nblocks+1));
             s->conds[s->nblocks]=cond;s->blocks[s->nblocks]=body;++s->nblocks;
-            if(!accept_token(p,T_ELSEIF))break;
+            if(!accept_token(p,T_ELSEIF) && !accept_token(p,T_ELIF))break;
         }
-        if(accept_token(p,T_ELSE)){s->blocks=xrealloc(s->blocks,sizeof(Stmt*)*(size_t)(s->nblocks+1));s->conds=xrealloc(s->conds,sizeof(Expr*)*(size_t)(s->nblocks+1));s->conds[s->nblocks]=NULL;s->blocks[s->nblocks]=parse_block(p);++s->nblocks;}
-        expect(p,T_END);return s;
+        if(accept_token(p,T_ELSE)){
+            s->blocks=xrealloc(s->blocks,sizeof(Stmt*)*(size_t)(s->nblocks+1));s->conds=xrealloc(s->conds,sizeof(Expr*)*(size_t)(s->nblocks+1));
+            s->conds[s->nblocks]=NULL;
+            if (indented) { expect(p,T_COLON); s->blocks[s->nblocks]=parse_block_indented(p); }
+            else s->blocks[s->nblocks]=parse_block(p);
+            ++s->nblocks;
+        }
+        if(!indented) expect(p,T_END);
+        return s;
     }
-    if (accept_token(p,T_WHILE)) { Stmt *s=new_stmt(p,S_WHILE);s->line=line;s->expr=parse_expr(p);expect(p,T_DO);s->body=parse_block(p);expect(p,T_END);return s; }
+    if (accept_token(p,T_WHILE)) {
+        Stmt *s=new_stmt(p,S_WHILE);s->line=line;s->expr=parse_expr(p);
+        if (accept_token(p,T_COLON)) s->body=parse_block_indented(p);
+        else { expect(p,T_DO);s->body=parse_block(p);expect(p,T_END); }
+        return s;
+    }
     if (accept_token(p,T_REPEAT)) { Stmt *s=new_stmt(p,S_REPEAT);s->line=line;s->body=parse_block(p);expect(p,T_UNTIL);s->expr=parse_expr(p);return s; }
     if (accept_token(p,T_DO)) { Stmt *s=new_stmt(p,S_DO);s->line=line;s->body=parse_block(p);expect(p,T_END);return s; }
     if (accept_token(p,T_FOR)) {
         char *first=expect_name(p);
-        if(accept_token(p,T_ASSIGN)){Stmt*s=new_stmt(p,S_FORNUM);s->line=line;name_list_add(&s->names,&s->nnames,first);s->expr=parse_expr(p);expect(p,T_COMMA);s->expr2=parse_expr(p);if(accept_token(p,T_COMMA))s->expr3=parse_expr(p);expect(p,T_DO);s->body=parse_block(p);expect(p,T_END);return s;}
-        {Stmt*s=new_stmt(p,S_FORIN);s->line=line;name_list_add(&s->names,&s->nnames,first);while(accept_token(p,T_COMMA))name_list_add(&s->names,&s->nnames,expect_name(p));expect(p,T_IN);parse_expr_list(p,&s->exprs,&s->nexprs);expect(p,T_DO);s->body=parse_block(p);expect(p,T_END);return s;}
+        if(accept_token(p,T_ASSIGN)){
+            Stmt*s=new_stmt(p,S_FORNUM);s->line=line;name_list_add(&s->names,&s->nnames,first);s->expr=parse_expr(p);expect(p,T_COMMA);s->expr2=parse_expr(p);if(accept_token(p,T_COMMA))s->expr3=parse_expr(p);
+            if (accept_token(p,T_COLON)) s->body=parse_block_indented(p);
+            else { expect(p,T_DO);s->body=parse_block(p);expect(p,T_END); }
+            return s;
+        }
+        {
+            Stmt*s=new_stmt(p,S_FORIN);s->line=line;name_list_add(&s->names,&s->nnames,first);while(accept_token(p,T_COMMA))name_list_add(&s->names,&s->nnames,expect_name(p));expect(p,T_IN);parse_expr_list(p,&s->exprs,&s->nexprs);
+            if (accept_token(p,T_COLON)) s->body=parse_block_indented(p);
+            else { expect(p,T_DO);s->body=parse_block(p);expect(p,T_END); }
+            return s;
+        }
     }
-    if (accept_token(p,T_RETURN)) { Stmt*s=new_stmt(p,S_RETURN);s->line=line;if(!block_end(p->token.kind)&&p->token.kind!=T_SEMI)parse_expr_list(p,&s->exprs,&s->nexprs);accept_token(p,T_SEMI);return s; }
+    if (accept_token(p,T_RETURN)) { Stmt*s=new_stmt(p,S_RETURN);s->line=line;if(!stmt_end(p->token.kind))parse_expr_list(p,&s->exprs,&s->nexprs);accept_token(p,T_SEMI);return s; }
     if (accept_token(p,T_BREAK)) { Stmt*s=new_stmt(p,S_BREAK);s->line=line;return s; }
     if (accept_token(p,T_GOTO)) { Stmt*s=new_stmt(p,S_GOTO);s->line=line;name_list_add(&s->names,&s->nnames,expect_name(p));return s; }
     if (accept_token(p,T_DBCOLON)) { Stmt*s=new_stmt(p,S_LABEL);s->line=line;name_list_add(&s->names,&s->nnames,expect_name(p));expect(p,T_DBCOLON);return s; }
     {
         Expr *first=parse_primary(p);
+        int cop=compound_op(p->token.kind);
+        if (cop>=0) {
+            Stmt*s=new_stmt(p,S_COMPOUND);s->line=line;s->flag=cop;next_token(p);s->expr=first;s->expr2=parse_expr(p);return s;
+        }
         if(p->token.kind==T_ASSIGN||p->token.kind==T_COMMA){
             Stmt*s=new_stmt(p,S_ASSIGN);s->line=line;expr_list_add(&s->exprs,&s->nexprs,first);while(accept_token(p,T_COMMA))expr_list_add(&s->exprs,&s->nexprs,parse_primary(p));expect(p,T_ASSIGN);
             s->flag=s->nexprs;parse_expr_list(p,&s->exprs,&s->nexprs);return s;
@@ -426,13 +721,19 @@ static Stmt *parse_statement(Parser *p) {
 }
 static Stmt *parse_block(Parser *p) {
     Stmt *head=NULL;
-    while(!block_end(p->token.kind)&&!p->failed){Stmt*s=parse_statement(p);if(s)head=stmt_append(head,s);if(s&&s->kind==S_RETURN)break;}
+    while(!block_end(p->token.kind)&&!p->failed){
+        Stmt *s;
+        while(p->token.kind==T_NEWLINE||p->token.kind==T_INDENT||p->token.kind==T_DEDENT||p->token.kind==T_SEMI)next_token(p);
+        if(block_end(p->token.kind))break;
+        s=parse_statement(p);if(s)head=stmt_append(head,s);if(s&&s->kind==S_RETURN)break;
+    }
+    while(p->token.kind==T_NEWLINE||p->token.kind==T_INDENT||p->token.kind==T_DEDENT||p->token.kind==T_SEMI)next_token(p);
     return head;
 }
 
 static void free_stmt(Stmt *s);
-static void free_expr(Expr *e){int i;if(!e)return;free_expr(e->a);free_expr(e->b);for(i=0;i<e->count;++i){free_expr(e->items[i]);if(e->keys)free_expr(e->keys[i]);}free(e->items);free(e->keys);for(i=0;i<e->nparams;++i)free(e->params[i]);free(e->params);free(e->name);free_stmt(e->body);free(e);}
-static void free_stmt(Stmt *s){int i;if(!s)return;free_stmt(s->next);free_stmt(s->body);for(i=0;i<s->nnames;++i)free(s->names[i]);free(s->names);free(s->attributes);for(i=0;i<s->nexprs;++i)free_expr(s->exprs[i]);free(s->exprs);free_expr(s->expr);free_expr(s->expr2);free_expr(s->expr3);for(i=0;i<s->nblocks;++i){free_expr(s->conds[i]);free_stmt(s->blocks[i]);}free(s->conds);free(s->blocks);free(s);}
+static void free_expr(Expr *e){int i;if(!e)return;free_expr(e->a);free_expr(e->b);for(i=0;i<e->count;++i){free_expr(e->items[i]);if(e->keys)free_expr(e->keys[i]);}free(e->items);free(e->keys);for(i=0;i<e->nparams;++i)free(e->params[i]);free(e->params);free(e->param_types);free(e->name);free_stmt(e->body);free(e);}
+static void free_stmt(Stmt *s){int i;if(!s)return;free_stmt(s->next);free_stmt(s->body);for(i=0;i<s->nnames;++i)free(s->names[i]);free(s->names);free(s->attributes);free(s->var_types);for(i=0;i<s->nexprs;++i)free_expr(s->exprs[i]);free(s->exprs);for(i=0;i<s->nfields;++i){free(s->fields[i].name);free_expr(s->fields[i].def);}free(s->fields);if(s->method_names){for(i=0;i<s->nexprs;++i)free(s->method_names[i]);free(s->method_names);}free_expr(s->expr);free_expr(s->expr2);free_expr(s->expr3);for(i=0;i<s->nblocks;++i){free_expr(s->conds[i]);free_stmt(s->blocks[i]);}free(s->conds);free(s->blocks);free(s);}
 
 /* Validate const writes once for every backend, including --check and load.
    Locals enter scope only after their initializer; function parameters, loop
@@ -483,6 +784,17 @@ static void verify_stmts(Parser *p, Stmt *s, VerifyLocal **locals, int restore) 
             verify_expr(p,s->expr,locals);
             continue;
         }
+        if (s->kind == S_STRUCT) {
+            for (i=0; i<s->nfields; ++i) verify_expr(p,s->fields[i].def,locals);
+            for (i=0; i<s->nexprs; ++i) verify_expr(p,s->exprs[i],locals);
+            continue;
+        }
+        if (s->kind == S_COMPOUND) {
+            verify_target(p,s->expr,*locals,s->line);
+            verify_expr(p,s->expr,locals);
+            verify_expr(p,s->expr2,locals);
+            continue;
+        }
         if (s->kind == S_ASSIGN) {
             if (s->flag == 0 && s->expr) verify_target(p,s->expr,*locals,s->line);
             for (i=0; i<s->flag; ++i) verify_target(p,s->exprs[i],*locals,s->line);
@@ -517,17 +829,48 @@ static void verify_program(Parser *p, Stmt *program) {
 
 /* ---------------------------- C code generator -------------------------- */
 typedef enum { SYM_LOCAL,SYM_UPVALUE,SYM_GLOBAL } SymKind;
-typedef struct Symbol { char *name,*cname;SymKind kind; } Symbol;
+typedef struct Symbol { char *name,*cname;SymKind kind;int vtype; } Symbol;
 typedef struct Capture { Symbol *source;Symbol *symbol; } Capture;
 typedef struct Cg Cg;
 typedef struct Cf {
     Cg *cg;struct Cf *parent;Str decl,body,cleanup;Symbol **locals,**all;int nlocals,nall,cap_locals,cap_all;
     Capture *caps;int ncaps;int temp_id,local_id;char *retname;int vararg;
     char **temps;int ntemps;int loop_depth;
+    char **explicit_globals;int n_explicit_globals;
 } Cf;
-struct Cg { Parser *parser;Str functions;int function_id;int failed; };
+struct Cg { Parser *parser;Str functions;int function_id;int failed;char **top_globals;int ntop_globals; };
 
-static Symbol global_symbol={"","",SYM_GLOBAL};
+static void cg_add_top_global(Cg *cg, const char *name) {
+    int i;
+    if (!name) return;
+    for (i = 0; i < cg->ntop_globals; ++i) if (!strcmp(cg->top_globals[i], name)) return;
+    cg->top_globals = xrealloc(cg->top_globals, sizeof(char *) * (size_t)(cg->ntop_globals + 1));
+    cg->top_globals[cg->ntop_globals++] = xstrdup(name);
+}
+static int cg_is_top_global(Cg *cg, const char *name) {
+    int i;
+    for (i = 0; i < cg->ntop_globals; ++i) if (!strcmp(cg->top_globals[i], name)) return 1;
+    return 0;
+}
+static void cg_collect_top_globals(Cg *cg, Stmt *program) {
+    Stmt *s;
+    int i;
+    for (s = program; s; s = s->next) {
+        if (s->kind == S_STRUCT && s->nnames > 0) cg_add_top_global(cg, s->names[0]);
+        else if (s->kind == S_ASSIGN) {
+            if (s->flag == 0 && s->expr && s->expr->kind == E_VAR) cg_add_top_global(cg, s->expr->name);
+            for (i = 0; i < s->flag; ++i) if (s->exprs[i]->kind == E_VAR) cg_add_top_global(cg, s->exprs[i]->name);
+        }
+    }
+}
+static void cg_free_top_globals(Cg *cg) {
+    int i;
+    for (i = 0; i < cg->ntop_globals; ++i) free(cg->top_globals[i]);
+    free(cg->top_globals);
+    cg->top_globals = NULL; cg->ntop_globals = 0;
+}
+
+static Symbol global_symbol={"","",SYM_GLOBAL,0};
 static void cf_temp(Cf*f){f->temp_id++;}
 static char *cf_new_temp(Cf*f){
     char buf[32],*name;
@@ -544,11 +887,26 @@ static void cf_dispose(Cf*f){
     for(i=0;i<f->nall;++i){free(f->all[i]->name);free(f->all[i]->cname);free(f->all[i]);}
     for(i=0;i<f->ncaps;++i){free(f->caps[i].symbol->name);free(f->caps[i].symbol->cname);free(f->caps[i].symbol);}
     for(i=0;i<f->ntemps;++i)free(f->temps[i]);
+    for(i=0;i<f->n_explicit_globals;++i)free(f->explicit_globals[i]);
+    free(f->explicit_globals);
     free(f->temps);free(f->all);free(f->locals);free(f->caps);
     sb_free(&f->decl);sb_free(&f->body);sb_free(&f->cleanup);
 }
+static void cf_declare_global(Cf *f, const char *name) {
+    int i;
+    if (!f || !name) return;
+    for (i = 0; i < f->n_explicit_globals; ++i) if (!strcmp(f->explicit_globals[i], name)) return;
+    f->explicit_globals = xrealloc(f->explicit_globals, sizeof(char *) * (size_t)(f->n_explicit_globals + 1));
+    f->explicit_globals[f->n_explicit_globals++] = xstrdup(name);
+}
+static int cf_is_explicit_global(Cf *f, const char *name) {
+    int i;
+    if (!f || !name) return 0;
+    for (i = 0; i < f->n_explicit_globals; ++i) if (!strcmp(f->explicit_globals[i], name)) return 1;
+    return 0;
+}
 static Symbol *cf_local(Cf*f,const char*name,int declare){
-    Symbol*s=xmalloc(sizeof(*s));char buf[32];s->name=xstrdup(name);s->kind=SYM_LOCAL;snprintf(buf,sizeof(buf),"l%d",f->local_id++);s->cname=xstrdup(buf);
+    Symbol*s=xmalloc(sizeof(*s));char buf[32];s->name=xstrdup(name);s->kind=SYM_LOCAL;s->vtype=0;snprintf(buf,sizeof(buf),"l%d",f->local_id++);s->cname=xstrdup(buf);
     f->all=xrealloc(f->all,sizeof(Symbol*)*(size_t)(f->nall+1));f->all[f->nall++]=s;
     sb_printf(&f->decl,"    LcCell *%s = NULL;\n",s->cname);
     sb_printf(&f->cleanup,"    if (%s) { lc_cell_release(ctx, %s); %s = NULL; }\n",s->cname,s->cname,s->cname);
@@ -557,8 +915,9 @@ static Symbol *cf_local(Cf*f,const char*name,int declare){
 }
 static Symbol *cf_resolve(Cf*f,const char*name){
     int i;if(!f)return &global_symbol;
+    if(cf_is_explicit_global(f,name))return &global_symbol;
     for(i=f->nlocals-1;i>=0;--i)if(!strcmp(f->locals[i]->name,name))return f->locals[i];
-    if(f->parent){Symbol*p=cf_resolve(f->parent,name);if(p->kind!=SYM_GLOBAL){for(i=0;i<f->ncaps;++i)if(f->caps[i].source==p)return f->caps[i].symbol;f->caps=xrealloc(f->caps,sizeof(Capture)*(size_t)(f->ncaps+1));{Symbol*s=xmalloc(sizeof(*s));char buf[64];s->name=xstrdup(name);s->kind=SYM_UPVALUE;snprintf(buf,sizeof(buf),"self->upvalues[%d]",f->ncaps);s->cname=xstrdup(buf);f->caps[f->ncaps].source=p;f->caps[f->ncaps].symbol=s;++f->ncaps;return s;}}}
+    if(f->parent){Symbol*p=cf_resolve(f->parent,name);if(p->kind!=SYM_GLOBAL){for(i=0;i<f->ncaps;++i)if(f->caps[i].source==p)return f->caps[i].symbol;f->caps=xrealloc(f->caps,sizeof(Capture)*(size_t)(f->ncaps+1));{Symbol*s=xmalloc(sizeof(*s));char buf[64];s->name=xstrdup(name);s->kind=SYM_UPVALUE;s->vtype=p->vtype;snprintf(buf,sizeof(buf),"self->upvalues[%d]",f->ncaps);s->cname=xstrdup(buf);f->caps[f->ncaps].source=p;f->caps[f->ncaps].symbol=s;++f->ncaps;return s;}}}
     return &global_symbol;
 }
 static void cg_release(Cf*f,const char*t){sb_printf(&f->body,"    LC_RELEASE(ctx, %s);\n",t);}
@@ -595,7 +954,7 @@ static char *cg_expr(Cf*f,Expr*e){
             return t;
         case E_CALL:{
             char*fn,*self=NULL;int base=0;
-            if(e->flag){self=cg_expr(f,e->a);{char*k=cf_new_temp(f);fn=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_string(ctx, \"%s\");\n",k,e->name);sb_printf(&f->body,"    %s = lc_table_get(ctx, %s, %s);\n",fn,self,k);cg_release(f,k);}base=1;}
+            if(e->flag){self=cg_expr(f,e->a);{char*k=cf_new_temp(f);fn=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_string(ctx, \"%s\");\n",k,e->name);sb_printf(&f->body,"    %s = lc_method_get(ctx, %s, %s);\n",fn,self,k);cg_release(f,k);}base=1;}
             else fn=cg_expr(f,e->a);
             {int n=e->count+base;char**args=xmalloc(sizeof(char*)*(size_t)(n?n:1));if(base)args[0]=self;for(i=0;i<e->count;++i)args[i+base]=cg_expr(f,e->items[i]);t=cf_new_temp(f);sb_printf(&f->body,"    { LcValue args%d[] = { ",f->temp_id);for(i=0;i<n;++i)sb_printf(&f->body,"%s%s",i?", ":"",args[i]);sb_printf(&f->body," };\n      %s = lc_call_list(ctx, %s, %d, args%d); }\n",t,fn,n,f->temp_id);cg_release(f,fn);for(i=0;i<n;++i){cg_release(f,args[i]);}free(args);return t;}}
         case E_FUNCTION:return cg_function(f,e,"anonymous");
@@ -622,7 +981,14 @@ static void cg_assign_values(Cf*f,Stmt*s,Symbol**targets,int declare){
     char**rhs=xmalloc(sizeof(char*)*(size_t)(s->nexprs?s->nexprs:1));int i,n=s->nnames;
     for(i=0;i<s->nexprs;++i)rhs[i]=cg_expr(f,s->exprs[i]);
     if(declare==2)for(i=0;i<n;++i){f->locals=xrealloc(f->locals,sizeof(Symbol*)*(size_t)(f->nlocals+1));f->locals[f->nlocals++]=targets[i];}
-    for(i=0;i<n;++i){int ri=i<s->nexprs-1?i:s->nexprs-1;int index=i<s->nexprs-1?0:i-(s->nexprs-1);char*v=cf_new_temp(f);if(ri<0)sb_printf(&f->body,"    %s = lc_nil();\n",v);else sb_printf(&f->body,"    %s = lc_nth(%s, %d);\n",v,rhs[ri],index);if(declare)sb_printf(&f->body,"    lc_cell_replace(ctx, &%s, %s); %s = lc_nil();\n",targets[i]->cname,v,v);else sb_printf(&f->body,"    lc_cell_set(ctx, %s, %s); %s = lc_nil();\n",targets[i]->cname,v,v);}
+    for(i=0;i<n;++i){
+        int ri=i<s->nexprs-1?i:s->nexprs-1;int index=i<s->nexprs-1?0:i-(s->nexprs-1);char*v=cf_new_temp(f);
+        if(ri<0)sb_printf(&f->body,"    %s = lc_nil();\n",v);
+        else sb_printf(&f->body,"    %s = lc_nth(%s, %d);\n",v,rhs[ri],index);
+        if(targets[i]->vtype)sb_printf(&f->body,"    %s = lc_check_type(ctx, %s, %d, \"%s\");\n",v,v,targets[i]->vtype,targets[i]->name);
+        if(declare)sb_printf(&f->body,"    lc_cell_replace(ctx, &%s, %s); %s = lc_nil();\n",targets[i]->cname,v,v);
+        else sb_printf(&f->body,"    lc_cell_set(ctx, %s, %s); %s = lc_nil();\n",targets[i]->cname,v,v);
+    }
     for(i=0;i<s->nexprs;++i){cg_release(f,rhs[i]);}free(rhs);
 }
 
@@ -630,17 +996,96 @@ static void cg_stmt(Cf*f,Stmt*s){
     int i;char*t;
     sb_printf(&f->body,"    ctx->line = %d;\n",s->line);
     switch(s->kind){
-        case S_LOCAL:{Symbol**targets=xmalloc(sizeof(Symbol*)*(size_t)s->nnames);for(i=0;i<s->nnames;++i)targets[i]=cf_local(f,s->names[i],0);cg_assign_values(f,s,targets,2);free(targets);break;}
+        case S_LOCAL:{Symbol**targets=xmalloc(sizeof(Symbol*)*(size_t)s->nnames);for(i=0;i<s->nnames;++i){targets[i]=cf_local(f,s->names[i],0);if(s->var_types)targets[i]->vtype=s->var_types[i];}cg_assign_values(f,s,targets,2);free(targets);break;}
         case S_LOCALFUNC:{Symbol*sym=cf_local(f,s->names[0],1);sb_printf(&f->body,"    lc_cell_replace(ctx, &%s, lc_nil());\n",sym->cname);t=cg_function(f,s->expr,s->names[0]);sb_printf(&f->body,"    lc_cell_set(ctx, %s, %s); %s = lc_nil();\n",sym->cname,t,t);break;}
+        case S_STRUCT:{
+            const char *sname = s->names[0];
+            const char *bname = s->nnames > 1 ? s->names[1] : NULL;
+            sb_printf(&f->body,"    {\n        LcStructDesc *base_desc = NULL, *desc;\n");
+            if (bname) {
+                char *bk = cf_new_temp(f), *bfn = cf_new_temp(f);
+                sb_printf(&f->body,"        %s = lc_string(ctx, \"%s\");\n",bk,bname);
+                sb_printf(&f->body,"        %s = lc_table_get(ctx, ctx->globals, %s);\n",bfn,bk);
+                sb_printf(&f->body,"        if (%s.type == LC_FUNCTION && %s.as.function->upvalue_count > 0) base_desc = (LcStructDesc *)%s.as.function->upvalues[0];\n",bfn,bfn,bfn);
+                cg_release(f,bk); cg_release(f,bfn);
+            }
+            sb_printf(&f->body,"        desc = lc_struct_desc_new(ctx, \"%s\", base_desc, %d, %d);\n",sname,s->nfields,s->nexprs);
+            sb_printf(&f->body,"        { int fbase = base_desc ? base_desc->field_count : 0;\n          int mbase = base_desc ? base_desc->method_count : 0;\n");
+            for (i = 0; i < s->nfields; ++i) {
+                char *dv = s->fields[i].def ? cg_expr(f, s->fields[i].def) : NULL;
+                if (!dv) {
+                    dv = cf_new_temp(f);
+                    if (s->fields[i].vtype == 1) sb_printf(&f->body,"          %s = lc_integer(0);\n",dv);
+                    else if (s->fields[i].vtype == 2) sb_printf(&f->body,"          %s = lc_number(0);\n",dv);
+                    else if (s->fields[i].vtype == 3) sb_printf(&f->body,"          %s = lc_string(ctx, \"\");\n",dv);
+                    else if (s->fields[i].vtype == 4) sb_printf(&f->body,"          %s = lc_bool(0);\n",dv);
+                    else sb_printf(&f->body,"          %s = lc_nil();\n",dv);
+                }
+                sb_printf(&f->body,"          lc_struct_desc_add_field(desc, fbase + %d, \"%s\", %d, %s);\n",i,s->fields[i].name,s->fields[i].vtype,dv);
+                cg_release(f,dv);
+            }
+            for (i = 0; i < s->nexprs; ++i) {
+                char *fn = cg_function(f, s->exprs[i], s->method_names[i]);
+                sb_printf(&f->body,"          lc_struct_desc_add_method(desc, mbase + %d, \"%s\", %s);\n",i,s->method_names[i],fn);
+                cg_release(f,fn);
+            }
+            sb_printf(&f->body,"        }\n        lc_struct_register(ctx, desc);\n    }\n");
+            break;
+        }
+        case S_COMPOUND:{
+            Expr *target = s->expr;
+            char *rhs = cg_expr(f, s->expr2);
+            if (target->kind == E_VAR) {
+                Symbol *sym = cf_resolve(f, target->name);
+                char *cur = cf_new_temp(f), *res = cf_new_temp(f);
+                if (sym->kind == SYM_GLOBAL) {
+                    char *k = cf_new_temp(f);
+                    sb_printf(&f->body,"    %s = lc_string(ctx, \"%s\");\n",k,target->name);
+                    sb_printf(&f->body,"    %s = lc_table_get(ctx, ctx->globals, %s);\n",cur,k);
+                    sb_printf(&f->body,"    %s = lc_binary(ctx, %d, %s, %s);\n",res,s->flag,cur,rhs);
+                    sb_printf(&f->body,"    lc_table_set(ctx, ctx->globals, %s, %s);\n",k,res);
+                    cg_release(f,k);
+                } else {
+                    sb_printf(&f->body,"    %s = lc_cell_get(%s);\n",cur,sym->cname);
+                    sb_printf(&f->body,"    %s = lc_binary(ctx, %d, %s, %s);\n",res,s->flag,cur,rhs);
+                    if (sym->vtype) sb_printf(&f->body,"    %s = lc_check_type(ctx, %s, %d, \"%s\");\n",res,res,sym->vtype,sym->name);
+                    sb_printf(&f->body,"    lc_cell_set(ctx, %s, %s);\n",sym->cname,res);
+                }
+                cg_release(f,cur); cg_release(f,res);
+            } else if (target->kind == E_INDEX) {
+                char *obj = cg_expr(f, target->a), *key = cg_expr(f, target->b);
+                char *cur = cf_new_temp(f), *res = cf_new_temp(f);
+                sb_printf(&f->body,"    %s = lc_table_get(ctx, %s, %s);\n",cur,obj,key);
+                sb_printf(&f->body,"    %s = lc_binary(ctx, %d, %s, %s);\n",res,s->flag,cur,rhs);
+                sb_printf(&f->body,"    lc_table_set(ctx, %s, %s, %s);\n",obj,key,res);
+                cg_release(f,obj); cg_release(f,key); cg_release(f,cur); cg_release(f,res);
+            } else {
+                f->cg->failed = 1;
+                fprintf(stderr,"%s:%d: invalid compound assignment target\n",f->cg->parser->filename,s->line);
+            }
+            cg_release(f, rhs);
+            break;
+        }
         case S_ASSIGN:{
             int nt=s->flag,nr=s->nexprs-nt;char**rhs=xmalloc(sizeof(char*)*(size_t)(nr?nr:1));
+            if(s->is_global){for(i=0;i<nt;++i)if(s->exprs[i]->kind==E_VAR)cf_declare_global(f,s->exprs[i]->name);if(nr<=0){free(rhs);break;}}
             /* Function declarations use expr/expr2 to keep target and value separate. */
             if(nt==0&&s->expr&&s->expr2){Stmt tmp;memset(&tmp,0,sizeof(tmp));tmp.nexprs=1;tmp.exprs=&s->expr2;tmp.nnames=1;
                 if(s->expr->kind==E_VAR){Symbol*sym=cf_resolve(f,s->expr->name);if(sym->kind==SYM_GLOBAL){char*k=cf_new_temp(f),*v=cg_expr(f,s->expr2);sb_printf(&f->body,"    %s = lc_string(ctx, \"%s\");\n",k,s->expr->name);sb_printf(&f->body,"    lc_table_set(ctx, ctx->globals, %s, %s);\n",k,v);cg_release(f,k);cg_release(f,v);}else{t=cg_expr(f,s->expr2);sb_printf(&f->body,"    lc_cell_set(ctx, %s, %s); %s = lc_nil();\n",sym->cname,t,t);}}
                 else{char*obj=cg_expr(f,s->expr->a),*key=cg_expr(f,s->expr->b),*v=cg_expr(f,s->expr2);sb_printf(&f->body,"    lc_table_set(ctx, %s, %s, %s);\n",obj,key,v);cg_release(f,obj);cg_release(f,key);cg_release(f,v);}free(rhs);break;}
             for(i=0;i<nr;++i)rhs[i]=cg_expr(f,s->exprs[nt+i]);
             for(i=0;i<nt;++i){Expr*target=s->exprs[i];int ri=i<nr-1?i:nr-1,idx=i<nr-1?0:i-(nr-1);char*v=cf_new_temp(f);if(ri<0)sb_printf(&f->body,"    %s = lc_nil();\n",v);else sb_printf(&f->body,"    %s = lc_nth(%s, %d);\n",v,rhs[ri],idx);
-                if(target->kind==E_VAR){Symbol*sym=cf_resolve(f,target->name);if(sym->kind==SYM_GLOBAL){char*k=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_string(ctx, \"%s\");\n",k,target->name);sb_printf(&f->body,"    lc_table_set(ctx, ctx->globals, %s, %s);\n",k,v);cg_release(f,k);}else sb_printf(&f->body,"    lc_cell_set(ctx, %s, %s); %s = lc_nil();\n",sym->cname,v,v);cg_release(f,v);}
+                if(target->kind==E_VAR){Symbol*sym=cf_resolve(f,target->name);
+                    if(sym->kind==SYM_GLOBAL && !s->is_global && f->parent!=NULL && !cg_is_top_global(f->cg,target->name)){
+                        sym=cf_local(f,target->name,1);
+                        sb_printf(&f->body,"    lc_cell_replace(ctx, &%s, %s); %s = lc_nil();\n",sym->cname,v,v);
+                    } else if(sym->kind==SYM_GLOBAL){
+                        char*k=cf_new_temp(f);sb_printf(&f->body,"    %s = lc_string(ctx, \"%s\");\n",k,target->name);sb_printf(&f->body,"    lc_table_set(ctx, ctx->globals, %s, %s);\n",k,v);cg_release(f,k);
+                    } else {
+                        if(sym->vtype)sb_printf(&f->body,"    %s = lc_check_type(ctx, %s, %d, \"%s\");\n",v,v,sym->vtype,sym->name);
+                        sb_printf(&f->body,"    lc_cell_set(ctx, %s, %s); %s = lc_nil();\n",sym->cname,v,v);
+                    }
+                    cg_release(f,v);}
                 else if(target->kind==E_INDEX){char*obj=cg_expr(f,target->a),*key=cg_expr(f,target->b);sb_printf(&f->body,"    lc_table_set(ctx, %s, %s, %s);\n",obj,key,v);cg_release(f,obj);cg_release(f,key);cg_release(f,v);}else{f->cg->failed=1;fprintf(stderr,"%s:%d: invalid assignment target\n",f->cg->parser->filename,s->line);cg_release(f,v);}}
             for(i=0;i<nr;++i){cg_release(f,rhs[i]);}free(rhs);break;}
         case S_EXPR:t=cg_expr(f,s->expr);cg_release(f,t);break;
@@ -688,7 +1133,7 @@ static void cg_stmts(Cf*f,Stmt*s){int mark=cg_mark(f);for(;s;s=s->next)cg_stmt(f
 
 static char *cg_function(Cf*parent,Expr*e,const char*name){
     Cg*cg=parent->cg;Cf f;int i,id=++cg->function_id;char cname[64],*result;Str out;memset(&f,0,sizeof(f));f.cg=cg;f.parent=parent;f.vararg=e->flag;sb_init(&f.decl);sb_init(&f.body);sb_init(&f.cleanup);snprintf(cname,sizeof(cname),"lc_fn_%d",id);
-    for(i=0;i<e->nparams;++i){Symbol*s=cf_local(&f,e->params[i],1);sb_printf(&f.body,"    lc_cell_replace(ctx, &%s, %d < argc ? lc_first(argv[%d]) : lc_nil());\n",s->cname,i,i);}
+    for(i=0;i<e->nparams;++i){Symbol*s=cf_local(&f,e->params[i],1);int pt=(e->param_types?e->param_types[i]:0);s->vtype=pt;if(pt)sb_printf(&f.body,"    lc_cell_replace(ctx, &%s, lc_check_type(ctx, %d < argc ? lc_first(argv[%d]) : lc_nil(), %d, \"%s\"));\n",s->cname,i,i,pt,s->name);else sb_printf(&f.body,"    lc_cell_replace(ctx, &%s, %d < argc ? lc_first(argv[%d]) : lc_nil());\n",s->cname,i,i);}
     if(e->flag)sb_add(&f.body,"    { int n = argc > LC_PARAM_COUNT ? argc - LC_PARAM_COUNT : 0; lc_varargs = lc_tuple_new(ctx, n, argv + LC_PARAM_COUNT, 0); }\n");
     cg_stmts(&f,e->body);
     sb_init(&out);sb_printf(&out,"static LcValue %s(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {\n",cname);
@@ -838,10 +1283,8 @@ static void discover_expr_requires(ModuleBuild *build, Expr *e, const char *file
                 module->name = xstrdup(name); module->path = path; module->id = build->count;
                 module->source = module_read_file(path, &source_length);
                 if (!module->source) { build->cg->failed = 1; return; }
-                memset(&module->parser, 0, sizeof(module->parser));
-                module->parser.source = module->source; module->parser.filename = module->path;
-                module->parser.length = source_length; module->parser.line = module->parser.column = 1;
-                next_token(&module->parser); module->program = parse_block(&module->parser);
+                parser_init(&module->parser, module->source, module->path, source_length);
+                module->program = parse_block(&module->parser);
                 if (module->parser.token.kind != T_EOF) parse_error(&module->parser, "unexpected token in module");
                 verify_program(&module->parser,module->program);
                 if (module->parser.failed) {
@@ -864,6 +1307,7 @@ static void discover_module_requires(ModuleBuild *build, Stmt *program, const ch
         discover_expr_requires(build, stmt->expr, filename);
         discover_expr_requires(build, stmt->expr2, filename);
         discover_expr_requires(build, stmt->expr3, filename);
+        for (i = 0; i < stmt->nfields; ++i) discover_expr_requires(build, stmt->fields[i].def, filename);
         for (i = 0; i < stmt->nexprs; ++i) discover_expr_requires(build, stmt->exprs[i], filename);
         for (i = 0; i < stmt->nblocks; ++i) {
             discover_expr_requires(build, stmt->conds[i], filename);
@@ -894,6 +1338,7 @@ static void dispose_disk_modules(ModuleBuild *build) {
 static char *generate_c(Parser*p,Stmt*program,const char*source){
     Cg cg;Cf root;Expr mainexpr;char*entry;Str out;ModuleBuild modules;int i;
     memset(&cg,0,sizeof(cg));cg.parser=p;sb_init(&cg.functions);memset(&modules,0,sizeof(modules));modules.cg=&cg;modules.root_file=source;
+    cg_collect_top_globals(&cg, program);
     discover_module_requires(&modules,program,source);
     for(i=0;i<modules.count&&!cg.failed;++i)generate_disk_module(&cg,&modules.items[i]);
     cg.parser=p;
@@ -906,19 +1351,14 @@ static char *generate_c(Parser*p,Stmt*program,const char*source){
     for(i=0;i<modules.count;++i){int j;sb_printf(&out,"    lc_preload_native(ctx, \"");
         for(j=0;modules.items[i].name[j];++j){char c=modules.items[i].name[j];if(c=='\\'||c=='\"')sb_printf(&out,"\\%c",c);else sb_n(&out,&c,1);}sb_printf(&out,"\", lc_disk_module_%d);\n",modules.items[i].id);}
     sb_add(&out,"    r = lc_user_main(ctx, NULL, 0, NULL);\n    lc_release(ctx, r);\n    return lc_report_error(ctx);\n}\n\n#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\nint lc_jit_main(void) {\n    LcContext *ctx = lc_context_new(\"");sb_add(&out,source);sb_add(&out,"\");\n    int status;\n    if (!ctx) return 1;\n    status = lc_program_main(ctx);\n    lc_context_destroy(ctx);\n    return status;\n}\n\n#ifdef LUAC_STANDALONE\nint main(void) { return lc_jit_main(); }\n#endif\n");}
-    entry=out.data;cf_dispose(&root);sb_free(&cg.functions);dispose_disk_modules(&modules);(void)entry;
+    entry=out.data;cf_dispose(&root);sb_free(&cg.functions);dispose_disk_modules(&modules);cg_free_top_globals(&cg);(void)entry;
     if(cg.failed){sb_free(&out);return NULL;}
     return out.data;
 }
 
 /* ----------------------------- Public C API ----------------------------- */
 static void api_parse(Parser *p, const char *source, const char *filename, Stmt **program) {
-    memset(p, 0, sizeof(*p));
-    p->source = source ? source : "";
-    p->filename = filename ? filename : "input.lua";
-    p->length = strlen(p->source);
-    p->line = p->column = 1;
-    next_token(p);
+    parser_init(p, source, filename, strlen(source ? source : ""));
     *program = parse_block(p);
     if (p->token.kind != T_EOF) parse_error(p, "unexpected '%s'", token_name(p->token.kind));
     verify_program(p, *program);
@@ -1026,7 +1466,7 @@ static int run_command(const char*cmd){int r=system(cmd);if(r==-1)return -1;retu
 #ifndef LUAC_DEFAULT_LDFLAGS
 #define LUAC_DEFAULT_LDFLAGS ""
 #endif
-static void usage(void){puts("LuaC "LUAC_VERSION" — Lua-syntax native compiler with stackful coroutines and cycle GC\n\nUsage:\n  luac file.lua              JIT compile and run\n  luac --check file.lua      Parse and validate\n  luac --emit-c file.lua [-o out.c]\n  luac --aot file.lua -o program\n\nOptions: --cc COMPILER  --cflags FLAGS  --ldflags FLAGS  --keep-c PATH  --version\nEnvironment: CC, LUAC_CFLAGS and LUAC_LDFLAGS append native compiler flags.");}
+static void usage(void){puts("LuaC "LUAC_VERSION" — Native compiler with arena memory, structs/classes, and direct graphics\n\nUsage:\n  luac file.lua              JIT compile and run\n  luac --check file.lua      Parse and validate\n  luac --emit-c file.lua [-o out.c]\n  luac --aot file.lua -o program\n\nOptions: --cc COMPILER  --cflags FLAGS  --ldflags FLAGS  --keep-c PATH  --version\nEnvironment: CC, LUAC_CFLAGS and LUAC_LDFLAGS append native compiler flags.");}
 
 int main(int argc,char**argv){
     const char*input=NULL,*output=NULL,*keep=NULL,*cc=getenv("CC");Str extra_cflags,extra_ldflags;sb_init(&extra_cflags);sb_init(&extra_ldflags);sb_add(&extra_cflags,LUAC_DEFAULT_CFLAGS);sb_add(&extra_ldflags,LUAC_DEFAULT_LDFLAGS);{const char*flags=getenv("LUAC_CFLAGS");if(flags){sb_add(&extra_cflags," ");sb_add(&extra_cflags,flags);}flags=getenv("LUAC_LDFLAGS");if(flags){sb_add(&extra_ldflags," ");sb_add(&extra_ldflags,flags);}}enum{MODE_JIT,MODE_CHECK,MODE_C,MODE_AOT}mode=MODE_JIT;int i,status=1;size_t length;char*source,*generated;Parser p;Stmt*program;
@@ -1034,7 +1474,7 @@ int main(int argc,char**argv){
     luac_executable_path = argc > 0 ? argv[0] : NULL;
     for(i=1;i<argc;++i){if(!strcmp(argv[i],"--check"))mode=MODE_CHECK;else if(!strcmp(argv[i],"--emit-c"))mode=MODE_C;else if(!strcmp(argv[i],"--aot"))mode=MODE_AOT;else if(!strcmp(argv[i],"--jit"))mode=MODE_JIT;else if(!strcmp(argv[i],"-o")&&i+1<argc)output=argv[++i];else if(!strcmp(argv[i],"--keep-c")&&i+1<argc)keep=argv[++i];else if(!strcmp(argv[i],"--cc")&&i+1<argc)cc=argv[++i];else if(!strcmp(argv[i],"--cflags")&&i+1<argc){sb_add(&extra_cflags," ");sb_add(&extra_cflags,argv[++i]);}else if(!strcmp(argv[i],"--ldflags")&&i+1<argc){sb_add(&extra_ldflags," ");sb_add(&extra_ldflags,argv[++i]);}else if(!strcmp(argv[i],"--version")){puts("LuaC "LUAC_VERSION);return 0;}else if(!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")){usage();return 0;}else if(argv[i][0]=='-'){fprintf(stderr,"luac: unknown option %s\n",argv[i]);return 2;}else if(!input)input=argv[i];else{fprintf(stderr,"luac: too many input files\n");return 2;}}
     if(!input){usage();return 2;}source=read_file(input,&length);if(!source)return 1;
-    memset(&p,0,sizeof(p));p.source=source;p.filename=input;p.length=length;p.line=1;p.column=1;next_token(&p);program=parse_block(&p);if(p.token.kind!=T_EOF)parse_error(&p,"unexpected '%s'",token_name(p.token.kind));verify_program(&p,program);
+    parser_init(&p,source,input,length);program=parse_block(&p);if(p.token.kind!=T_EOF)parse_error(&p,"unexpected '%s'",token_name(p.token.kind));verify_program(&p,program);
     if(p.failed){fprintf(stderr,"%s\n",p.error);token_clear(&p.token);free_stmt(program);free(source);return 1;}
     if(mode==MODE_CHECK){printf("%s: syntax OK\n",input);token_clear(&p.token);free_stmt(program);free(source);return 0;}
     generated=generate_c(&p,program,input);

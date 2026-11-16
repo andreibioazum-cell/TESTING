@@ -1,5 +1,5 @@
-CC ?= cc
-CXX ?= c++
+CC ?= $(if $(shell command -v clang 2>/dev/null),clang,cc)
+CXX ?= $(if $(shell command -v clang++ 2>/dev/null),clang++,c++)
 AR ?= ar
 PREFIX ?= /usr/local
 CFLAGS ?= -O2 -g
@@ -61,7 +61,7 @@ endif
 all: luac
 
 luac: src/luac.c src/luac.h src/runtime.h src/luac_libraries.h src/luac_ffi.h src/luac_websocket.h src/luac_game.h src/luac_tls.h src/luac_audio.h src/third_party/miniaudio.h src/third_party/stb_image.h
-	$(CC) -std=gnu99 $(CFLAGS) $(WARNINGS) -DLUAC_RUNTIME_PATH=\"$(RUNTIME_PATH)\" '-DLUAC_DEFAULT_CFLAGS="$(NATIVE_CFLAGS)"' '-DLUAC_DEFAULT_LDFLAGS="$(NATIVE_LDFLAGS)"' src/luac.c -o $@ $(DL_LIBS)
+	$(CC) $(LDFLAGS) -std=gnu99 $(CFLAGS) $(WARNINGS) -DLUAC_RUNTIME_PATH=\"$(RUNTIME_PATH)\" '-DLUAC_DEFAULT_CFLAGS="$(NATIVE_CFLAGS)"' '-DLUAC_DEFAULT_LDFLAGS="$(NATIVE_LDFLAGS)"' src/luac.c -o $@ $(DL_LIBS)
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -75,7 +75,7 @@ $(BUILD)/libluac.a: $(BUILD)/luac.o
 	$(AR) rcs $@ $<
 
 $(BUILD)/libluac.$(SHARED_EXT): $(BUILD)/luac.o
-	$(CC) $(SHARED_FLAG) $< -o $@
+	$(CC) $(LDFLAGS) $(SHARED_FLAG) $< -o $@
 
 # Nuklear stays C99 and uses only the fixed arena supplied by the Studio.
 $(BUILD)/nuklear.o: gui/nuklear_impl.c gui/third_party/nuklear.h | $(BUILD)
@@ -94,7 +94,7 @@ $(BUILD)/shader.frag.spv: gui/shader.frag | $(BUILD)
 	glslangValidator -V $< -o $@
 
 gui: $(BUILD)/shader.vert.spv $(BUILD)/shader.frag.spv $(BUILD)/nuklear.o
-	$(CXX) -std=c++17 $(CXXFLAGS) $(GUI_CFLAGS) -I src -I gui gui/app.cpp gui/vulkan.cpp $(BUILD)/nuklear.o -o $(BUILD)/luac-gui$(EXE) $(GUI_LIBS)
+	$(CXX) $(LDFLAGS) -std=c++17 $(CXXFLAGS) $(GUI_CFLAGS) -I src -I gui gui/app.cpp gui/vulkan.cpp $(BUILD)/nuklear.o -o $(BUILD)/luac-gui$(EXE) $(GUI_LIBS)
 
 test: luac $(BUILD)/ui-test$(EXE) $(BUILD)/engine-test$(EXE)
 	./tests/run.sh

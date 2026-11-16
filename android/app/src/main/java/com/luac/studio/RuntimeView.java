@@ -54,15 +54,20 @@ final class RuntimeView extends View {
 
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        canvas.drawColor(Color.rgb(7, 13, 20));
-        paint.setStrokeWidth(1);
-        paint.setColor(Color.rgb(14, 29, 40));
-        float grid = (float) (48 * zoom);
-        if (grid >= 12) {
-            float startX = screenX(Math.floor(cameraX / 48 - getWidth() / zoom / 96) * 48);
-            float startY = screenY(Math.floor(cameraY / 48 - getHeight() / zoom / 96) * 48);
-            for (float x = startX; x < getWidth(); x += grid) canvas.drawLine(x, 0, x, getHeight(), paint);
-            for (float y = startY; y < getHeight(); y += grid) canvas.drawLine(0, y, getWidth(), y, paint);
+        JSONArray clearColor = frame != null ? frame.optJSONArray("clear_color") : null;
+        if (clearColor != null && clearColor.length() >= 3) {
+            canvas.drawColor(color(clearColor));
+        } else {
+            canvas.drawColor(Color.rgb(7, 13, 20));
+            paint.setStrokeWidth(1);
+            paint.setColor(Color.rgb(14, 29, 40));
+            float grid = (float) (48 * zoom);
+            if (grid >= 12) {
+                float startX = screenX(Math.floor(cameraX / 48 - getWidth() / zoom / 96) * 48);
+                float startY = screenY(Math.floor(cameraY / 48 - getHeight() / zoom / 96) * 48);
+                for (float x = startX; x < getWidth(); x += grid) canvas.drawLine(x, 0, x, getHeight(), paint);
+                for (float y = startY; y < getHeight(); y += grid) canvas.drawLine(0, y, getWidth(), y, paint);
+            }
         }
         if (frame == null) {
             paint.setColor(Color.LTGRAY); paint.setTextSize(18);
@@ -74,6 +79,11 @@ final class RuntimeView extends View {
             JSONObject entity = entities.optJSONObject(index);
             if (entity != null) drawEntity(canvas, entity);
         }
+        JSONArray drawCmds = frame.optJSONArray("draw_cmds");
+        if (drawCmds != null) for (int index = 0; index < drawCmds.length(); ++index) {
+            JSONObject cmd = drawCmds.optJSONObject(index);
+            if (cmd != null) drawCommand(canvas, cmd);
+        }
         JSONArray texts = frame.optJSONArray("texts");
         if (texts != null) for (int index = 0; index < texts.length(); ++index) {
             JSONObject text = texts.optJSONObject(index);
@@ -81,6 +91,46 @@ final class RuntimeView extends View {
             paint.setColor(Color.WHITE);
             paint.setTextSize((float) text.optDouble("size", 16));
             canvas.drawText(text.optString("text"), (float) text.optDouble("x"), (float) text.optDouble("y"), paint);
+        }
+    }
+
+    private void drawCommand(Canvas canvas, JSONObject cmd) {
+        int kind = cmd.optInt("kind", 1);
+        float x = (float) cmd.optDouble("x", 0);
+        float y = (float) cmd.optDouble("y", 0);
+        float w = (float) cmd.optDouble("w", 32);
+        float h = (float) cmd.optDouble("h", 32);
+        float rot = (float) cmd.optDouble("rot", 0);
+        int col = color(cmd.optJSONArray("color"));
+        paint.setStyle(Paint.Style.FILL);
+        if (kind == 0) {
+            String path = cmd.optString("path", "");
+            Bitmap bmp = path.isEmpty() || path.equals("null") ? null : texture(path);
+            RectF dst = new RectF(x, y, x + w, y + h);
+            canvas.save();
+            if (rot != 0) canvas.rotate(rot, x + w * 0.5f, y + h * 0.5f);
+            if (bmp != null) {
+                paint.setColor(Color.WHITE);
+                canvas.drawBitmap(bmp, null, dst, paint);
+            } else {
+                paint.setColor(col);
+                canvas.drawRect(dst, paint);
+            }
+            canvas.restore();
+        } else if (kind == 1) {
+            RectF dst = new RectF(x, y, x + w, y + h);
+            paint.setColor(col);
+            canvas.save();
+            if (rot != 0) canvas.rotate(rot, x + w * 0.5f, y + h * 0.5f);
+            canvas.drawRect(dst, paint);
+            canvas.restore();
+        } else if (kind == 2) {
+            paint.setColor(col);
+            canvas.drawCircle(x, y, w * 0.5f, paint);
+        } else if (kind == 3) {
+            paint.setColor(col);
+            paint.setTextSize(w > 0 ? w : 18f);
+            canvas.drawText(cmd.optString("text", ""), x, y + (w > 0 ? w : 18f), paint);
         }
     }
 

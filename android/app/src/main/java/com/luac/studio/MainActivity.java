@@ -11,7 +11,6 @@ import android.provider.OpenableColumns;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.FrameLayout;
-import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -52,7 +51,7 @@ public final class MainActivity extends AppCompatActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ProjectStore store;
     private File project, directory, editorFile, imageFile, importDirectory;
-    private EditText editor;
+    private CodeEditorView editor;
     private TextView output;
     private RuntimeView runtimeView;
     private boolean running, opening, runtimeError, destroyed;
@@ -204,13 +203,18 @@ public final class MainActivity extends AppCompatActivity {
         bar.inflateMenu(R.menu.menu_editor);
         bar.setOnMenuItemClickListener(item -> {
             if (item.getItemId() == R.id.action_rename) renameEditorFile();
-            else if (item.getItemId() == R.id.action_check) { if (saveEditor()) output.setText(compilerCall(editor.getText().toString(), false)); }
-            else if (item.getItemId() == R.id.action_generate) { if (saveEditor()) output.setText(compilerCall(editor.getText().toString(), true)); }
+            else if (item.getItemId() == R.id.action_check) { if (saveEditor()) output.setText(compilerCall(editor.getTextString(), false)); }
+            else if (item.getItemId() == R.id.action_generate) { if (saveEditor()) output.setText(compilerCall(editor.getTextString(), true)); }
             else if (item.getItemId() == R.id.action_delete) confirmDelete(editorFile, () -> showDirectory(directory));
             return true;
         });
         editor = findViewById(R.id.editor);
         try { editor.setText(store.read(file)); } catch (Exception error) { toast(error); showDirectory(directory); return; }
+        findViewById(R.id.key_tab).setOnClickListener(v -> editor.insertSnippet("    "));
+        findViewById(R.id.key_colon).setOnClickListener(v -> editor.insertSnippet(":"));
+        findViewById(R.id.key_eq).setOnClickListener(v -> editor.insertSnippet(" = "));
+        findViewById(R.id.key_parens).setOnClickListener(v -> editor.insertSnippet("()"));
+        findViewById(R.id.key_undo).setOnClickListener(v -> editor.undo());
         MaterialButton save = findViewById(R.id.save);
         save.setOnClickListener(v -> { if (saveEditor()) toast("Saved"); });
         MaterialButton run = findViewById(R.id.run);
@@ -233,7 +237,7 @@ public final class MainActivity extends AppCompatActivity {
 
     private boolean saveEditor() {
         if (editor == null || editorFile == null) return true;
-        try { store.write(editorFile, editor.getText().toString()); return true; }
+        try { store.write(editorFile, editor.getTextString()); return true; }
         catch (Exception error) { toast(error); return false; }
     }
     private String compilerCall(String source, boolean generate) {

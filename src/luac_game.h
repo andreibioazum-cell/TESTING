@@ -12,6 +12,33 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "third_party/stb_image.h"
 
+static LcValue lc_engine_load_sprite(LcContext *ctx,LcFunction *self,int argc,LcValue *argv){
+    LcString *path=lc_lib_string_arg(ctx,argc,argv,0);
+    int w=0,h=0,comp=0,i;
+    (void)self;
+    if(!path)return lc_integer(0);
+    for(i=0;i<ctx->sprite_count;++i){
+        if(ctx->sprites[i].path && !strcmp(ctx->sprites[i].path,path->data))
+            return lc_integer(ctx->sprites[i].id);
+    }
+    if(!stbi_info(path->data,&w,&h,&comp)){w=32;h=32;}
+    if(ctx->sprite_count>=ctx->sprite_cap){
+        int cap=ctx->sprite_cap?ctx->sprite_cap*2:16;
+        LcSpriteAsset *p=(LcSpriteAsset *)realloc(ctx->sprites,(size_t)cap*sizeof(*p));
+        if(!p){lc_error(ctx,"out of memory loading sprite");return lc_integer(0);}
+        ctx->sprites=p;ctx->sprite_cap=cap;
+    }
+    {
+        LcSpriteAsset *a=&ctx->sprites[ctx->sprite_count];
+        size_t plen=strlen(path->data);
+        a->id=ctx->sprite_count+1;
+        a->path=(char *)malloc(plen+1);
+        if(a->path)memcpy(a->path,path->data,plen+1);
+        a->width=w;a->height=h;
+        ctx->sprite_count++;
+        return lc_integer(a->id);
+    }
+}
 static LcValue lc_engine_load_texture(LcContext *ctx,LcFunction *self,int argc,LcValue *argv){LcString *path=lc_lib_string_arg(ctx,argc,argv,0);int w=0,h=0,channels=0;stbi_uc *pixels;LcValue texture,decoded;(void)self;if(!path)return lc_nil();pixels=stbi_load(path->data,&w,&h,&channels,4);if(!pixels){LcValue out[2];out[0]=lc_nil();out[1]=lc_string(ctx,stbi_failure_reason());return lc_tuple_new(ctx,2,out,1);}texture=lc_table(ctx);lc_set_field(ctx,texture,"path",lc_string(ctx,path->data));lc_set_field(ctx,texture,"width",lc_integer(w));lc_set_field(ctx,texture,"height",lc_integer(h));lc_set_field(ctx,texture,"channels",lc_integer(4));decoded=lc_string_n(ctx,(const char *)pixels,(size_t)w*h*4);lc_set_field(ctx,texture,"pixels",decoded);stbi_image_free(pixels);return texture;}
 static LcValue lc_engine_sprite(LcContext *ctx,LcFunction *self,int argc,LcValue *argv){LcValue texture;(void)self;if(argc<2||lc_first_value(argv[0]).type!=LC_TABLE){lc_error(ctx,"entity and texture expected");return lc_nil();}texture=lc_first_value(argv[1]);if(texture.type!=LC_TABLE){lc_error(ctx,"load_texture result expected");return lc_nil();}lc_set_field(ctx,argv[0],"texture",lc_retain(texture));if(argc<3)lc_set_field(ctx,argv[0],"width",lc_engine_get(ctx,texture,"width"));if(argc<4)lc_set_field(ctx,argv[0],"height",lc_engine_get(ctx,texture,"height"));if(argc>2)lc_engine_set_number(ctx,argv[0],"width",lc_lib_number_arg(ctx,argc,argv,2,32));if(argc>3)lc_engine_set_number(ctx,argv[0],"height",lc_lib_number_arg(ctx,argc,argv,3,32));return lc_retain(argv[0]);}
 static LcValue lc_engine_body(LcContext *ctx,LcFunction *self,int argc,LcValue *argv){static const char *numbers[]={"gravity_scale","gravity_x","gravity_y","restitution","friction","damping",NULL};static const char *booleans[]={"kinematic","solid","grounded",NULL};int i;(void)self;if(argc<2||lc_first_value(argv[0]).type!=LC_TABLE||lc_first_value(argv[1]).type!=LC_TABLE){lc_error(ctx,"entity and body options expected");return lc_nil();}lc_set_field(ctx,argv[0],"solid",lc_bool(1));for(i=0;numbers[i];++i){LcValue v=lc_engine_get(ctx,argv[1],numbers[i]);if(v.type==LC_NUMBER||v.type==LC_INTEGER)lc_set_field(ctx,argv[0],numbers[i],lc_retain(v));lc_release(ctx,v);}for(i=0;booleans[i];++i){LcValue v=lc_engine_get(ctx,argv[1],booleans[i]);if(v.type==LC_BOOL)lc_set_field(ctx,argv[0],booleans[i],lc_retain(v));lc_release(ctx,v);}return lc_retain(argv[0]);}

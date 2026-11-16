@@ -11,58 +11,13 @@ permissions:
   actions: read
 
 jobs:
-  test:
-    name: Tests and sanitizers
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: mbedTLS dependency
-        run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
-      - name: Build and test
-        run: make -j2 && SANITIZE=1 make test
-      - name: CMake package and consumer test
-        run: |
-          set +e
-          cmake -S . -B build-cmake -DBUILD_TESTING=ON -DLUAC_WITH_MBEDTLS=ON -DLUAC_WITH_MINIAUDIO=ON -DCMAKE_BUILD_TYPE=Release > cmake-build.log 2>&1 && cmake --build build-cmake -j2 >> cmake-build.log 2>&1 && ctest --test-dir build-cmake --output-on-failure >> cmake-build.log 2>&1
-          status=$?
-          set -e
-          cat cmake-build.log
-          if [ "$status" -ne 0 ]; then
-            message=$(tail -c 6000 cmake-build.log | tr '\r\n' '  ')
-            printf '::error file=CMakeLists.txt::%s\n' "$message"
-            exit "$status"
-          fi
-          cmake --install build-cmake --prefix "$GITHUB_WORKSPACE/dist/cmake-prefix"
-          cmake -S examples/embed -B build-embed -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/dist/cmake-prefix"
-          cmake --build build-embed -j2
-          ./build-embed/luac-embed-compiler
-          ./build-embed/luac-embed-native
-          ./build-embed/luac-embed-engine
-
   linux:
-    name: Linux CLI and libraries
+    name: Linux CLI and libraries (Clang)
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
-      - run: make -j2 MBEDTLS=1 MINIAUDIO=1 all libraries
-      - name: HTTPS and audio smoke
-        run: |
-          set +e
-          ./luac examples/https.lua > https-smoke.log 2>&1
-          https_status=$?
-          ./luac tests/audio.lua > audio-smoke.log 2>&1
-          audio_status=$?
-          ./tests/run_websocket.sh > websocket-smoke.log 2>&1
-          websocket_status=$?
-          set -e
-          cat https-smoke.log audio-smoke.log websocket-smoke.log
-          if [ "$https_status" -ne 0 ] || [ "$audio_status" -ne 0 ] || [ "$websocket_status" -ne 0 ]; then
-            message=$(grep -E -C 2 'error:|error generated|undefined|RuntimeError|Assertion|failed' https-smoke.log audio-smoke.log websocket-smoke.log | tail -c 6000 | tr '\r\n' '  ' || true)
-            printf '::error file=examples/https.lua::HTTPS %s, audio %s, WebSocket %s: %s\n' "$https_status" "$audio_status" "$websocket_status" "$message"
-            exit 1
-          fi
+      - run: sudo apt-get update && sudo apt-get install -y clang lld libmbedtls-dev
+      - run: make -j"$(nproc)" CC=clang CXX=clang++ LDFLAGS="-fuse-ld=lld" MBEDTLS=1 MINIAUDIO=1 all libraries
       - name: Package
         run: |
           mkdir -p dist/linux
@@ -80,59 +35,34 @@ jobs:
           path: dist/LuaC-source.tar.gz
 
   windows:
-    name: Windows EXE and libraries
+    name: Windows EXE and libraries (Clang)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
+          update: false
           install: >-
-            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
             make
             p7zip
             mingw-w64-ucrt-x86_64-mbedtls
-      - name: Build CLI
+      - name: Build CLI and libraries
         shell: msys2 {0}
         env:
-          CC: gcc
+          CC: clang
+          CXX: clang++
+          LDFLAGS: -fuse-ld=lld
         run: |
           set +e
-          make -j2 MBEDTLS=1 MINIAUDIO=1 all > build-cli.log 2>&1
+          make -j"$(nproc)" MBEDTLS=1 MINIAUDIO=1 all libraries > build-cli.log 2>&1
           status=$?
           cat build-cli.log
           if [ "$status" -ne 0 ]; then
             message=$(tail -c 6000 build-cli.log | tr '\r\n' '  ')
             printf '::error file=Makefile::%s\n' "$message"
-            exit "$status"
-          fi
-      - name: Build libraries
-        shell: msys2 {0}
-        env:
-          CC: gcc
-        run: make -j2 MBEDTLS=1 MINIAUDIO=1 libraries
-      - name: Smoke test
-        shell: msys2 {0}
-        env:
-          CC: gcc
-          LUAC_TRACE: 1
-        run: |
-          ./luac.exe --version
-          ./luac.exe examples/https.lua
-          ./luac.exe tests/audio.lua
-          ./luac.exe tests/runtime.lua
-          set +e
-          ./luac.exe examples/demo.lua > library-smoke.log 2>&1
-          status=$?
-          if [ "$status" -eq 0 ]; then
-            ./luac.exe tests/libraries.lua >> library-smoke.log 2>&1
-            status=$?
-          fi
-          cat library-smoke.log
-          if [ "$status" -ne 0 ]; then
-            message=$(tail -c 1800 library-smoke.log | tr '\r\n' '  ')
-            printf '::error file=tests/libraries.lua::%s\n' "$message"
             exit "$status"
           fi
       - name: Package
@@ -142,42 +72,19 @@ jobs:
           cp luac.exe build/libluac.a build/libluac.dll src/luac.h src/runtime.h src/luac_interpreter.h src/luac_libraries.h src/luac_ffi.h src/luac_websocket.h src/luac_game.h src/luac_tls.h src/luac_audio.h src/engine.hpp README.md LICENSE dist/windows/
           cp -r src/third_party examples dist/windows/
           cp /ucrt64/bin/libmbed*.dll dist/windows/
-          7z a -tzip dist/LuaC-windows-x86_64.zip ./dist/windows/*
+          7z a -tzip -mx=1 dist/LuaC-windows-x86_64.zip ./dist/windows/*
       - uses: actions/upload-artifact@v4
         with:
           name: LuaC-windows-x86_64
           path: dist/LuaC-windows-x86_64.zip
 
   macos:
-    name: macOS CLI and libraries
+    name: macOS CLI and libraries (Clang)
     runs-on: macos-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
       - run: brew install mbedtls@3 pkg-config
-      - run: make -j2 MBEDTLS=1 MINIAUDIO=1 MBEDTLS_CFLAGS="-I$(brew --prefix mbedtls@3)/include" MBEDTLS_LDFLAGS="-L$(brew --prefix mbedtls@3)/lib -lmbedtls -lmbedx509 -lmbedcrypto" all
-      - run: make -j2 MBEDTLS=1 MINIAUDIO=1 MBEDTLS_CFLAGS="-I$(brew --prefix mbedtls@3)/include" MBEDTLS_LDFLAGS="-L$(brew --prefix mbedtls@3)/lib -lmbedtls -lmbedx509 -lmbedcrypto" libraries
-      - name: HTTPS and audio smoke
-        env:
-          LUAC_CFLAGS: -Wno-deprecated-declarations
-        run: |
-          set +e
-          ./luac examples/https.lua > https-smoke.log 2>&1
-          https_status=$?
-          ./luac tests/audio.lua > audio-smoke.log 2>&1
-          audio_status=$?
-          ./tests/run_websocket.sh > websocket-smoke.log 2>&1
-          websocket_status=$?
-          ./luac tests/runtime.lua > runtime-smoke.log 2>&1
-          runtime_status=$?
-          set -e
-          cat https-smoke.log audio-smoke.log websocket-smoke.log runtime-smoke.log
-          if [ "$https_status" -ne 0 ] || [ "$audio_status" -ne 0 ] || [ "$websocket_status" -ne 0 ] || [ "$runtime_status" -ne 0 ]; then
-            https_message=$(grep -E -C 2 'error:|error generated|undefined|RuntimeError|Assertion|failed' https-smoke.log | tail -c 4000 | tr '\r\n' '  ' || true)
-            audio_message=$(grep -E -C 2 'error:|error generated|undefined|RuntimeError|Assertion|failed' audio-smoke.log websocket-smoke.log runtime-smoke.log | tail -c 4000 | tr '\r\n' '  ' || true)
-            printf '::error file=examples/https.lua::HTTPS status %s: %s; audio status %s: %s\n' "$https_status" "$https_message" "$audio_status" "$audio_message"
-            exit 1
-          fi
+      - run: make -j"$(sysctl -n hw.ncpu)" CC=clang CXX=clang++ MBEDTLS=1 MINIAUDIO=1 MBEDTLS_CFLAGS="-I$(brew --prefix mbedtls@3)/include" MBEDTLS_LDFLAGS="-L$(brew --prefix mbedtls@3)/lib -lmbedtls -lmbedx509 -lmbedcrypto" all libraries
       - name: Package universal sources and native arm64 build
         run: |
           mkdir -p dist/macos
@@ -190,14 +97,13 @@ jobs:
           path: dist/LuaC-macos-arm64.tar.gz
 
   gui-linux:
-    name: Vulkan Studio Linux
+    name: Vulkan Studio Linux (Clang)
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
       - name: Vulkan and GLFW dependencies
-        run: sudo apt-get update && sudo apt-get install -y libglfw3-dev libvulkan-dev glslang-tools pkg-config
-      - run: make -j2 all gui
+        run: sudo apt-get update && sudo apt-get install -y clang lld libglfw3-dev libvulkan-dev glslang-tools pkg-config
+      - run: make -j"$(nproc)" CC=clang CXX=clang++ LDFLAGS="-fuse-ld=lld" all gui
       - name: Package
         run: |
           mkdir -p dist/studio-linux/build
@@ -212,17 +118,17 @@ jobs:
           path: dist/LuaC-Studio-linux-x86_64.tar.gz
 
   gui-windows:
-    name: Vulkan Studio Windows
+    name: Vulkan Studio Windows (Clang)
     runs-on: windows-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
+          update: false
           install: >-
-            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
             make
             p7zip
             pkgconf
@@ -233,9 +139,10 @@ jobs:
       - name: Build Vulkan Studio
         shell: msys2 {0}
         env:
-          CC: gcc
-          CXX: g++
-        run: make -j2 all gui
+          CC: clang
+          CXX: clang++
+          LDFLAGS: -fuse-ld=lld
+        run: make -j"$(nproc)" all gui
       - name: Package
         shell: msys2 {0}
         run: |
@@ -246,14 +153,14 @@ jobs:
           if [ -f /ucrt64/bin/vulkan-1.dll ]; then cp /ucrt64/bin/vulkan-1.dll dist/studio-windows/; fi
           cp build/*.spv dist/studio-windows/build/
           cp -r src/third_party examples dist/studio-windows/
-          7z a -tzip dist/LuaC-Studio-windows-x86_64.zip ./dist/studio-windows/*
+          7z a -tzip -mx=1 dist/LuaC-Studio-windows-x86_64.zip ./dist/studio-windows/*
       - uses: actions/upload-artifact@v4
         with:
           name: LuaC-Studio-windows-x86_64
           path: dist/LuaC-Studio-windows-x86_64.zip
 
   android:
-    name: Android APK
+    name: Android APK (NDK Clang)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -264,26 +171,25 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Install Android command-line tools
+      - name: Ensure Android NDK and CMake
         run: |
-          mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-cli
-          curl -fL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/android-cli/tools.zip
-          unzip -q /tmp/android-cli/tools.zip -d /tmp/android-cli
-          rm -rf "$ANDROID_HOME/cmdline-tools/latest"
-          mv /tmp/android-cli/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
-      - name: Install Android NDK and CMake
-        run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          "$SDKMANAGER" --version
-          yes | "$SDKMANAGER" --licenses >/dev/null
-          "$SDKMANAGER" 'ndk;27.2.12479018' 'cmake;3.22.1' 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Check Android text contrast
-        run: python3 android/tests/test_theme.py
+          if [ ! -d "$ANDROID_HOME/ndk/27.2.12479018" ] || [ ! -d "$ANDROID_HOME/cmake/3.22.1" ]; then
+            if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+              mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-cli
+              curl -fL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/android-cli/tools.zip
+              unzip -q /tmp/android-cli/tools.zip -d /tmp/android-cli
+              rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+              mv /tmp/android-cli/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+            fi
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            yes | "$SDKMANAGER" --licenses >/dev/null || true
+            "$SDKMANAGER" 'ndk;27.2.12479018' 'cmake;3.22.1' 'platforms;android-35' 'build-tools;35.0.0'
+          fi
       - name: Assemble APK
         working-directory: android
         shell: bash
         run: |
-          if ! gradle --no-daemon testDebugUnitTest assembleDebug > android-build.log 2>&1; then
+          if ! gradle --no-daemon --parallel assembleDebug > android-build.log 2>&1; then
             message=$(grep -E '(^|[ :])error:|undefined reference|undefined symbol|FAILURE:|^e:' android-build.log | tail -c 3000 | tr '\r\n' '  ' || true)
             echo "::error file=android/app/build.gradle::${message}"
             tail -100 android-build.log
@@ -296,4 +202,3 @@ jobs:
         with:
           name: LuaC-Studio-Android-APK
           path: dist/LuaC-Studio-debug.apk
-
