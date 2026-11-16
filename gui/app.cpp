@@ -445,7 +445,11 @@ struct App {
             if (engineMode)
                 std::snprintf(status, sizeof(status), "ENGINE  |  %zu entities  |  %s  |  F7 editor  |  Native C++17 world", world.count(), world.running() ? "playing" : "paused");
             else
-                std::snprintf(status, sizeof(status), "%d bytes  |  Nuklear C99  |  Vulkan  |  F5 run  F6 check  F7 engine  Ctrl+S save", sourceLength);
+                std::snprintf(status, sizeof(status), "%d bytes  |  Nuklear C99  |  Vulkan %u.%u%s  |  F5 run  F6 check  F7 engine  Ctrl+S save",
+                              sourceLength,
+                              VK_VERSION_MAJOR(renderer.apiVersion()),
+                              VK_VERSION_MINOR(renderer.apiVersion()),
+                              renderer.usesDynamicRendering() ? " DR" : "");
             nk_label(&ui, status, NK_TEXT_LEFT);
         }
         nk_end(&ui);
@@ -461,8 +465,11 @@ struct App {
         }
         footer();
         canvas.render(ui, width, height);
-        if (canvas.atlas().dirty()) {
-            renderer.updateTexture(1, LcTextAtlas::size, LcTextAtlas::size, canvas.atlas().pixels().data());
+        if (canvas.atlas().hasDirtyRows()) {
+            int minY = canvas.atlas().dirtyMinY();
+            int maxY = canvas.atlas().dirtyMaxY();
+            renderer.updateTextureRegion(1, 0, minY, LcTextAtlas::size, maxY - minY,
+                                         LcTextAtlas::size, canvas.atlas().pixels().data());
             canvas.atlas().clearDirty();
         }
         renderer.render(canvas.vertices, canvas.draws, width, height);
@@ -571,11 +578,12 @@ int main(int argc, char **argv) {
         application.renderer.initialize(window, shaders ? shaders : "build");
         double previousTime = glfwGetTime();
         while (!glfwWindowShouldClose(window)) {
-            double currentTime = glfwGetTime();
             application.world.input.beginFrame();
             nk_input_begin(&application.ui);
-            glfwPollEvents();
+            if (application.engineMode && application.world.running()) glfwPollEvents();
+            else glfwWaitEventsTimeout(0.016);
             nk_input_end(&application.ui);
+            double currentTime = glfwGetTime();
             if (application.engineMode) application.world.advance(currentTime - previousTime);
             previousTime = currentTime;
             glfwGetFramebufferSize(window, &application.width, &application.height);
