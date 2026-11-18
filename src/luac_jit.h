@@ -107,8 +107,17 @@ static JitSession *jit_current;
 
 /* ---------------- Executable memory allocation ---------------- */
 
+static size_t jit_page_size(void) {
+#ifdef _WIN32
+    return 4096;
+#else
+    long ps = sysconf(_SC_PAGESIZE);
+    return ps > 0 ? (size_t)ps : 4096;
+#endif
+}
+
 static void *jit_alloc_exec(const uint8_t *buf, size_t size) {
-    size_t page = 4096;
+    size_t page = jit_page_size();
     size_t alloc_size = (size + page - 1) & ~(page - 1);
     if (alloc_size == 0) alloc_size = page;
 #ifdef _WIN32
@@ -142,7 +151,7 @@ static void *jit_alloc_exec(const uint8_t *buf, size_t size) {
 }
 
 static void jit_free_exec(void *mem, size_t size) {
-    size_t page = 4096;
+    size_t page = jit_page_size();
     size_t alloc_size = (size + page - 1) & ~(page - 1);
     if (!mem) return;
     if (alloc_size == 0) alloc_size = page;
@@ -939,7 +948,7 @@ static int jit_compile_expr(JitComp *jc, Expr *e, int dst) {
                 jit_compile_expr(jc, e->a, dst);
                 jit_emit_call_c(jc, (void *)jit_h_first, 1, dst, 0, 0, 0);
                 jit_emit_call_c(jc, (void *)jit_h_truthy, 1, dst, 0, 0, 0);
-                jmp_done = (e->op == 14) ? jit_emit_jz(jc) : jit_emit_jnz(jc);
+                jmp_done = (e->op == 14) ? jit_emit_jnz(jc) : jit_emit_jz(jc);
                 jit_compile_expr(jc, e->b, dst);
                 jit_emit_call_c(jc, (void *)jit_h_first, 1, dst, 0, 0, 0);
                 jit_patch_jump(jc, jmp_done, jc->code_len);
@@ -1983,10 +1992,14 @@ static void jit_json_scene(JitSession *session, Str *json) {
         sb_add(json, ",\"w\":"); sb_printf(json, "%.8g", cmd->w);
         sb_add(json, ",\"h\":"); sb_printf(json, "%.8g", cmd->h);
         sb_add(json, ",\"rot\":"); sb_printf(json, "%.8g", cmd->rot);
+        sb_add(json, ",\"extra\":"); sb_printf(json, "%.8g", cmd->extra);
+        sb_add(json, ",\"align\":"); sb_printf(json, "%d", cmd->align);
         sb_add(json, ",\"color\":[");
         sb_printf(json, "%.4g,%.4g,%.4g,%.4g", cmd->r, cmd->g, cmd->b, cmd->a);
         sb_add(json, "],\"path\":");
         if (sprite_path) jit_json_string(json, sprite_path); else sb_add(json, "null");
+        sb_add(json, ",\"font\":");
+        if (cmd->font) jit_json_string(json, cmd->font); else sb_add(json, "null");
         sb_add(json, ",\"text\":");
         if (cmd->text) jit_json_string(json, cmd->text); else sb_add(json, "null");
         sb_add(json, "}");

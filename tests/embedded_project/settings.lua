@@ -1,1 +1,0 @@
-projectName = 'Embedded project OK'

@@ -1,8 +1,10 @@
 package com.luac.studio;
 
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -10,8 +12,11 @@ import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
+import android.widget.SeekBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
@@ -22,13 +27,17 @@ import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton;
+import com.google.android.material.switchmaterial.SwitchMaterial;
 import com.google.android.material.textfield.TextInputEditText;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import org.json.JSONObject;
 
 public final class MainActivity extends AppCompatActivity {
     private static final int PICK_ASSET = 41;
+    private static final int PICK_FONT = 42;
+    private static final String PREFS = "luac_studio_prefs";
 
     private static boolean nativeAvailable;
     private static String nativeLoadError = "";
@@ -75,8 +84,10 @@ public final class MainActivity extends AppCompatActivity {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES);
         super.onCreate(state);
         store = new ProjectStore(this);
-        try { if (store.projects().isEmpty()) store.createSnakeProject("Змейка"); }
-        catch (Exception error) { toast(error); }
+        try {
+            if (store.projects().isEmpty()) store.createSnakeProject("Змейка");
+            else store.upgradeLegacySnakeIfUntouched();
+        } catch (Exception error) { toast(error); }
         showProjects();
     }
 
@@ -106,6 +117,11 @@ public final class MainActivity extends AppCompatActivity {
         if (nativeAvailable) try { version = nativeVersion(); } catch (Throwable ignored) { }
         bar.setTitle("LuaC Studio");
         bar.setSubtitle(version + " • in-process runtime");
+        bar.inflateMenu(R.menu.menu_projects);
+        bar.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == R.id.action_settings) showSettingsDialog();
+            return true;
+        });
         RecyclerView list = findViewById(R.id.list);
         list.setLayoutManager(new LinearLayoutManager(this));
         ProjectAdapter adapter = new ProjectAdapter(store, store.projects(), new ProjectAdapter.Listener() {
@@ -149,6 +165,7 @@ public final class MainActivity extends AppCompatActivity {
                 try { store.createFolder(directory, name); showDirectory(directory); } catch (Exception error) { toast(error); }
             });
             else if (item.getItemId() == R.id.action_import) pickAsset();
+            else if (item.getItemId() == R.id.action_settings) showSettingsDialog();
             return true;
         });
         RecyclerView list = findViewById(R.id.list);
@@ -204,14 +221,16 @@ public final class MainActivity extends AppCompatActivity {
         bar.inflateMenu(R.menu.menu_editor);
         bar.setOnMenuItemClickListener(item -> {
             if (item.getItemId() == R.id.action_rename) renameEditorFile();
+            else if (item.getItemId() == R.id.action_settings) showSettingsDialog();
             else if (item.getItemId() == R.id.action_check) { if (saveEditor()) output.setText(compilerCall(editor.getTextString(), false)); }
             else if (item.getItemId() == R.id.action_generate) { if (saveEditor()) output.setText(compilerCall(editor.getTextString(), true)); }
             else if (item.getItemId() == R.id.action_delete) confirmDelete(editorFile, () -> showDirectory(directory));
             return true;
         });
         editor = findViewById(R.id.editor);
+        applyEditorSettings();
         try { editor.setText(store.read(file)); } catch (Exception error) { toast(error); showDirectory(directory); return; }
-        findViewById(R.id.key_tab).setOnClickListener(v -> editor.insertSnippet("    "));
+        findViewById(R.id.key_tab).setOnClickListener(v -> editor.insertSnippet(editor.getTabSnippet()));
         findViewById(R.id.key_colon).setOnClickListener(v -> editor.insertSnippet(":"));
         findViewById(R.id.key_eq).setOnClickListener(v -> editor.insertSnippet(" = "));
         findViewById(R.id.key_parens).setOnClickListener(v -> editor.insertSnippet("()"));
@@ -291,6 +310,7 @@ public final class MainActivity extends AppCompatActivity {
         }, (w, h) -> {
             if (running) nativeSetViewport(w, h);
         });
+        runtimeView.setDefaultTypeface(resolvedRuntimeTypeface());
         FrameLayout game = findViewById(R.id.game);
         game.addView(runtimeView, new FrameLayout.LayoutParams(-1, -1));
         output = findViewById(R.id.output);
@@ -330,23 +350,154 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void pickAsset() {
-        importDirectory = directory;
-        String path = relative(directory);
-        if (!path.startsWith("assets/")) importDirectory = new File(project, "assets");
+        importDirectory = directory != null ? directory : new File(project, "assets");
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("image/*");
+        intent.setType("*/*");
         startActivityForResult(intent, PICK_ASSET);
     }
+
+    private void pickCustomFont() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        startActivityForResult(intent, PICK_FONT);
+    }
+
+    private Typeface resolvedRuntimeTypeface() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        int fontFamily = prefs.getInt("font_family", 0);
+        String customPath = prefs.getString("custom_font_path", "");
+        if (fontFamily == 1) return Typeface.SANS_SERIF;
+        if (fontFamily == 2) return Typeface.SERIF;
+        if (fontFamily == 3) return Typeface.create(Typeface.MONOSPACE, Typeface.BOLD);
+        if (fontFamily == 4 && !customPath.isEmpty()) {
+            try {
+                File f = new File(customPath);
+                if (f.isFile()) {
+                    Typeface custom = Typeface.createFromFile(f);
+                    if (custom != null) return custom;
+                }
+            } catch (Exception ignored) { }
+        }
+        return Typeface.SANS_SERIF;
+    }
+
+    private void applyEditorSettings() {
+        if (editor == null) return;
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        editor.applySettings(
+            prefs.getInt("font_family", 0),
+            prefs.getInt("font_size", 14),
+            prefs.getBoolean("line_numbers", true),
+            prefs.getInt("tab_size", 4),
+            prefs.getInt("theme", 0),
+            prefs.getString("custom_font_path", "")
+        );
+    }
+
+    private void showSettingsDialog() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        View view = LayoutInflater.from(this).inflate(R.layout.dialog_settings, null);
+        Spinner fontSpinner = view.findViewById(R.id.spinner_font);
+        MaterialButton importFontBtn = view.findViewById(R.id.btn_import_font);
+        TextView sizeLabel = view.findViewById(R.id.label_font_size);
+        SeekBar sizeSeek = view.findViewById(R.id.seek_font_size);
+        Spinner themeSpinner = view.findViewById(R.id.spinner_theme);
+        Spinner tabSpinner = view.findViewById(R.id.spinner_tab);
+        SwitchMaterial lineNumbersSwitch = view.findViewById(R.id.switch_line_numbers);
+
+        String customPath = prefs.getString("custom_font_path", "");
+        String customLabel = customPath.isEmpty() ? "Custom font (none imported)" : "Custom: " + new File(customPath).getName();
+        String[] fonts = {"Monospace", "Sans Serif", "Serif", "Bold Monospace", customLabel};
+        ArrayAdapter<String> fontAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, fonts);
+        fontAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        fontSpinner.setAdapter(fontAdapter);
+        fontSpinner.setSelection(Math.max(0, Math.min(4, prefs.getInt("font_family", 0))));
+
+        String[] themes = {"Slate Dark", "OLED Black", "Midnight Indigo", "Forest Dark"};
+        ArrayAdapter<String> themeAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, themes);
+        themeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        themeSpinner.setAdapter(themeAdapter);
+        themeSpinner.setSelection(Math.max(0, Math.min(3, prefs.getInt("theme", 0))));
+
+        String[] tabs = {"4 spaces", "2 spaces"};
+        ArrayAdapter<String> tabAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, tabs);
+        tabAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        tabSpinner.setAdapter(tabAdapter);
+        tabSpinner.setSelection(prefs.getInt("tab_size", 4) == 2 ? 1 : 0);
+
+        int currentSize = Math.max(10, Math.min(26, prefs.getInt("font_size", 14)));
+        sizeSeek.setProgress(currentSize - 10);
+        sizeLabel.setText("Font size: " + currentSize + "sp");
+        sizeSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                sizeLabel.setText("Font size: " + (10 + p) + "sp");
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+
+        lineNumbersSwitch.setChecked(prefs.getBoolean("line_numbers", true));
+
+        androidx.appcompat.app.AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+            .setTitle("Studio Settings")
+            .setView(view)
+            .setPositiveButton("Apply", (d, w) -> {
+                prefs.edit()
+                    .putInt("font_family", fontSpinner.getSelectedItemPosition())
+                    .putInt("font_size", 10 + sizeSeek.getProgress())
+                    .putInt("theme", themeSpinner.getSelectedItemPosition())
+                    .putInt("tab_size", tabSpinner.getSelectedItemPosition() == 1 ? 2 : 4)
+                    .putBoolean("line_numbers", lineNumbersSwitch.isChecked())
+                    .apply();
+                applyEditorSettings();
+                if (runtimeView != null) runtimeView.setDefaultTypeface(resolvedRuntimeTypeface());
+                toast("Settings saved");
+            })
+            .setNegativeButton("Cancel", null)
+            .create();
+
+        importFontBtn.setOnClickListener(v -> {
+            dialog.dismiss();
+            pickCustomFont();
+        });
+        dialog.show();
+    }
+
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != PICK_ASSET || result != RESULT_OK || data == null || data.getData() == null) return;
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
-        try (InputStream input = getContentResolver().openInputStream(uri)) {
-            File imported = store.importFile(importDirectory, displayName(uri), input);
-            toast("Imported " + imported.getName());
-            showDirectory(importDirectory);
-        } catch (Exception error) { toast(error); }
+        if (request == PICK_ASSET) {
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                File imported = store.importFile(importDirectory, displayName(uri), input);
+                toast("Imported " + imported.getName());
+                if (project != null) showDirectory(importDirectory);
+            } catch (Exception error) { toast(error); }
+        } else if (request == PICK_FONT) {
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                File fontsDir = new File(getFilesDir(), "fonts");
+                if (!fontsDir.exists()) fontsDir.mkdirs();
+                String name = displayName(uri);
+                if (!name.toLowerCase().endsWith(".ttf") && !name.toLowerCase().endsWith(".otf")) name += ".ttf";
+                File dest = new File(fontsDir, name);
+                try (FileOutputStream out = new FileOutputStream(dest)) {
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = input.read(buf)) >= 0) out.write(buf, 0, n);
+                }
+                Typeface test = Typeface.createFromFile(dest);
+                if (test == null) throw new IllegalArgumentException("Invalid font file");
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putInt("font_family", 4)
+                    .putString("custom_font_path", dest.getAbsolutePath())
+                    .apply();
+                applyEditorSettings();
+                if (runtimeView != null) runtimeView.setDefaultTypeface(test);
+                toast("Font applied: " + dest.getName());
+            } catch (Exception error) { toast(error); }
+        }
     }
     private String displayName(Uri uri) {
         try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {

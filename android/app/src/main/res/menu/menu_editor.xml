@@ -6,6 +6,11 @@
         android:icon="@drawable/ic_edit"
         android:title="Rename" />
     <item
+        android:id="@+id/action_settings"
+        app:showAsAction="ifRoom"
+        android:icon="@drawable/ic_settings"
+        android:title="Settings" />
+    <item
         android:id="@+id/action_check"
         android:icon="@drawable/ic_check"
         android:title="Check syntax" />

@@ -2,7 +2,6 @@ package com.luac.studio;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.os.Handler;
@@ -17,6 +16,7 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import java.io.File;
 
 public final class CodeEditorView extends View {
     private static native void nativeSetText(String text);
@@ -63,6 +63,14 @@ public final class CodeEditorView extends View {
     private boolean nativeReady = true;
     private final StringBuilder fallbackText = new StringBuilder();
 
+    private boolean showLineNumbers = true;
+    private int tabSpaces = 4;
+    private int bgColor = 0xFF0B1220;
+    private int activeLineColor = 0xFF162033;
+    private int gutterBgColor = 0xFF0F172A;
+    private int gutterDividerColor = 0xFF1E293B;
+    private int cursorColor = 0xFF38BDF8;
+
     private final Runnable blinkTask = new Runnable() {
         @Override public void run() {
             if (hasFocus()) {
@@ -85,13 +93,76 @@ public final class CodeEditorView extends View {
         gutterPaint.setTypeface(Typeface.MONOSPACE);
         gutterPaint.setTextSize(12f * density);
         gutterPaint.setTextAlign(Paint.Align.RIGHT);
-        Paint.FontMetrics fm = textPaint.getFontMetrics();
-        lineHeight = (float) Math.ceil(fm.descent - fm.ascent + 4f * density);
-        charWidth = textPaint.measureText("M");
+        recomputeFontMetrics();
         gutterWidth = 40f * density;
         setFocusable(true);
         setFocusableInTouchMode(true);
         try { nativeLineCount(); } catch (UnsatisfiedLinkError e) { nativeReady = false; }
+    }
+
+    private void recomputeFontMetrics() {
+        float density = getResources().getDisplayMetrics().density;
+        Paint.FontMetrics fm = textPaint.getFontMetrics();
+        lineHeight = (float) Math.ceil(fm.descent - fm.ascent + 4f * density);
+        charWidth = Math.max(4f, textPaint.measureText("M"));
+    }
+
+    public void applySettings(int fontFamily, int fontSizeSp, boolean lineNumbers, int tabSize, int themeIndex, String customFontPath) {
+        float density = getResources().getDisplayMetrics().density;
+        Typeface tf = Typeface.MONOSPACE;
+        if (fontFamily == 1) tf = Typeface.SANS_SERIF;
+        else if (fontFamily == 2) tf = Typeface.SERIF;
+        else if (fontFamily == 3) tf = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD);
+        else if (fontFamily == 4 && customFontPath != null && !customFontPath.isEmpty()) {
+            try {
+                File f = new File(customFontPath);
+                if (f.isFile()) {
+                    Typeface custom = Typeface.createFromFile(f);
+                    if (custom != null) tf = custom;
+                }
+            } catch (Exception ignored) { }
+        }
+        float clampedSp = Math.max(10f, Math.min(26f, fontSizeSp));
+        textPaint.setTypeface(tf);
+        textPaint.setTextSize(clampedSp * density);
+        gutterPaint.setTypeface(tf);
+        gutterPaint.setTextSize(Math.max(9f, clampedSp - 2f) * density);
+        recomputeFontMetrics();
+
+        this.showLineNumbers = lineNumbers;
+        this.tabSpaces = tabSize == 2 ? 2 : 4;
+
+        if (themeIndex == 1) { // OLED Black
+            bgColor = 0xFF000000;
+            activeLineColor = 0xFF111111;
+            gutterBgColor = 0xFF050505;
+            gutterDividerColor = 0xFF1F1F1F;
+            cursorColor = 0xFF38BDF8;
+        } else if (themeIndex == 2) { // Midnight Indigo
+            bgColor = 0xFF0E0D22;
+            activeLineColor = 0xFF1B193B;
+            gutterBgColor = 0xFF13112B;
+            gutterDividerColor = 0xFF282552;
+            cursorColor = 0xFFA78BFA;
+        } else if (themeIndex == 3) { // Forest Dark
+            bgColor = 0xFF07130F;
+            activeLineColor = 0xFF10261F;
+            gutterBgColor = 0xFF0A1A14;
+            gutterDividerColor = 0xFF19382C;
+            cursorColor = 0xFF34D399;
+        } else { // Slate Dark
+            bgColor = 0xFF0B1220;
+            activeLineColor = 0xFF162033;
+            gutterBgColor = 0xFF0F172A;
+            gutterDividerColor = 0xFF1E293B;
+            cursorColor = 0xFF38BDF8;
+        }
+        ensureCursorVisible();
+        invalidate();
+    }
+
+    public String getTabSnippet() {
+        return tabSpaces == 2 ? "  " : "    ";
     }
 
     @Override protected void onAttachedToWindow() {
@@ -141,15 +212,44 @@ public final class CodeEditorView extends View {
         }
     }
 
+    private float activeGutterWidth(int lineCount) {
+        if (!showLineNumbers) return 0f;
+        int digits = Math.max(2, String.valueOf(lineCount).length());
+        return Math.max(32f, (digits + 1.5f) * charWidth);
+    }
+
+    private float measureLinePrefix(int line, int col) {
+        if (!nativeReady || col <= 0) return 0f;
+        String text = nativeGetLine(line);
+        if (text == null || text.isEmpty()) return 0f;
+        int clamped = Math.min(col, text.length());
+        return textPaint.measureText(text, 0, clamped);
+    }
+
+    private int findColAtX(int line, float targetX) {
+        if (!nativeReady || targetX <= 0f) return 0;
+        String text = nativeGetLine(line);
+        if (text == null || text.isEmpty()) return 0;
+        int len = text.length();
+        float prev = 0f;
+        for (int i = 1; i <= len; ++i) {
+            float w = textPaint.measureText(text, 0, i);
+            if (targetX < (prev + w) * 0.5f) return i - 1;
+            prev = w;
+        }
+        return len;
+    }
+
     private void ensureCursorVisible() {
         if (!nativeReady) return;
         int line = nativeCursorLine();
         int col = nativeCursorCol();
         int totalLines = Math.max(1, nativeLineCount());
+        gutterWidth = activeGutterWidth(totalLines);
         float viewW = Math.max(1, getWidth() - gutterWidth - padX);
         float viewH = Math.max(1, getHeight());
         float curY = padY + line * lineHeight;
-        float curX = col * charWidth;
+        float curX = measureLinePrefix(line, col);
 
         if (curY < scrollY + padY) scrollY = Math.max(0, curY - padY);
         else if (curY + lineHeight > scrollY + viewH - padY)
@@ -167,7 +267,7 @@ public final class CodeEditorView extends View {
         super.onDraw(canvas);
         int w = getWidth();
         int h = getHeight();
-        bgPaint.setColor(0xFF0B1220);
+        bgPaint.setColor(bgColor);
         canvas.drawRect(0, 0, w, h, bgPaint);
 
         if (!nativeReady) {
@@ -179,8 +279,7 @@ public final class CodeEditorView extends View {
         int lineCount = Math.max(1, nativeLineCount());
         int curLine = nativeCursorLine();
         int curCol = nativeCursorCol();
-        int digits = Math.max(2, String.valueOf(lineCount).length());
-        gutterWidth = Math.max(32f, (digits + 1.5f) * charWidth);
+        gutterWidth = activeGutterWidth(lineCount);
 
         int firstLine = Math.max(0, (int) ((scrollY - padY) / lineHeight));
         int lastLine = Math.min(lineCount - 1, (int) ((scrollY + h) / lineHeight) + 1);
@@ -189,7 +288,7 @@ public final class CodeEditorView extends View {
         /* Active line highlight */
         float activeTop = padY + curLine * lineHeight - scrollY;
         if (activeTop + lineHeight >= 0 && activeTop <= h) {
-            bgPaint.setColor(0xFF162033);
+            bgPaint.setColor(activeLineColor);
             canvas.drawRect(gutterWidth, activeTop, w, activeTop + lineHeight, bgPaint);
         }
 
@@ -205,23 +304,25 @@ public final class CodeEditorView extends View {
         }
 
         if (hasFocus() && cursorVisible) {
-            float cx = gutterWidth + padX + curCol * charWidth - scrollX;
+            float cx = gutterWidth + padX + measureLinePrefix(curLine, curCol) - scrollX;
             float cy = padY + curLine * lineHeight - scrollY;
-            bgPaint.setColor(0xFF38BDF8);
-            canvas.drawRect(cx, cy + 2f, cx + Math.max(2f, charWidth * 0.14f), cy + lineHeight - 2f, bgPaint);
+            bgPaint.setColor(cursorColor);
+            canvas.drawRect(cx, cy + 2f, cx + Math.max(2.5f, charWidth * 0.14f), cy + lineHeight - 2f, bgPaint);
         }
         canvas.restore();
 
         /* Gutter background + line numbers */
-        bgPaint.setColor(0xFF0F172A);
-        canvas.drawRect(0, 0, gutterWidth, h, bgPaint);
-        bgPaint.setColor(0xFF1E293B);
-        canvas.drawRect(gutterWidth - 1.5f, 0, gutterWidth, h, bgPaint);
+        if (showLineNumbers && gutterWidth > 0f) {
+            bgPaint.setColor(gutterBgColor);
+            canvas.drawRect(0, 0, gutterWidth, h, bgPaint);
+            bgPaint.setColor(gutterDividerColor);
+            canvas.drawRect(gutterWidth - 1.5f, 0, gutterWidth, h, bgPaint);
 
-        for (int line = firstLine; line <= lastLine; ++line) {
-            float y = padY + line * lineHeight - scrollY + baselineOffset;
-            gutterPaint.setColor(line == curLine ? 0xFFE2E8F0 : 0xFF64748B);
-            canvas.drawText(String.valueOf(line + 1), gutterWidth - padX * 0.5f, y, gutterPaint);
+            for (int line = firstLine; line <= lastLine; ++line) {
+                float y = padY + line * lineHeight - scrollY + baselineOffset;
+                gutterPaint.setColor(line == curLine ? 0xFFE2E8F0 : 0xFF64748B);
+                canvas.drawText(String.valueOf(line + 1), gutterWidth - padX * 0.5f, y, gutterPaint);
+            }
         }
     }
 
@@ -285,8 +386,9 @@ public final class CodeEditorView extends View {
         if (action == MotionEvent.ACTION_UP && !dragging) {
             requestFocus();
             if (nativeReady) {
-                int line = Math.max(0, (int) ((y + scrollY - padY) / lineHeight));
-                int col = Math.max(0, Math.round((x + scrollX - gutterWidth - padX) / charWidth));
+                int lineCount = Math.max(1, nativeLineCount());
+                int line = Math.max(0, Math.min(lineCount - 1, (int) ((y + scrollY - padY) / lineHeight)));
+                int col = findColAtX(line, x + scrollX - gutterWidth - padX);
                 nativeSetCursor(line, col);
                 cursorVisible = true;
                 invalidate();
@@ -313,7 +415,7 @@ public final class CodeEditorView extends View {
                     if ("\n".equals(s)) {
                         if (nativeReady) nativeNewline();
                     } else if ("\t".equals(s)) {
-                        if (nativeReady) nativeInsert("    ");
+                        if (nativeReady) nativeInsert(getTabSnippet());
                     } else {
                         if (nativeReady) nativeInsert(s);
                         else fallbackText.append(s);
@@ -355,7 +457,7 @@ public final class CodeEditorView extends View {
         if (keyCode == KeyEvent.KEYCODE_DEL) { nativeBackspace(); handled = true; }
         else if (keyCode == KeyEvent.KEYCODE_FORWARD_DEL) { nativeDelete(); handled = true; }
         else if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) { nativeNewline(); handled = true; }
-        else if (keyCode == KeyEvent.KEYCODE_TAB) { nativeInsert("    "); handled = true; }
+        else if (keyCode == KeyEvent.KEYCODE_TAB) { nativeInsert(getTabSnippet()); handled = true; }
         else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) { nativeMoveCursor(-1, 0); handled = true; }
         else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) { nativeMoveCursor(1, 0); handled = true; }
         else if (keyCode == KeyEvent.KEYCODE_DPAD_UP) { nativeMoveCursor(0, -1); handled = true; }

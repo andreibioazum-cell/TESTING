@@ -37,12 +37,8 @@ final class ProjectStore {
         return result;
     }
 
-    File createSnakeProject(String requested) throws IOException {
-        String name = safeName(requested, "Змейка");
-        File project = unique(root, name);
-        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) throw new IOException("Cannot create project folders");
-        write(new File(project, "main.lua"),
-            "-- Змейка на LuaC (нативный машинный код + инкрементальный GC)\n" +
+    private static String snakeMainLua() {
+        return "-- Змейка на LuaC (нативный машинный код + инкрементальный GC)\n" +
             "snake_mod = require('scripts.snake')\n" +
             "math.randomseed(os.time())\n\n" +
             "game = snake_mod.SnakeGame()\n" +
@@ -66,6 +62,7 @@ final class ProjectStore {
             "            dx = x - touch_start_x\n" +
             "            dy = y - touch_start_y\n" +
             "            if not swiped and (math.abs(dx) > 24 or math.abs(dy) > 24):\n" +
+            "                game.started = true\n" +
             "                if math.abs(dx) > math.abs(dy):\n" +
             "                    if dx > 0:\n" +
             "                        game:set_dir(1, 0)\n" +
@@ -79,6 +76,7 @@ final class ProjectStore {
             "                swiped = true\n" +
             "    else:\n" +
             "        if touch_active and not swiped and game.alive:\n" +
+            "            game.started = true\n" +
             "            w = screen_width()\n" +
             "            h = screen_height()\n" +
             "            dx = x - w * 0.5\n" +
@@ -100,7 +98,7 @@ final class ProjectStore {
             "    w = screen_width()\n" +
             "    h = screen_height()\n" +
             "    pad = 24.0\n" +
-            "    top_hud = 84.0\n" +
+            "    top_hud = 120.0\n" +
             "    avail_w = w - pad * 2.0\n" +
             "    avail_h = h - top_hud - pad\n" +
             "    cell = math.floor(math.min(avail_w / game.cols, avail_h / game.rows))\n" +
@@ -122,14 +120,24 @@ final class ProjectStore {
             "        sy = oy + seg.y * cell + 2\n" +
             "        sz = cell - 4\n" +
             "        if i == 1:\n" +
-            "            draw_rect(sx, sy, sz, sz, 0.25, 0.92, 0.62, 1.0)\n" +
+            "            draw_round_rect(sx, sy, sz, sz, 6, 0.25, 0.92, 0.62, 1.0)\n" +
             "        else:\n" +
-            "            draw_rect(sx, sy, sz, sz, 0.16, 0.72, 0.48, 1.0)\n\n" +
-            "    draw_text('Змейка  •  Счёт: ' .. tostring(game.score) .. '   Рекорд: ' .. tostring(game.best), ox, 24, 22, 1, 1, 1, 1)\n" +
+            "            draw_round_rect(sx, sy, sz, sz, 5, 0.16, 0.72, 0.48, 1.0)\n\n" +
+            "    hud_size = math.max(24, math.floor(w * 0.036))\n" +
+            "    set_text_align('center')\n" +
+            "    set_font('bold')\n" +
+            "    draw_text('Змейка  •  Счёт: ' .. tostring(game.score) .. '   Рекорд: ' .. tostring(game.best), w * 0.5, 22, hud_size, 1, 1, 1, 1)\n" +
+            "    set_font('default')\n" +
             "    if not game.alive:\n" +
-            "        draw_text('Игра окончена! Коснитесь экрана', ox, oy + board_h * 0.5 - 14, 22, 1.0, 0.45, 0.45, 1.0)\n");
-        write(new File(project, "scripts/snake.lua"),
-            "struct Cell:\n" +
+            "        draw_text('Игра окончена! Коснитесь экрана', w * 0.5, 62, hud_size, 1.0, 1.0, 1.0, 1.0)\n" +
+            "    else:\n" +
+            "        if not game.started:\n" +
+            "            draw_text('Свайпните или коснитесь экрана', w * 0.5, 62, math.max(20, hud_size - 4), 0.92, 0.95, 1.0, 1.0)\n" +
+            "    set_text_align('left')\n";
+    }
+
+    private static String snakeScriptLua() {
+        return "struct Cell:\n" +
             "    int x = 0\n" +
             "    int y = 0\n\n" +
             "class SnakeGame:\n" +
@@ -142,8 +150,9 @@ final class ProjectStore {
             "    int score = 0\n" +
             "    int best = 0\n" +
             "    bool alive = true\n" +
+            "    bool started = false\n" +
             "    float timer = 0.0\n" +
-            "    float step_time = 0.14\n" +
+            "    float step_time = 0.16\n" +
             "    body = nil\n" +
             "    food = nil\n\n" +
             "    func reset():\n" +
@@ -153,8 +162,9 @@ final class ProjectStore {
             "        self.next_dy = 0\n" +
             "        self.score = 0\n" +
             "        self.alive = true\n" +
+            "        self.started = false\n" +
             "        self.timer = 0.0\n" +
-            "        self.step_time = 0.14\n" +
+            "        self.step_time = 0.16\n" +
             "        cx = math.floor(self.cols / 2)\n" +
             "        cy = math.floor(self.rows / 2)\n" +
             "        self.body = {\n" +
@@ -182,7 +192,7 @@ final class ProjectStore {
             "        self.next_dx = ndx\n" +
             "        self.next_dy = ndy\n\n" +
             "    func step(float dt):\n" +
-            "        if not self.alive:\n" +
+            "        if not self.alive or not self.started:\n" +
             "            return\n" +
             "        self.timer += dt\n" +
             "        if self.timer < self.step_time:\n" +
@@ -212,8 +222,34 @@ final class ProjectStore {
             "            self:spawn_food()\n" +
             "        else:\n" +
             "            table.remove(self.body)\n\n" +
-            "return {SnakeGame = SnakeGame, Cell = Cell}\n");
+            "return {SnakeGame = SnakeGame, Cell = Cell}\n";
+    }
+
+    File createSnakeProject(String requested) throws IOException {
+        String name = safeName(requested, "Змейка");
+        File project = unique(root, name);
+        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) throw new IOException("Cannot create project folders");
+        write(new File(project, "main.lua"), snakeMainLua());
+        write(new File(project, "scripts/snake.lua"), snakeScriptLua());
         return project;
+    }
+
+    void upgradeLegacySnakeIfUntouched() {
+        File legacy = new File(root, "Змейка");
+        File mainFile = new File(legacy, "main.lua");
+        File snakeFile = new File(legacy, "scripts/snake.lua");
+        if (!mainFile.isFile() || !snakeFile.isFile()) return;
+        try {
+            String mainText = read(mainFile);
+            if (mainText.contains("draw_text('Игра окончена! Коснитесь экрана', ox, oy + board_h * 0.5 - 14, 22, 1.0, 0.45, 0.45, 1.0)")) {
+                write(mainFile, snakeMainLua());
+                String snakeText = read(snakeFile);
+                if (!snakeText.contains("bool started")) {
+                    write(snakeFile, snakeScriptLua());
+                }
+            }
+        } catch (IOException ignored) {
+        }
     }
 
     File createProject(String requested) throws IOException {

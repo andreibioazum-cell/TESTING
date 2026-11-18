@@ -261,11 +261,14 @@ typedef struct LcSlab {
 } LcSlab;
 
 typedef struct {
-    int kind; /* 0 = sprite, 1 = rect, 2 = circle, 3 = text */
+    int kind; /* 0 = sprite, 1 = rect, 2 = circle, 3 = text, 4 = line, 5 = rect_outline, 6 = circle_outline, 7 = round_rect */
     int sprite_id;
     double x, y, w, h, rot;
     double r, g, b, a;
+    double extra;
+    int align; /* 0 = left, 1 = center, 2 = right */
     char *text;
+    char *font;
 } LcDrawCmd;
 
 typedef struct {
@@ -324,6 +327,8 @@ struct LcContext {
     double bg_r, bg_g, bg_b;
     int has_bg;
     int screen_w, screen_h;
+    char *current_font;
+    int text_align;
     /* Optional embedder-owned print capture (Android project runner). */
     int warnings_enabled;
     int capture_output;
@@ -1866,6 +1871,8 @@ static void lc_clear_draw_cmds(LcContext *ctx) {
     for (i = 0; i < ctx->draw_count; ++i) {
         free(ctx->draw_cmds[i].text);
         ctx->draw_cmds[i].text = NULL;
+        free(ctx->draw_cmds[i].font);
+        ctx->draw_cmds[i].font = NULL;
     }
     ctx->draw_count = 0;
     ctx->has_bg = 0;
@@ -1881,7 +1888,7 @@ static void lc_push_draw_cmd(LcContext *ctx, LcDrawCmd cmd) {
     if (ctx->draw_count >= ctx->draw_cap) {
         int cap = ctx->draw_cap ? ctx->draw_cap * 2 : 64;
         LcDrawCmd *p = (LcDrawCmd *)realloc(ctx->draw_cmds, (size_t)cap * sizeof(*p));
-        if (!p) { free(cmd.text); lc_error(ctx, "out of memory in draw queue"); return; }
+        if (!p) { free(cmd.text); free(cmd.font); lc_error(ctx, "out of memory in draw queue"); return; }
         ctx->draw_cmds = p;
         ctx->draw_cap = cap;
     }
@@ -1941,6 +1948,7 @@ static LcValue lc_builtin_draw_rect(LcContext *ctx, LcFunction *self, int argc, 
     c.g = lc_arg_num(ctx, argc, argv, 5, 1.0);
     c.b = lc_arg_num(ctx, argc, argv, 6, 1.0);
     c.a = lc_arg_num(ctx, argc, argv, 7, 1.0);
+    c.rot = lc_arg_num(ctx, argc, argv, 8, 0.0);
     lc_push_draw_cmd(ctx, c);
     return lc_nil();
 }
@@ -1959,6 +1967,101 @@ static LcValue lc_builtin_draw_circle(LcContext *ctx, LcFunction *self, int argc
     lc_push_draw_cmd(ctx, c);
     return lc_nil();
 }
+static LcValue lc_builtin_draw_line(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
+    LcDrawCmd c; (void)self;
+    memset(&c, 0, sizeof(c));
+    c.kind = 4;
+    c.x = lc_arg_num(ctx, argc, argv, 0, 0);
+    c.y = lc_arg_num(ctx, argc, argv, 1, 0);
+    c.w = lc_arg_num(ctx, argc, argv, 2, 0);
+    c.h = lc_arg_num(ctx, argc, argv, 3, 0);
+    c.extra = lc_arg_num(ctx, argc, argv, 4, 2.0);
+    c.r = lc_arg_num(ctx, argc, argv, 5, 1.0);
+    c.g = lc_arg_num(ctx, argc, argv, 6, 1.0);
+    c.b = lc_arg_num(ctx, argc, argv, 7, 1.0);
+    c.a = lc_arg_num(ctx, argc, argv, 8, 1.0);
+    lc_push_draw_cmd(ctx, c);
+    return lc_nil();
+}
+static LcValue lc_builtin_draw_rect_outline(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
+    LcDrawCmd c; (void)self;
+    memset(&c, 0, sizeof(c));
+    c.kind = 5;
+    c.x = lc_arg_num(ctx, argc, argv, 0, 0);
+    c.y = lc_arg_num(ctx, argc, argv, 1, 0);
+    c.w = lc_arg_num(ctx, argc, argv, 2, 32);
+    c.h = lc_arg_num(ctx, argc, argv, 3, 32);
+    c.extra = lc_arg_num(ctx, argc, argv, 4, 2.0);
+    c.r = lc_arg_num(ctx, argc, argv, 5, 1.0);
+    c.g = lc_arg_num(ctx, argc, argv, 6, 1.0);
+    c.b = lc_arg_num(ctx, argc, argv, 7, 1.0);
+    c.a = lc_arg_num(ctx, argc, argv, 8, 1.0);
+    c.rot = lc_arg_num(ctx, argc, argv, 9, 0.0);
+    lc_push_draw_cmd(ctx, c);
+    return lc_nil();
+}
+static LcValue lc_builtin_draw_circle_outline(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
+    LcDrawCmd c; double rad; (void)self;
+    memset(&c, 0, sizeof(c));
+    c.kind = 6;
+    c.x = lc_arg_num(ctx, argc, argv, 0, 0);
+    c.y = lc_arg_num(ctx, argc, argv, 1, 0);
+    rad = lc_arg_num(ctx, argc, argv, 2, 16);
+    c.w = rad * 2.0; c.h = rad * 2.0;
+    c.extra = lc_arg_num(ctx, argc, argv, 3, 2.0);
+    c.r = lc_arg_num(ctx, argc, argv, 4, 1.0);
+    c.g = lc_arg_num(ctx, argc, argv, 5, 1.0);
+    c.b = lc_arg_num(ctx, argc, argv, 6, 1.0);
+    c.a = lc_arg_num(ctx, argc, argv, 7, 1.0);
+    lc_push_draw_cmd(ctx, c);
+    return lc_nil();
+}
+static LcValue lc_builtin_draw_round_rect(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
+    LcDrawCmd c; (void)self;
+    memset(&c, 0, sizeof(c));
+    c.kind = 7;
+    c.x = lc_arg_num(ctx, argc, argv, 0, 0);
+    c.y = lc_arg_num(ctx, argc, argv, 1, 0);
+    c.w = lc_arg_num(ctx, argc, argv, 2, 32);
+    c.h = lc_arg_num(ctx, argc, argv, 3, 32);
+    c.extra = lc_arg_num(ctx, argc, argv, 4, 8.0);
+    c.r = lc_arg_num(ctx, argc, argv, 5, 1.0);
+    c.g = lc_arg_num(ctx, argc, argv, 6, 1.0);
+    c.b = lc_arg_num(ctx, argc, argv, 7, 1.0);
+    c.a = lc_arg_num(ctx, argc, argv, 8, 1.0);
+    c.rot = lc_arg_num(ctx, argc, argv, 9, 0.0);
+    lc_push_draw_cmd(ctx, c);
+    return lc_nil();
+}
+static LcValue lc_builtin_set_font(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
+    (void)self;
+    free(ctx->current_font);
+    ctx->current_font = NULL;
+    if (argc >= 1) {
+        LcValue v = lc_first_value(argv[0]);
+        if (v.type == LC_STRING && v.as.string->length > 0) {
+            ctx->current_font = (char *)malloc(v.as.string->length + 1);
+            if (ctx->current_font) {
+                memcpy(ctx->current_font, v.as.string->data, v.as.string->length);
+                ctx->current_font[v.as.string->length] = '\0';
+            }
+        }
+    }
+    return lc_nil();
+}
+static LcValue lc_builtin_set_text_align(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
+    (void)self;
+    ctx->text_align = 0;
+    if (argc >= 1) {
+        LcValue v = lc_first_value(argv[0]);
+        if (v.type == LC_STRING) {
+            if (!strcmp(v.as.string->data, "center")) ctx->text_align = 1;
+            else if (!strcmp(v.as.string->data, "right")) ctx->text_align = 2;
+            else ctx->text_align = 0;
+        }
+    }
+    return lc_nil();
+}
 static LcValue lc_builtin_draw_text(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     LcDrawCmd c; LcValue s; const char *txt; size_t len; (void)self;
     if (argc < 1) return lc_nil();
@@ -1969,6 +2072,12 @@ static LcValue lc_builtin_draw_text(LcContext *ctx, LcFunction *self, int argc, 
     len = s.type == LC_STRING ? s.as.string->length : 0;
     c.text = (char *)malloc(len + 1);
     if (c.text) { memcpy(c.text, txt, len); c.text[len] = '\0'; }
+    if (ctx->current_font) {
+        size_t flen = strlen(ctx->current_font);
+        c.font = (char *)malloc(flen + 1);
+        if (c.font) memcpy(c.font, ctx->current_font, flen + 1);
+    }
+    c.align = ctx->text_align;
     c.x = lc_arg_num(ctx, argc, argv, 1, 16);
     c.y = lc_arg_num(ctx, argc, argv, 2, 32);
     c.w = lc_arg_num(ctx, argc, argv, 3, 18);
@@ -3592,7 +3701,13 @@ static LcContext *lc_context_new(const char *source) {
     lc_set_global(ctx, "clear_screen", lc_function_new(ctx, lc_builtin_clear_screen, 0, NULL, "clear_screen"));
     lc_set_global(ctx, "draw_sprite", lc_function_new(ctx, lc_builtin_draw_sprite, 0, NULL, "draw_sprite"));
     lc_set_global(ctx, "draw_rect", lc_function_new(ctx, lc_builtin_draw_rect, 0, NULL, "draw_rect"));
+    lc_set_global(ctx, "draw_rect_outline", lc_function_new(ctx, lc_builtin_draw_rect_outline, 0, NULL, "draw_rect_outline"));
+    lc_set_global(ctx, "draw_round_rect", lc_function_new(ctx, lc_builtin_draw_round_rect, 0, NULL, "draw_round_rect"));
     lc_set_global(ctx, "draw_circle", lc_function_new(ctx, lc_builtin_draw_circle, 0, NULL, "draw_circle"));
+    lc_set_global(ctx, "draw_circle_outline", lc_function_new(ctx, lc_builtin_draw_circle_outline, 0, NULL, "draw_circle_outline"));
+    lc_set_global(ctx, "draw_line", lc_function_new(ctx, lc_builtin_draw_line, 0, NULL, "draw_line"));
+    lc_set_global(ctx, "set_font", lc_function_new(ctx, lc_builtin_set_font, 0, NULL, "set_font"));
+    lc_set_global(ctx, "set_text_align", lc_function_new(ctx, lc_builtin_set_text_align, 0, NULL, "set_text_align"));
     lc_set_global(ctx, "draw_text", lc_function_new(ctx, lc_builtin_draw_text, 0, NULL, "draw_text"));
     lc_set_global(ctx, "screen_width", lc_function_new(ctx, lc_builtin_screen_width, 0, NULL, "screen_width"));
     lc_set_global(ctx, "screen_height", lc_function_new(ctx, lc_builtin_screen_height, 0, NULL, "screen_height"));
@@ -3705,6 +3820,7 @@ static void lc_context_destroy(LcContext *ctx) {
     free(ctx->sprites);
     lc_clear_draw_cmds(ctx);
     free(ctx->draw_cmds);
+    free(ctx->current_font);
     free(ctx->c_roots);
 #ifdef _WIN32
     if (ctx->socket_initialized) WSACleanup();

@@ -7,6 +7,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.view.MotionEvent;
 import android.view.View;
 import java.io.File;
@@ -25,6 +26,9 @@ final class RuntimeView extends View {
     private final ViewportSink viewportSink;
     private final HashMap<String, Bitmap> textures = new HashMap<>();
     private final HashSet<String> missingTextures = new HashSet<>();
+    private final HashMap<String, Typeface> fonts = new HashMap<>();
+    private final HashSet<String> missingFonts = new HashSet<>();
+    private Typeface defaultTypeface = Typeface.SANS_SERIF;
     private JSONObject frame;
     private double cameraX, cameraY, zoom = 1;
 
@@ -35,6 +39,11 @@ final class RuntimeView extends View {
         this.viewportSink = viewportSink;
         setBackgroundColor(Color.BLACK);
         setFocusable(true);
+    }
+
+    void setDefaultTypeface(Typeface typeface) {
+        this.defaultTypeface = typeface != null ? typeface : Typeface.SANS_SERIF;
+        invalidate();
     }
 
     @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
@@ -85,6 +94,9 @@ final class RuntimeView extends View {
         if (texts != null) for (int index = 0; index < texts.length(); ++index) {
             JSONObject text = texts.optJSONObject(index);
             if (text == null) continue;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setTypeface(defaultTypeface);
+            paint.setTextAlign(Paint.Align.LEFT);
             paint.setColor(Color.WHITE);
             paint.setTextSize((float) text.optDouble("size", 16));
             canvas.drawText(text.optString("text"), (float) text.optDouble("x"), (float) text.optDouble("y"), paint);
@@ -98,8 +110,10 @@ final class RuntimeView extends View {
         float w = (float) cmd.optDouble("w", 32);
         float h = (float) cmd.optDouble("h", 32);
         float rot = (float) cmd.optDouble("rot", 0);
+        float extra = (float) cmd.optDouble("extra", 2);
         int col = color(cmd.optJSONArray("color"));
         paint.setStyle(Paint.Style.FILL);
+        paint.setTextAlign(Paint.Align.LEFT);
         if (kind == 0) {
             String path = cmd.optString("path", "");
             Bitmap bmp = path.isEmpty() || path.equals("null") ? null : texture(path);
@@ -125,9 +139,72 @@ final class RuntimeView extends View {
             paint.setColor(col);
             canvas.drawCircle(x, y, w * 0.5f, paint);
         } else if (kind == 3) {
+            String fontName = cmd.isNull("font") ? "" : cmd.optString("font", "");
+            int align = cmd.optInt("align", 0);
+            paint.setTypeface(resolveTypeface(fontName));
+            paint.setTextAlign(align == 1 ? Paint.Align.CENTER : (align == 2 ? Paint.Align.RIGHT : Paint.Align.LEFT));
             paint.setColor(col);
-            paint.setTextSize(w > 0 ? w : 18f);
-            canvas.drawText(cmd.optString("text", ""), x, y + (w > 0 ? w : 18f), paint);
+            float sz = w > 0 ? w : 18f;
+            paint.setTextSize(sz);
+            canvas.drawText(cmd.optString("text", ""), x, y + sz, paint);
+        } else if (kind == 4) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(1f, extra));
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setColor(col);
+            canvas.drawLine(x, y, w, h, paint);
+        } else if (kind == 5) {
+            RectF dst = new RectF(x, y, x + w, y + h);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(1f, extra));
+            paint.setColor(col);
+            canvas.save();
+            if (rot != 0) canvas.rotate(rot, x + w * 0.5f, y + h * 0.5f);
+            canvas.drawRect(dst, paint);
+            canvas.restore();
+        } else if (kind == 6) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(1f, extra));
+            paint.setColor(col);
+            canvas.drawCircle(x, y, w * 0.5f, paint);
+        } else if (kind == 7) {
+            RectF dst = new RectF(x, y, x + w, y + h);
+            paint.setColor(col);
+            canvas.save();
+            if (rot != 0) canvas.rotate(rot, x + w * 0.5f, y + h * 0.5f);
+            canvas.drawRoundRect(dst, extra, extra, paint);
+            canvas.restore();
+        }
+    }
+
+    private Typeface resolveTypeface(String spec) {
+        if (spec == null || spec.isEmpty() || "default".equals(spec)) return defaultTypeface;
+        if ("sans".equals(spec)) return Typeface.SANS_SERIF;
+        if ("serif".equals(spec)) return Typeface.SERIF;
+        if ("mono".equals(spec) || "monospace".equals(spec)) return Typeface.MONOSPACE;
+        if ("bold".equals(spec)) return Typeface.DEFAULT_BOLD;
+        if ("italic".equals(spec)) return Typeface.create(defaultTypeface, Typeface.ITALIC);
+        if ("bold_italic".equals(spec)) return Typeface.create(defaultTypeface, Typeface.BOLD_ITALIC);
+        if ("mono_bold".equals(spec)) return Typeface.create(Typeface.MONOSPACE, Typeface.BOLD);
+        if (fonts.containsKey(spec)) return fonts.get(spec);
+        if (missingFonts.contains(spec)) return defaultTypeface;
+        try {
+            File file = new File(spec);
+            if (!file.isAbsolute()) file = new File(project, spec);
+            if (!file.isFile()) {
+                missingFonts.add(spec);
+                return defaultTypeface;
+            }
+            Typeface tf = Typeface.createFromFile(file);
+            if (tf == null) {
+                missingFonts.add(spec);
+                return defaultTypeface;
+            }
+            fonts.put(spec, tf);
+            return tf;
+        } catch (Exception error) {
+            missingFonts.add(spec);
+            return defaultTypeface;
         }
     }
 
@@ -145,6 +222,7 @@ final class RuntimeView extends View {
         if (bitmap != null) canvas.drawBitmap(bitmap, null, rectangle, paint);
         else {
             int color = color(entity.optJSONArray("color"));
+            paint.setStyle(Paint.Style.FILL);
             paint.setColor(color);
             canvas.drawRoundRect(rectangle, Math.min(12, halfWidth * .2f), Math.min(12, halfHeight * .2f), paint);
             paint.setColor(Color.argb(110, 255, 255, 255));
@@ -204,5 +282,6 @@ final class RuntimeView extends View {
     void dispose() {
         for (Bitmap bitmap : textures.values()) if (!bitmap.isRecycled()) bitmap.recycle();
         textures.clear();
+        fonts.clear();
     }
 }
