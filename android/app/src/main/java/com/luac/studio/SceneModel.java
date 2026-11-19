@@ -51,9 +51,10 @@ final class SceneModel {
             this.className = className;
         }
 
-        void add(Node child) {
+        Node add(Node child) {
             child.parent = this;
             children.add(child);
+            return child;
         }
 
         boolean is3DPart() {
