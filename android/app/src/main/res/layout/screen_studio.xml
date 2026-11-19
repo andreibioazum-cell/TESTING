@@ -1,0 +1,498 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1A1C21"
+    android:orientation="vertical">
+
+    <!-- Top Roblox Studio Menu & Ribbon Tabs -->
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:background="#202227"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="6dp">
+
+            <TextView
+                android:id="@+id/btn_projects"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:background="#2D313A"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:text="☰ Projects"
+                android:textColor="#FFFFFF"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/studio_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="10dp"
+                android:text="FPS Arena"
+                android:textColor="#CBD5E1"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/tab_home"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:text="HOME"
+                android:textColor="#FFFFFF"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tab_model"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:text="MODEL"
+                android:textColor="#9CA3AF"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tab_avatar"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:text="AVATAR"
+                android:textColor="#9CA3AF"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tab_test"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:text="TEST"
+                android:textColor="#9CA3AF"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tab_view"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:text="VIEW"
+                android:textColor="#9CA3AF"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tab_plugins"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:text="PLUGINS"
+                android:textColor="#9CA3AF"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#32353E" />
+
+    <!-- Ribbon Toolbar Strip -->
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:background="#282B32"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/ribbon_strip"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="6dp" />
+    </HorizontalScrollView>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#14161A" />
+
+    <!-- Document Tabs Bar (Viewport + Open Scripts) -->
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="28dp"
+        android:background="#1C1E24"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/doc_tabs"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="4dp" />
+    </HorizontalScrollView>
+
+    <!-- Main Workspace (Center Viewport/Editor + Right Explorer/Properties, NO left Toolbox) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal">
+
+        <!-- Center Container: 3D Viewport OR Code Editor -->
+        <FrameLayout
+            android:id="@+id/center_pane"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1">
+
+            <com.luac.studio.Viewport3DView
+                android:id="@+id/viewport3d"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <LinearLayout
+                android:id="@+id/script_editor_pane"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <com.luac.studio.CodeEditorView
+                    android:id="@+id/studio_code_editor"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <HorizontalScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="34dp"
+                    android:background="#24272F"
+                    android:scrollbars="none">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:paddingHorizontal="6dp">
+
+                        <TextView
+                            android:id="@+id/skey_tab"
+                            android:layout_width="wrap_content"
+                            android:layout_height="26dp"
+                            android:layout_marginEnd="6dp"
+                            android:background="#333742"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:text="TAB"
+                            android:textColor="#FFFFFF"
+                            android:textSize="11sp" />
+
+                        <TextView
+                            android:id="@+id/skey_colon"
+                            android:layout_width="wrap_content"
+                            android:layout_height="26dp"
+                            android:layout_marginEnd="6dp"
+                            android:background="#333742"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:text=":"
+                            android:textColor="#FFFFFF"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/skey_eq"
+                            android:layout_width="wrap_content"
+                            android:layout_height="26dp"
+                            android:layout_marginEnd="6dp"
+                            android:background="#333742"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:text="="
+                            android:textColor="#FFFFFF"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/skey_parens"
+                            android:layout_width="wrap_content"
+                            android:layout_height="26dp"
+                            android:layout_marginEnd="6dp"
+                            android:background="#333742"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:text="()"
+                            android:textColor="#FFFFFF"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/skey_undo"
+                            android:layout_width="wrap_content"
+                            android:layout_height="26dp"
+                            android:layout_marginEnd="6dp"
+                            android:background="#333742"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:text="Undo"
+                            android:textColor="#FFFFFF"
+                            android:textSize="11sp" />
+
+                        <TextView
+                            android:id="@+id/skey_check"
+                            android:layout_width="wrap_content"
+                            android:layout_height="26dp"
+                            android:layout_marginEnd="6dp"
+                            android:background="#2563EB"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:text="Check"
+                            android:textColor="#FFFFFF"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/skey_save"
+                            android:layout_width="wrap_content"
+                            android:layout_height="26dp"
+                            android:background="#15803D"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:text="Save"
+                            android:textColor="#FFFFFF"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+                </HorizontalScrollView>
+            </LinearLayout>
+        </FrameLayout>
+
+        <!-- Right Dock: Explorer + Properties -->
+        <LinearLayout
+            android:id="@+id/right_dock"
+            android:layout_width="176dp"
+            android:layout_height="match_parent"
+            android:background="#23252B"
+            android:orientation="vertical">
+
+            <!-- Explorer Panel -->
+            <LinearLayout
+                android:id="@+id/explorer_panel"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="24dp"
+                    android:background="#2E313A"
+                    android:gravity="center_vertical"
+                    android:paddingHorizontal="8dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Explorer"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/btn_explorer_insert"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingHorizontal="6dp"
+                        android:text="+ Insert"
+                        android:textColor="#60A5FA"
+                        android:textSize="10sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/explorer_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="2dp"
+                android:background="#15171C" />
+
+            <!-- Properties Panel -->
+            <LinearLayout
+                android:id="@+id/properties_panel"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="24dp"
+                    android:background="#2E313A"
+                    android:gravity="center_vertical"
+                    android:paddingHorizontal="8dp">
+
+                    <TextView
+                        android:id="@+id/properties_header"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:text="Properties"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/properties_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:background="#14161A" />
+
+    <!-- Bottom Dock: Output + Run a command -->
+    <LinearLayout
+        android:id="@+id/output_panel"
+        android:layout_width="match_parent"
+        android:layout_height="122dp"
+        android:background="#1E2026"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="24dp"
+            android:background="#2A2D35"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="8dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Output"
+                android:textColor="#FFFFFF"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:background="#383C47"
+                android:paddingHorizontal="6dp"
+                android:paddingVertical="1dp"
+                android:text="All Messages"
+                android:textColor="#E2E8F0"
+                android:textSize="10sp" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/btn_clear_output"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:text="Clear"
+                android:textColor="#9CA3AF"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <ScrollView
+            android:id="@+id/output_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="4dp">
+
+            <TextView
+                android:id="@+id/studio_output"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:textColor="#E5E7EB"
+                android:textIsSelectable="true"
+                android:textSize="11sp" />
+        </ScrollView>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="30dp"
+            android:background="#17191E"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="8dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:text="&gt; "
+                android:textColor="#60A5FA"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/command_input"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null"
+                android:fontFamily="monospace"
+                android:hint="Run a command"
+                android:imeOptions="actionSend"
+                android:inputType="textNoSuggestions"
+                android:singleLine="true"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#6B7280"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/btn_run_cmd"
+                android:layout_width="wrap_content"
+                android:layout_height="22dp"
+                android:background="#2563EB"
+                android:gravity="center"
+                android:paddingHorizontal="10dp"
+                android:text="Run"
+                android:textColor="#FFFFFF"
+                android:textSize="10sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

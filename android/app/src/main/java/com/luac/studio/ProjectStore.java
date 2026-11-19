@@ -225,6 +225,193 @@ final class ProjectStore {
             "return {SnakeGame = SnakeGame, Cell = Cell}\n";
     }
 
+    File createFpsArenaProject(String requested) throws IOException {
+        String name = safeName(requested, "FPS Arena");
+        File project = unique(root, name);
+        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) {
+            throw new IOException("Cannot create project folders");
+        }
+        write(new File(project, "main.lua"),
+            "-- FPS Arena (LuaC Studio 3D Engine)\n" +
+            "json = require('json')\n" +
+            "sdk = require('scripts.roblox_sdk')\n" +
+            "game = sdk.Game()\n" +
+            "workspace = game:GetService('Workspace')\n" +
+            "Lighting = game:GetService('Lighting')\n" +
+            "StarterGui = game:GetService('StarterGui')\n" +
+            "RunService = game:GetService('RunService')\n\n" +
+            "sdk.load_scene('scene.json', workspace)\n" +
+            "require('scripts.game')\n\n" +
+            "func update(float dt):\n" +
+            "    RunService:_step(dt)\n");
+        write(new File(project, "scripts/game.lua"),
+            "-- Arena Controller Script\n" +
+            "print('FPS Arena DataModel ready. Workspace children: ' .. tostring(#workspace:GetChildren()))\n" +
+            "elapsed = 0.0\n\n" +
+            "func _on_heartbeat(float dt):\n" +
+            "    elapsed += dt\n" +
+            "    for i = 1, 4:\n" +
+            "        t = workspace:FindFirstChild('Target' .. tostring(i))\n" +
+            "        if t:\n" +
+            "            if t._base_x == nil:\n" +
+            "                t._base_x = t.Position.X\n" +
+            "            t.Position = Vector3.new(t._base_x + math.sin(elapsed * 2.0 + i) * 2.2, t.Position.Y, t.Position.Z)\n\n" +
+            "RunService.Heartbeat:Connect(_on_heartbeat)\n");
+        write(new File(project, "scripts/roblox_sdk.lua"), robloxSdkLua());
+        try {
+            SceneModel.createFpsArenaDefaults().save(this, project);
+        } catch (Exception e) {
+            throw new IOException(e);
+        }
+        return project;
+    }
+
+    static String robloxSdkLua() {
+        return "json = require('json')\n" +
+            "Vector3 = {}\n" +
+            "func _v3_new(float x, float y, float z):\n" +
+            "    return {X = x or 0.0, Y = y or 0.0, Z = z or 0.0}\n" +
+            "Vector3.new = _v3_new\n\n" +
+            "Color3 = {}\n" +
+            "func _c3_new(float r, float g, float b):\n" +
+            "    return {R = r or 1.0, G = g or 1.0, B = b or 1.0}\n" +
+            "func _c3_rgb(int r, int g, int b):\n" +
+            "    return {R = (r or 255) / 255.0, G = (g or 255) / 255.0, B = (b or 255) / 255.0}\n" +
+            "Color3.new = _c3_new\n" +
+            "Color3.fromRGB = _c3_rgb\n\n" +
+            "func _noop():\n" +
+            "    return nil\n\n" +
+            "func make_signal():\n" +
+            "    s = {_conns = {}}\n" +
+            "    func _connect(self_s, fn):\n" +
+            "        table.insert(self_s._conns, fn)\n" +
+            "        return {Disconnect = _noop}\n" +
+            "    func _fire(self_s, a):\n" +
+            "        for i = 1, #self_s._conns:\n" +
+            "            self_s._conns[i](a)\n" +
+            "    s.Connect = _connect\n" +
+            "    s.Fire = _fire\n" +
+            "    return s\n\n" +
+            "func make_instance(cls, name):\n" +
+            "    obj = {\n" +
+            "        _id = '',\n" +
+            "        ClassName = cls,\n" +
+            "        Name = name or cls,\n" +
+            "        Position = Vector3.new(0, 3, 0),\n" +
+            "        Size = Vector3.new(4, 2, 4),\n" +
+            "        Rotation = Vector3.new(0, 0, 0),\n" +
+            "        Color = Color3.fromRGB(163, 162, 165),\n" +
+            "        Material = 'Plastic',\n" +
+            "        Transparency = 0.0,\n" +
+            "        Anchored = true,\n" +
+            "        CanCollide = true,\n" +
+            "        _children = {}\n" +
+            "    }\n" +
+            "    func _find(s, target):\n" +
+            "        for i = 1, #s._children:\n" +
+            "            if s._children[i].Name == target:\n" +
+            "                return s._children[i]\n" +
+            "        return nil\n" +
+            "    func _kids(s):\n" +
+            "        return s._children\n" +
+            "    func _destroy(s):\n" +
+            "        if s.Parent:\n" +
+            "            kids = s.Parent._children\n" +
+            "            for i = 1, #kids:\n" +
+            "                if kids[i] == s:\n" +
+            "                    table.remove(kids, i)\n" +
+            "                    break\n" +
+            "    obj.FindFirstChild = _find\n" +
+            "    obj.GetChildren = _kids\n" +
+            "    obj.Destroy = _destroy\n" +
+            "    return obj\n\n" +
+            "Instance = {}\n" +
+            "_dyn_seq = 0\n" +
+            "func _inst_new(cls, parent):\n" +
+            "    _dyn_seq += 1\n" +
+            "    inst = make_instance(cls, cls)\n" +
+            "    inst._id = 'dyn_' .. tostring(_dyn_seq)\n" +
+            "    if parent:\n" +
+            "        inst.Parent = parent\n" +
+            "        table.insert(parent._children, inst)\n" +
+            "    elseif workspace:\n" +
+            "        inst.Parent = workspace\n" +
+            "        table.insert(workspace._children, inst)\n" +
+            "    return inst\n" +
+            "Instance.new = _inst_new\n\n" +
+            "func _import_node(node, parent):\n" +
+            "    inst = make_instance(node.className or 'Part', node.name or 'Part')\n" +
+            "    inst._id = node.id or ''\n" +
+            "    inst.Position = Vector3.new(node.posX or 0, node.posY or 0, node.posZ or 0)\n" +
+            "    inst.Size = Vector3.new(node.sizeX or 4, node.sizeY or 2, node.sizeZ or 4)\n" +
+            "    inst.Rotation = Vector3.new(node.rotX or 0, node.rotY or 0, node.rotZ or 0)\n" +
+            "    c = node.color or 0\n" +
+            "    r = math.floor(bit32.band(bit32.rshift(c, 16), 255))\n" +
+            "    g = math.floor(bit32.band(bit32.rshift(c, 8), 255))\n" +
+            "    b = math.floor(bit32.band(c, 255))\n" +
+            "    inst.Color = Color3.fromRGB(r, g, b)\n" +
+            "    inst.Material = node.material or 'Plastic'\n" +
+            "    inst.Transparency = node.transparency or 0.0\n" +
+            "    inst.Parent = parent\n" +
+            "    table.insert(parent._children, inst)\n" +
+            "    if node.children:\n" +
+            "        for i = 1, #node.children:\n" +
+            "            _import_node(node.children[i], inst)\n\n" +
+            "func load_scene(path, ws):\n" +
+            "    f = io.open(path, 'r')\n" +
+            "    if not f:\n" +
+            "        return\n" +
+            "    raw = f:read('*a')\n" +
+            "    f:close()\n" +
+            "    data = json.decode(raw)\n" +
+            "    if data and data.root and data.root.children:\n" +
+            "        for i = 1, #data.root.children:\n" +
+            "            svc = data.root.children[i]\n" +
+            "            if svc.name == 'Workspace' and svc.children:\n" +
+            "                for j = 1, #svc.children:\n" +
+            "                    _import_node(svc.children[j], ws)\n\n" +
+            "func _studio_sync():\n" +
+            "    if not workspace:\n" +
+            "        return '[]'\n" +
+            "    out = {}\n" +
+            "    kids = workspace:GetChildren()\n" +
+            "    for i = 1, #kids:\n" +
+            "        k = kids[i]\n" +
+            "        if k.ClassName == 'Part' or k.ClassName == 'WedgePart' or k.ClassName == 'Sphere' or k.ClassName == 'Cylinder' or k.ClassName == 'SpawnLocation':\n" +
+            "            table.insert(out, {\n" +
+            "                id = k._id, name = k.Name, className = k.ClassName,\n" +
+            "                x = k.Position.X, y = k.Position.Y, z = k.Position.Z,\n" +
+            "                sx = k.Size.X, sy = k.Size.Y, sz = k.Size.Z,\n" +
+            "                rx = k.Rotation.X, ry = k.Rotation.Y, rz = k.Rotation.Z,\n" +
+            "                r = k.Color.R, g = k.Color.G, b = k.Color.B,\n" +
+            "                transparency = k.Transparency, material = k.Material\n" +
+            "            })\n" +
+            "    return json.encode(out)\n\n" +
+            "func make_game():\n" +
+            "    services = {}\n" +
+            "    names = {'Workspace','Players','Lighting','MaterialService','ReplicatedFirst','ReplicatedStorage','ServerScriptService','ServerStorage','StarterGui','StarterPack','StarterPlayer','Teams','SoundService'}\n" +
+            "    for i = 1, #names:\n" +
+            "        services[names[i]] = make_instance(names[i], names[i])\n" +
+            "    rs = make_instance('RunService', 'RunService')\n" +
+            "    rs.Heartbeat = make_signal()\n" +
+            "    rs.RenderStepped = make_signal()\n" +
+            "    func _step(s, dt):\n" +
+            "        s.Heartbeat:Fire(dt)\n" +
+            "        s.RenderStepped:Fire(dt)\n" +
+            "    rs._step = _step\n" +
+            "    services['RunService'] = rs\n" +
+            "    g = {Workspace = services['Workspace']}\n" +
+            "    func _get_svc(self_g, name):\n" +
+            "        return services[name]\n" +
+            "    g.GetService = _get_svc\n" +
+            "    return g\n\n" +
+            "return {Game = make_game, Vector3 = Vector3, Color3 = Color3, Instance = Instance, load_scene = load_scene, sync = _studio_sync}\n";
+    }
+
+    boolean is3DProject(File project) {
+        return new File(project, "scene.json").isFile();
+    }
+
     File createSnakeProject(String requested) throws IOException {
         String name = safeName(requested, "Змейка");
         File project = unique(root, name);

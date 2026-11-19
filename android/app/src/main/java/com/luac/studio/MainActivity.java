@@ -51,6 +51,7 @@ public final class MainActivity extends AppCompatActivity {
     private static native String nativeVersion();
     private static native String nativeOpenProject(String root);
     private static native String nativeStepProject(double dt);
+    private static native String nativeExecCommand(String code);
     private static native void nativeSetViewport(int width, int height);
     private static native void nativeTouchProject(int id, double x, double y, boolean down);
     private static native void nativeCloseProject();
@@ -64,6 +65,7 @@ public final class MainActivity extends AppCompatActivity {
     private CodeEditorView editor;
     private TextView output;
     private RuntimeView runtimeView;
+    private StudioController studio;
     private boolean running, opening, runtimeError, destroyed;
     private long previousFrame;
     private final StringBuilder console = new StringBuilder();
@@ -84,11 +86,21 @@ public final class MainActivity extends AppCompatActivity {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES);
         super.onCreate(state);
         store = new ProjectStore(this);
+        File launch3D = null;
         try {
-            if (store.projects().isEmpty()) store.createSnakeProject("Змейка");
-            else store.upgradeLegacySnakeIfUntouched();
+            if (store.projects().isEmpty()) {
+                launch3D = store.createFpsArenaProject("FPS Arena");
+                store.createSnakeProject("Змейка");
+            } else {
+                store.upgradeLegacySnakeIfUntouched();
+                for (File p : store.projects()) {
+                    if (store.is3DProject(p)) { launch3D = p; break; }
+                }
+                if (launch3D == null) launch3D = store.createFpsArenaProject("FPS Arena");
+            }
         } catch (Exception error) { toast(error); }
-        showProjects();
+        if (launch3D != null) showStudio(launch3D);
+        else showProjects();
     }
 
     private void toast(Throwable error) { Toast.makeText(this, String.valueOf(error.getMessage() == null ? error : error.getMessage()), Toast.LENGTH_LONG).show(); }
@@ -111,12 +123,13 @@ public final class MainActivity extends AppCompatActivity {
 
     private void showProjects() {
         stopRuntime();
+        if (studio != null) { studio.dispose(); studio = null; }
         project = directory = editorFile = imageFile = null;
         MaterialToolbar bar = toolbar(R.layout.screen_projects);
         String version = "native unavailable";
         if (nativeAvailable) try { version = nativeVersion(); } catch (Throwable ignored) { }
         bar.setTitle("LuaC Studio");
-        bar.setSubtitle(version + " • in-process runtime");
+        bar.setSubtitle(version + " • 3D & 2D IDE");
         bar.inflateMenu(R.menu.menu_projects);
         bar.setOnMenuItemClickListener(item -> {
             if (item.getItemId() == R.id.action_settings) showSettingsDialog();
@@ -126,7 +139,10 @@ public final class MainActivity extends AppCompatActivity {
         list.setLayoutManager(new LinearLayoutManager(this));
         ProjectAdapter adapter = new ProjectAdapter(store, store.projects(), new ProjectAdapter.Listener() {
             @Override public void onOpen(File item) { showProject(item); }
-            @Override public void onRun(File item) { startProject(item); }
+            @Override public void onRun(File item) {
+                if (store.is3DProject(item)) showStudio(item);
+                else startProject(item);
+            }
             @Override public void onRename(File item) {
                 renameDialog(item, renamed -> { showProjects(); toast("Renamed to " + renamed.getName()); });
             }
@@ -138,13 +154,83 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void newProjectDialog() {
-        nameDialog("New project", "", "Project name", "Create", name -> {
-            try { showProject(store.createProject(name)); }
-            catch (Exception error) { toast(error); }
-        });
+        String[] kinds = {"3D Studio World (Roblox-style)", "2D Canvas Project"};
+        new MaterialAlertDialogBuilder(this)
+            .setTitle("New Project Type")
+            .setItems(kinds, (d, which) -> {
+                if (which == 0) {
+                    nameDialog("New 3D World", "", "My Arena", "Create", name -> {
+                        try { showStudio(store.createFpsArenaProject(name)); }
+                        catch (Exception error) { toast(error); }
+                    });
+                } else {
+                    nameDialog("New 2D Project", "", "Project name", "Create", name -> {
+                        try { showProject(store.createProject(name)); }
+                        catch (Exception error) { toast(error); }
+                    });
+                }
+            })
+            .show();
     }
 
-    private void showProject(File selected) { project = selected; showDirectory(selected); }
+    private void showProject(File selected) {
+        if (store.is3DProject(selected)) {
+            showStudio(selected);
+        } else {
+            project = selected;
+            showDirectory(selected);
+        }
+    }
+
+    private void showStudio(File selected) {
+        stopRuntime();
+        if (studio != null) { studio.dispose(); studio = null; }
+        project = selected;
+        directory = selected;
+        editorFile = imageFile = null;
+        editor = null;
+        runtimeView = null;
+        setContentView(R.layout.screen_studio);
+        studio = new StudioController(this, store, selected, new StudioController.Host() {
+            @Override public void onShowProjects() { showProjects(); }
+            @Override public void onOpenFiles(File p) {
+                studio = null;
+                project = p;
+                showDirectory(p);
+            }
+            @Override public void onOpenSettings() { showSettingsDialog(); }
+            @Override public void onPickAssetForProject(File dir) {
+                importDirectory = dir;
+                pickAsset();
+            }
+            @Override public String checkSyntax(String source) {
+                if (!nativeAvailable) return "Native compiler unavailable";
+                return nativeCheck(source);
+            }
+            @Override public String openNativeProject(String root) {
+                if (!nativeAvailable) return "{\"ok\":false,\"error\":\"Native compiler unavailable\"}";
+                return nativeOpenProject(root);
+            }
+            @Override public String stepNativeProject(double dt) {
+                if (!nativeAvailable) return "{\"ok\":false,\"error\":\"Native compiler unavailable\"}";
+                return nativeStepProject(dt);
+            }
+            @Override public String execNativeCommand(String code) {
+                if (!nativeAvailable) return "{\"ok\":false,\"error\":\"Native compiler unavailable\"}";
+                return nativeExecCommand(code);
+            }
+            @Override public void closeNativeProject() {
+                if (nativeAvailable) try { nativeCloseProject(); } catch (Throwable ignored) { }
+            }
+            @Override public void applyEditorPrefs(CodeEditorView ed) {
+                applyEditorSettings(ed);
+            }
+            @Override public Typeface resolvedTypeface() {
+                return resolvedRuntimeTypeface();
+            }
+        });
+        studio.bindViews();
+    }
 
     private void showDirectory(File selected) {
         stopRuntime();
@@ -384,9 +470,13 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void applyEditorSettings() {
-        if (editor == null) return;
+        applyEditorSettings(editor);
+    }
+
+    private void applyEditorSettings(CodeEditorView target) {
+        if (target == null) return;
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        editor.applySettings(
+        target.applySettings(
             prefs.getInt("font_family", 0),
             prefs.getInt("font_size", 14),
             prefs.getBoolean("line_numbers", true),
@@ -453,6 +543,7 @@ public final class MainActivity extends AppCompatActivity {
                     .apply();
                 applyEditorSettings();
                 if (runtimeView != null) runtimeView.setDefaultTypeface(resolvedRuntimeTypeface());
+                if (studio != null) studio.refreshSettings();
                 toast("Settings saved");
             })
             .setNegativeButton("Cancel", null)
@@ -473,7 +564,7 @@ public final class MainActivity extends AppCompatActivity {
             try (InputStream input = getContentResolver().openInputStream(uri)) {
                 File imported = store.importFile(importDirectory, displayName(uri), input);
                 toast("Imported " + imported.getName());
-                if (project != null) showDirectory(importDirectory);
+                if (project != null && studio == null) showDirectory(importDirectory);
             } catch (Exception error) { toast(error); }
         } else if (request == PICK_FONT) {
             try (InputStream input = getContentResolver().openInputStream(uri)) {
@@ -495,6 +586,7 @@ public final class MainActivity extends AppCompatActivity {
                     .apply();
                 applyEditorSettings();
                 if (runtimeView != null) runtimeView.setDefaultTypeface(test);
+                if (studio != null) studio.refreshSettings();
                 toast("Font applied: " + dest.getName());
             } catch (Exception error) { toast(error); }
         }
@@ -542,6 +634,7 @@ public final class MainActivity extends AppCompatActivity {
 
     @Override public void onBackPressed() {
         if (opening) return;
+        if (studio != null) { studio.dispose(); studio = null; showProjects(); return; }
         if (running || runtimeView != null) { showProject(project); return; }
         if (editorFile != null) { if (saveEditor()) showDirectory(directory); return; }
         if (imageFile != null) { showDirectory(imageFile.getParentFile()); return; }
@@ -554,10 +647,12 @@ public final class MainActivity extends AppCompatActivity {
     }
     @Override protected void onPause() {
         if (editorFile != null) saveEditor();
+        if (studio != null) studio.dispose();
         super.onPause();
     }
     @Override protected void onDestroy() {
         destroyed = true;
+        if (studio != null) { studio.dispose(); studio = null; }
         stopRuntime();
         if (nativeAvailable) try { nativeVulkanDestroy(); } catch (Throwable ignored) { }
         super.onDestroy();

@@ -87,6 +87,16 @@ Java_com_luac_studio_MainActivity_nativeStepProject(JNIEnv *env, jclass, jdouble
     return result;
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_luac_studio_MainActivity_nativeExecCommand(JNIEnv *env, jclass, jstring code) {
+    if (!projectHandle) return env->NewStringUTF("{\"ok\":false,\"error\":\"Start Play or Run first\",\"output\":\"\"}");
+    std::string source = fromJava(env, code);
+    char *res = luac_project_exec(projectHandle, source.c_str());
+    jstring out = env->NewStringUTF(res ? res : "{\"ok\":false,\"error\":\"execution failure\",\"output\":\"\"}");
+    luac_free(res);
+    return out;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_luac_studio_MainActivity_nativeSetViewport(JNIEnv *, jclass, jint width, jint height) {
     if (projectHandle) luac_project_set_viewport(projectHandle, width, height);

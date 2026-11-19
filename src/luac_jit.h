@@ -2106,6 +2106,57 @@ LUAC_API char *luac_project_step(void *handle, double dt) {
     return jit_project_frame(session, dt);
 }
 
+LUAC_API char *luac_project_exec(void *handle, const char *code) {
+    JitSession *session = (JitSession *)handle;
+    LcContext *ctx;
+    LcValue loaded, fn, ret = lc_nil();
+    Str json;
+    int had_error;
+    if (!session || !session->ctx) {
+        return xstrdup("{\"ok\":false,\"error\":\"project is not running\",\"output\":\"\",\"result\":null}");
+    }
+    ctx = session->ctx;
+    jit_current = session;
+    had_error = ctx->error;
+    ctx->error = 0;
+    ctx->message[0] = '\0';
+    session->budget = 500000;
+    loaded = jit_load_text(session, code ? code : "", code ? strlen(code) : 0, "=command");
+    fn = lc_first(loaded);
+    if (fn.type == LC_FUNCTION) {
+        ret = lc_first(lc_call(ctx, fn, 0, NULL));
+    } else if (!ctx->error) {
+        LcValue err = lc_nth(loaded, 1);
+        lc_error(ctx, "%s", err.type == LC_STRING ? err.as.string->data : "syntax error");
+    }
+    sb_init(&json);
+    sb_add(&json, "{\"ok\":");
+    sb_add(&json, ctx->error ? "false" : "true");
+    sb_add(&json, ",\"output\":");
+    if (ctx->captured_output && session->output_offset < ctx->captured_length)
+        jit_json_string(&json, ctx->captured_output + session->output_offset);
+    else
+        jit_json_string(&json, "");
+    session->output_offset = ctx->captured_length;
+    sb_add(&json, ",\"result\":");
+    if (!ctx->error && ret.type != LC_NIL) {
+        LcValue rs = lc_to_string(ctx, ret);
+        if (rs.type == LC_STRING) jit_json_string(&json, rs.as.string->data);
+        else sb_add(&json, "null");
+    } else {
+        sb_add(&json, "null");
+    }
+    sb_add(&json, ",\"error\":");
+    if (ctx->error) {
+        jit_json_string(&json, ctx->message);
+    } else {
+        sb_add(&json, "null");
+    }
+    sb_add(&json, "}");
+    ctx->error = had_error;
+    return json.data;
+}
+
 LUAC_API void luac_project_set_viewport(void *handle, int width, int height) {
     JitSession *session = (JitSession *)handle;
     if (!session || !session->ctx) return;

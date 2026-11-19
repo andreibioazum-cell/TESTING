@@ -30,6 +30,7 @@ LUAC_API int luac_check(const char *source, const char *filename,
  * are JSON containing output, error, entities, camera and overlay texts. */
 LUAC_API void *luac_project_open(const char *root_path, char **error_message);
 LUAC_API char *luac_project_step(void *project, double dt);
+LUAC_API char *luac_project_exec(void *project, const char *code);
 LUAC_API void luac_project_set_viewport(void *project, int width, int height);
 LUAC_API void luac_project_touch(void *project, int id, double x, double y, int down);
 LUAC_API void luac_project_close(void *project);
