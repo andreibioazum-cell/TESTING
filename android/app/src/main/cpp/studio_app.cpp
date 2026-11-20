@@ -1663,10 +1663,21 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
     int baseAct = action & 0xFF;
 
     // Forward viewport touches to user Lua scripts during Play (2D or 3D)
-    if (runningLua && g_luacProj && !showProjectsTab && modal == ModalKind::NONE && activeScript.empty() && rViewport.contains(x0, y0)) {
-        int down = (baseAct == 0 || baseAct == 2 || baseAct == 5) ? 1 : 0;
-        luac_project_touch(g_luacProj, ids[0], x0 - rViewport.x, y0 - rViewport.y, down);
-        if (!currentIs3D && baseAct == 2) return;
+    if (runningLua && g_luacProj && !showProjectsTab && modal == ModalKind::NONE && activeScript.empty()) {
+        if (baseAct == 2) {
+            for (int i = 0; i < pointerCount; ++i) {
+                if (rViewport.contains(xs[i], ys[i])) {
+                    luac_project_touch(g_luacProj, ids[i], xs[i] - rViewport.x, ys[i] - rViewport.y, 1);
+                }
+            }
+            if (!currentIs3D) return;
+        } else {
+            int pi = (baseAct == 5 || baseAct == 6) ? std::max(0, std::min(pointerIndex, pointerCount - 1)) : 0;
+            if (rViewport.contains(xs[pi], ys[pi])) {
+                int down = (baseAct == 0 || baseAct == 5) ? 1 : 0;
+                luac_project_touch(g_luacProj, ids[pi], xs[pi] - rViewport.x, ys[pi] - rViewport.y, down);
+            }
+        }
     }
 
     if (baseAct == 0) {

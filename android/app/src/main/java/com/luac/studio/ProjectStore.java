@@ -284,14 +284,14 @@ final class ProjectStore {
             "int move_tid = -1\n" +
             "float joy_ox = 0.0\n" +
             "float joy_oy = 0.0\n\n" +
-            "func on_touch(int id, float x, float y, int down):\n" +
+            "func on_touch(int id, float x, float y, bool down):\n" +
             "    w = screen_width()\n" +
-            "    if x > w * 0.5:\n" +
-            "        if down == 1 and grounded:\n" +
+            "    if id ~= move_tid and x > w * 0.5:\n" +
+            "        if down and grounded:\n" +
             "            vy = 11.5\n" +
             "            grounded = false\n" +
             "        return\n" +
-            "    if down == 1:\n" +
+            "    if down:\n" +
             "        if move_tid == -1:\n" +
             "            move_tid = id\n" +
             "            joy_ox = x\n" +
@@ -364,6 +364,21 @@ final class ProjectStore {
                             write(mainFile, m.replace("scripts." + legacyName, "scripts.studio_sdk")
                                              .replace(legacyName, "studio_sdk"));
                         }
+                    }
+                } catch (IOException ignored) {
+                }
+            }
+            File playerFile = new File(project, "scripts/player.lua");
+            if (playerFile.isFile()) {
+                try {
+                    String p = read(playerFile);
+                    if (p.contains("func on_touch(int id, float x, float y, int down):")) {
+                        String fixed = p
+                            .replace("func on_touch(int id, float x, float y, int down):", "func on_touch(int id, float x, float y, bool down):")
+                            .replace("if x > w * 0.5:", "if id ~= move_tid and x > w * 0.5:")
+                            .replace("if down == 1 and grounded:", "if down and grounded:")
+                            .replace("if down == 1:", "if down:");
+                        write(playerFile, fixed);
                     }
                 } catch (IOException ignored) {
                 }
