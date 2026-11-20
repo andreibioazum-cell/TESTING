@@ -450,8 +450,10 @@ void StudioApp::buildFrame(float w, float h, float d) {
 
     has3DViewportVisible = (!showProjectsTab && activeScript.empty() && currentIs3D);
 
-    pushBatch(false, {});
-    emitRect(0, 0, width, height, Col::bg());
+    if (!has3DViewportVisible) {
+        pushBatch(false, {});
+        emitRect(0, 0, width, height, Col::bg());
+    }
 
     if (showProjectsTab) {
         buildProjectsTab(rViewport);

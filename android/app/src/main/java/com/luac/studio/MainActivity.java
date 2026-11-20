@@ -227,11 +227,15 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
 
         @Override
         public void surfaceCreated(SurfaceHolder holder) {
-            surfaceReady = nativeVulkanCreate(holder.getSurface(), getWidth(), getHeight());
+            int w = getWidth(), h = getHeight();
+            if (w > 0 && h > 0) {
+                surfaceReady = nativeVulkanCreate(holder.getSurface(), w, h);
+            }
         }
 
         @Override
         public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+            if (width <= 0 || height <= 0) return;
             if (surfaceReady) {
                 nativeVulkanResize(width, height);
             } else {

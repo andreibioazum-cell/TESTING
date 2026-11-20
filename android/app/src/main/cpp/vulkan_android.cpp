@@ -421,7 +421,7 @@ void createPipelines() {
 
     VkPipelineRasterizationStateCreateInfo rs3{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs3.polygonMode = VK_POLYGON_MODE_FILL;
-    rs3.cullMode = VK_CULL_MODE_BACK_BIT;
+    rs3.cullMode = VK_CULL_MODE_NONE;
     rs3.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs3.lineWidth = 1.0f;
 
