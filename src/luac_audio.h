@@ -39,15 +39,13 @@ static LcValue lc_audio_value(LcContext *ctx, size_t frames, int channels, int s
         frames > SIZE_MAX / (sizeof(float) * (size_t)channels)) {
         lc_error(ctx, "invalid audio buffer dimensions"); return lc_nil();
     }
-    audio = (LcAudio *)calloc(1, sizeof(*audio));
-    if (!audio) { lc_error(ctx, "out of memory"); return lc_nil(); }
+    audio = (LcAudio *)lc_alloc(ctx, sizeof(*audio), LC_AUDIO);
+    if (!audio) return lc_nil();
     if (frames) {
         audio->samples = (float *)calloc(frames * (size_t)channels, sizeof(float));
-        if (!audio->samples) { free(audio); lc_error(ctx, "out of memory"); return lc_nil(); }
+        if (!audio->samples) { lc_error(ctx, "out of memory"); return lc_nil(); }
     }
     audio->frames = frames; audio->channels = channels; audio->sample_rate = sample_rate;
-    audio->object.refs = 1; audio->object.kind = LC_AUDIO;
-    audio->object.next = ctx->objects; ctx->objects = (LcObject *)audio;
     value.type = LC_AUDIO; value.as.audio = audio;
     return value;
 }
