@@ -2,11 +2,11 @@ cmake_minimum_required(VERSION 3.22.1)
 project(LuaCStudio LANGUAGES C CXX)
 set(LUAC_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../..")
 
-# Locate NDK glslc compiler
-file(GLOB _GLSLC_NDK_CANDIDATES
-    "${ANDROID_NDK}/shader-tools/*/glslc*"
-    "${CMAKE_ANDROID_NDK}/shader-tools/*/glslc*")
-find_program(GLSLC_EXECUTABLE NAMES glslc HINTS ${_GLSLC_NDK_CANDIDATES} REQUIRED)
+# Locate NDK glslc compiler (HINTS expects directories)
+file(GLOB _GLSLC_NDK_DIRS
+    "${ANDROID_NDK}/shader-tools/*"
+    "${CMAKE_ANDROID_NDK}/shader-tools/*")
+find_program(GLSLC_EXECUTABLE NAMES glslc HINTS ${_GLSLC_NDK_DIRS} REQUIRED)
 
 set(SHADER_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders")
 file(MAKE_DIRECTORY "${SHADER_GEN_DIR}")

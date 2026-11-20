@@ -128,8 +128,9 @@ void ensureDynBuffer(DynBuffer &b, VkDeviceSize need, VkBufferUsageFlags usage) 
     b.cap = cap;
 }
 
-VkShaderModule makeShader(const uint32_t *words, size_t byteLen) {
-    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0, byteLen, words};
+VkShaderModule makeShader(const void *words, size_t byteLen) {
+    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0, byteLen,
+                                reinterpret_cast<const uint32_t *>(words)};
     VkShaderModule m = VK_NULL_HANDLE;
     check(vkCreateShaderModule(r.device, &ci, nullptr, &m), "vkCreateShaderModule");
     return m;

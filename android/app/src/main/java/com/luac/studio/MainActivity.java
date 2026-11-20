@@ -313,9 +313,9 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         }
     }
 
-    private static native void nativeStudioInit(String projectsRoot, String initialProj, boolean is3D,
-                                                float density, int fam, int sz, int theme, int tabs,
-                                                boolean lineNums, String customFont);
+    private native void nativeStudioInit(String projectsRoot, String initialProj, boolean is3D,
+                                         float density, int fam, int sz, int theme, int tabs,
+                                         boolean lineNums, String customFont);
     private static native void nativeStudioStep(float dt);
     private static native void nativeStudioTouch(int action, int pointerIndex, int[] ids, float[] xs, float[] ys);
     private static native void nativeStudioTextInput(String utf8);
