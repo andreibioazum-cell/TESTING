@@ -258,11 +258,7 @@ final class ProjectStore {
             "            t.Position = Vector3.new(t._base_x + math.sin(elapsed * 2.0 + i) * 2.2, t.Position.Y, t.Position.Z)\n\n" +
             "RunService.Heartbeat:Connect(_on_heartbeat)\n");
         write(new File(project, "scripts/roblox_sdk.lua"), robloxSdkLua());
-        try {
-            SceneModel.createFpsArenaDefaults().save(this, project);
-        } catch (Exception e) {
-            throw new IOException(e);
-        }
+        write(new File(project, "scene.json"), "{}\n");
         return project;
     }
 

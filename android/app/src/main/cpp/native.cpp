@@ -1,174 +1,209 @@
 #include <jni.h>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 #include "luac.h"
+#include "studio_app.hpp"
 
 extern bool androidVulkanCreate(JNIEnv *env, jobject surface);
-extern void androidVulkanDraw();
+extern void androidVulkanDrawStudio(StudioApp *app, float density);
 extern void androidVulkanDestroy();
 
-extern "C" {
-void lc_editor_init(void);
-void lc_editor_free(void);
-void lc_editor_set_text(const char *utf8);
-const char *lc_editor_get_text(void);
-void lc_editor_insert(const char *utf8);
-void lc_editor_newline(void);
-void lc_editor_backspace(void);
-void lc_editor_delete(void);
-void lc_editor_set_cursor_line_col(int line, int col);
-void lc_editor_move_cursor(int dx, int dy);
-int lc_editor_line_count(void);
-int lc_editor_cursor_line(void);
-int lc_editor_cursor_col(void);
-int lc_editor_get_line(int line, char *out, int cap);
-int lc_editor_tokenize_line(int line, int *out_triplets, int max_triplets);
-int lc_editor_undo(void);
-int lc_editor_redo(void);
-}
+namespace {
+JavaVM *g_vm = nullptr;
+jobject g_activity = nullptr;
+std::unique_ptr<StudioApp> g_studio;
+std::mutex g_studioMutex;
+float g_density = 3.0f;
 
-static void *projectHandle = nullptr;
-
-static std::string fromJava(JNIEnv *env, jstring value) {
+std::string fromJava(JNIEnv *env, jstring value) {
+    if (!value) return "";
     const char *bytes = env->GetStringUTFChars(value, nullptr);
     std::string result = bytes ? bytes : "";
     if (bytes) env->ReleaseStringUTFChars(value, bytes);
     return result;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_luac_studio_MainActivity_nativeVersion(JNIEnv *env, jclass) {
-    return env->NewStringUTF(luac_version());
+JNIEnv *getEnv() {
+    if (!g_vm) return nullptr;
+    JNIEnv *env = nullptr;
+    if (g_vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK) return env;
+    return nullptr;
+}
+} // namespace
+
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
+    g_vm = vm;
+    return JNI_VERSION_1_6;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_luac_studio_MainActivity_nativeCheck(JNIEnv *env, jclass, jstring source) {
-    std::string code = fromJava(env, source);
-    char *error = nullptr;
-    int valid = luac_check(code.c_str(), "AndroidEditor.lua", &error);
-    std::string result = valid ? "Syntax OK\nNative machine-code JIT ready; tri-color incremental GC, classes/structs, and direct graphics." : error;
-    luac_free(error);
-    return env->NewStringUTF(result.c_str());
+extern "C" JNIEXPORT void JNICALL
+Java_com_luac_studio_MainActivity_nativeStudioInit(
+    JNIEnv *env, jobject thiz, jstring projectsRoot, jstring initialProj, jboolean is3D,
+    jfloat density, jint fam, jint sz, jint theme, jint tabs, jboolean lineNums, jstring customFont) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_activity) env->DeleteGlobalRef(g_activity);
+    g_activity = env->NewGlobalRef(thiz);
+    g_density = density > 0.5f ? density : 3.0f;
+
+    g_studio = std::make_unique<StudioApp>();
+    g_studio->callbacks.setKeyboardVisible = [](bool show) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbSetKeyboard", "(Z)V");
+        if (mid) e->CallVoidMethod(g_activity, mid, show ? JNI_TRUE : JNI_FALSE);
+        e->DeleteLocalRef(cls);
+    };
+    g_studio->callbacks.openFontPicker = []() {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbOpenFontPicker", "()V");
+        if (mid) e->CallVoidMethod(g_activity, mid);
+        e->DeleteLocalRef(cls);
+    };
+    g_studio->callbacks.createProject = [](const std::string &kind, const std::string &name) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbCreateProject", "(Ljava/lang/String;Ljava/lang/String;)V");
+        if (mid) {
+            jstring jk = e->NewStringUTF(kind.c_str());
+            jstring jn = e->NewStringUTF(name.c_str());
+            e->CallVoidMethod(g_activity, mid, jk, jn);
+            e->DeleteLocalRef(jk);
+            e->DeleteLocalRef(jn);
+        }
+        e->DeleteLocalRef(cls);
+    };
+    g_studio->callbacks.deleteProject = [](const std::string &name) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbDeleteProject", "(Ljava/lang/String;)V");
+        if (mid) {
+            jstring jn = e->NewStringUTF(name.c_str());
+            e->CallVoidMethod(g_activity, mid, jn);
+            e->DeleteLocalRef(jn);
+        }
+        e->DeleteLocalRef(cls);
+    };
+    g_studio->callbacks.listProjects = []() -> std::vector<std::pair<std::string, bool>> {
+        std::vector<std::pair<std::string, bool>> res;
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return res;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbListProjects", "()[Ljava/lang/String;");
+        if (mid) {
+            auto arr = (jobjectArray)e->CallObjectMethod(g_activity, mid);
+            if (arr) {
+                jsize n = e->GetArrayLength(arr);
+                for (jsize i = 0; i < n; ++i) {
+                    auto js = (jstring)e->GetObjectArrayElement(arr, i);
+                    std::string s = fromJava(e, js);
+                    e->DeleteLocalRef(js);
+                    auto bar = s.rfind('|');
+                    if (bar != std::string::npos) {
+                        res.emplace_back(s.substr(0, bar), s.substr(bar + 1) == "3d");
+                    }
+                }
+                e->DeleteLocalRef(arr);
+            }
+        }
+        e->DeleteLocalRef(cls);
+        return res;
+    };
+    g_studio->callbacks.savePrefs = [](int f, int s, int th, int tb, bool ln, const std::string &cf) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbSavePrefs", "(IIIIZLjava/lang/String;)V");
+        if (mid) {
+            jstring jcf = e->NewStringUTF(cf.c_str());
+            e->CallVoidMethod(g_activity, mid, f, s, th, tb, ln ? JNI_TRUE : JNI_FALSE, jcf);
+            e->DeleteLocalRef(jcf);
+        }
+        e->DeleteLocalRef(cls);
+    };
+
+    g_studio->init(fromJava(env, projectsRoot), fromJava(env, initialProj), is3D == JNI_TRUE,
+                   fam, sz, theme, tabs, lineNums == JNI_TRUE, fromJava(env, customFont));
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_luac_studio_MainActivity_nativeGenerate(JNIEnv *env, jclass, jstring source) {
-    std::string code = fromJava(env, source);
-    char *error = nullptr;
-    char *generated = luac_compile_c(code.c_str(), "AndroidEditor.lua", &error);
-    std::string result = generated ? generated : (error ? error : "Code generation failed");
-    luac_free(generated);
-    luac_free(error);
-    return env->NewStringUTF(result.c_str());
+extern "C" JNIEXPORT void JNICALL
+Java_com_luac_studio_MainActivity_nativeStudioStep(JNIEnv *, jclass, jfloat dt) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) g_studio->step(dt);
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_luac_studio_MainActivity_nativeOpenProject(JNIEnv *env, jclass, jstring root) {
-    std::string path = fromJava(env, root);
-    char *error = nullptr;
-    if (projectHandle) { luac_project_close(projectHandle); projectHandle = nullptr; }
-    projectHandle = luac_project_open(path.c_str(), &error);
-    if (!projectHandle) {
-        std::string message = error ? error : "Cannot open project";
-        luac_free(error);
-        return env->NewStringUTF(message.c_str());
+extern "C" JNIEXPORT void JNICALL
+Java_com_luac_studio_MainActivity_nativeStudioTouch(
+    JNIEnv *env, jclass, jint action, jint pointerIndex, jintArray jIds, jfloatArray jXs, jfloatArray jYs) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (!g_studio || !jIds || !jXs || !jYs) return;
+    jsize n = env->GetArrayLength(jIds);
+    jint *ids = env->GetIntArrayElements(jIds, nullptr);
+    jfloat *xs = env->GetFloatArrayElements(jXs, nullptr);
+    jfloat *ys = env->GetFloatArrayElements(jYs, nullptr);
+    g_studio->onTouch(action, pointerIndex, (int)n, ids, xs, ys);
+    env->ReleaseIntArrayElements(jIds, ids, JNI_ABORT);
+    env->ReleaseFloatArrayElements(jXs, xs, JNI_ABORT);
+    env->ReleaseFloatArrayElements(jYs, ys, JNI_ABORT);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_luac_studio_MainActivity_nativeStudioTextInput(JNIEnv *env, jclass, jstring utf8) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) g_studio->onTextInput(fromJava(env, utf8));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_luac_studio_MainActivity_nativeStudioKeyCode(JNIEnv *, jclass, jint keyCode) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) g_studio->onKeyCode(keyCode);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_luac_studio_MainActivity_nativeStudioSetCustomFont(JNIEnv *env, jclass, jstring path) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) {
+        std::string p = fromJava(env, path);
+        g_studio->applyFont(p, g_studio->prefFontFamily);
+        if (g_studio->callbacks.savePrefs) {
+            g_studio->callbacks.savePrefs(g_studio->prefFontFamily, g_studio->prefFontSize,
+                                          g_studio->prefTheme, g_studio->prefTabSpaces,
+                                          g_studio->prefLineNumbers, p);
+        }
     }
-    char *frame = luac_project_step(projectHandle, 0);
-    jstring result = env->NewStringUTF(frame ? frame : "{\"ok\":false,\"error\":\"runtime failure\"}");
-    luac_free(frame);
-    return result;
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_luac_studio_MainActivity_nativeStepProject(JNIEnv *env, jclass, jdouble dt) {
-    if (!projectHandle) return env->NewStringUTF("{\"ok\":false,\"error\":\"project is not running\",\"output\":\"\",\"entities\":[],\"texts\":[]}");
-    char *frame = luac_project_step(projectHandle, dt);
-    jstring result = env->NewStringUTF(frame ? frame : "{\"ok\":false,\"error\":\"runtime failure\"}");
-    luac_free(frame);
-    return result;
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_luac_studio_MainActivity_nativeExecCommand(JNIEnv *env, jclass, jstring code) {
-    if (!projectHandle) return env->NewStringUTF("{\"ok\":false,\"error\":\"Start Play or Run first\",\"output\":\"\"}");
-    std::string source = fromJava(env, code);
-    char *res = luac_project_exec(projectHandle, source.c_str());
-    jstring out = env->NewStringUTF(res ? res : "{\"ok\":false,\"error\":\"execution failure\",\"output\":\"\"}");
-    luac_free(res);
-    return out;
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeSetViewport(JNIEnv *, jclass, jint width, jint height) {
-    if (projectHandle) luac_project_set_viewport(projectHandle, width, height);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeTouchProject(JNIEnv *, jclass, jint id, jdouble x, jdouble y, jboolean down) {
-    if (projectHandle) luac_project_touch(projectHandle, id, x, y, down == JNI_TRUE);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeCloseProject(JNIEnv *, jclass) {
-    if (projectHandle) luac_project_close(projectHandle);
-    projectHandle = nullptr;
+Java_com_luac_studio_MainActivity_nativeStudioDestroy(JNIEnv *env, jclass) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) {
+        g_studio->dispose();
+        g_studio.reset();
+    }
+    if (g_activity) {
+        env->DeleteGlobalRef(g_activity);
+        g_activity = nullptr;
+    }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_luac_studio_MainActivity_nativeVulkanCreate(JNIEnv *env, jclass, jobject surface) {
     return androidVulkanCreate(env, surface) ? JNI_TRUE : JNI_FALSE;
 }
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeVulkanDraw(JNIEnv *, jclass) { androidVulkanDraw(); }
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeVulkanDestroy(JNIEnv *, jclass) { androidVulkanDestroy(); }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_CodeEditorView_nativeSetText(JNIEnv *env, jclass, jstring text) {
-    lc_editor_set_text(fromJava(env, text).c_str());
+Java_com_luac_studio_MainActivity_nativeVulkanDraw(JNIEnv *, jclass) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    androidVulkanDrawStudio(g_studio.get(), g_density);
 }
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_luac_studio_CodeEditorView_nativeGetText(JNIEnv *env, jclass) {
-    return env->NewStringUTF(lc_editor_get_text());
-}
+
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_CodeEditorView_nativeInsert(JNIEnv *env, jclass, jstring text) {
-    lc_editor_insert(fromJava(env, text).c_str());
+Java_com_luac_studio_MainActivity_nativeVulkanDestroy(JNIEnv *, jclass) {
+    androidVulkanDestroy();
 }
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_CodeEditorView_nativeNewline(JNIEnv *, jclass) { lc_editor_newline(); }
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_CodeEditorView_nativeBackspace(JNIEnv *, jclass) { lc_editor_backspace(); }
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_CodeEditorView_nativeDelete(JNIEnv *, jclass) { lc_editor_delete(); }
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_CodeEditorView_nativeSetCursor(JNIEnv *, jclass, jint line, jint col) {
-    lc_editor_set_cursor_line_col(line, col);
-}
-extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_CodeEditorView_nativeMoveCursor(JNIEnv *, jclass, jint dx, jint dy) {
-    lc_editor_move_cursor(dx, dy);
-}
-extern "C" JNIEXPORT jint JNICALL
-Java_com_luac_studio_CodeEditorView_nativeLineCount(JNIEnv *, jclass) { return lc_editor_line_count(); }
-extern "C" JNIEXPORT jint JNICALL
-Java_com_luac_studio_CodeEditorView_nativeCursorLine(JNIEnv *, jclass) { return lc_editor_cursor_line(); }
-extern "C" JNIEXPORT jint JNICALL
-Java_com_luac_studio_CodeEditorView_nativeCursorCol(JNIEnv *, jclass) { return lc_editor_cursor_col(); }
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_luac_studio_CodeEditorView_nativeGetLine(JNIEnv *env, jclass, jint line) {
-    char buf[4096];
-    lc_editor_get_line(line, buf, sizeof(buf));
-    return env->NewStringUTF(buf);
-}
-extern "C" JNIEXPORT jintArray JNICALL
-Java_com_luac_studio_CodeEditorView_nativeTokenizeLine(JNIEnv *env, jclass, jint line) {
-    int raw[512 * 3];
-    int count = lc_editor_tokenize_line(line, raw, 512);
-    jintArray arr = env->NewIntArray(count * 3);
-    if (arr && count > 0) env->SetIntArrayRegion(arr, 0, count * 3, raw);
-    return arr;
-}
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_luac_studio_CodeEditorView_nativeUndo(JNIEnv *, jclass) { return lc_editor_undo() ? JNI_TRUE : JNI_FALSE; }
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_luac_studio_CodeEditorView_nativeRedo(JNIEnv *, jclass) { return lc_editor_redo() ? JNI_TRUE : JNI_FALSE; }

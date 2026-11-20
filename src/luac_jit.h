@@ -1603,6 +1603,7 @@ static JitProto *jit_compile_fn(JitSession *session, JitComp *parent, Expr *e, c
         }
     }
 
+    proto->max_slots = jc.max_slots;
     proto->ncaps = jc.ncaps;
     if (jc.ncaps > 0) {
         proto->caps = (JitCap *)xmalloc(sizeof(JitCap) * (size_t)jc.ncaps);

@@ -3497,8 +3497,12 @@ static void lc_gc_mark_roots(LcContext *ctx) {
 
 static void lc_gc_atomic(LcContext *ctx) {
     LcObject *again;
-    int changed;
+    int changed, i;
     uint8_t dead_white;
+    lc_gc_mark_value(ctx, ctx->globals);
+    for (i = 0; i < ctx->c_root_count; ++i) lc_gc_mark_value(ctx, ctx->c_roots[i]);
+    lc_gc_mark_frames(ctx, ctx->gc_frames);
+    if (ctx->active_coroutine) lc_gc_mark_obj(ctx, (LcObject *)ctx->active_coroutine);
     lc_gc_drain_gray(ctx, (size_t)-1);
     again = ctx->gc_gray_again;
     ctx->gc_gray_again = NULL;
