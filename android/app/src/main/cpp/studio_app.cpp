@@ -106,6 +106,15 @@ void StudioApp::applyFont(const std::string &customPath, int family) {
     font.loadBestSystemOrCustom(customPath, family);
 }
 
+void StudioApp::syncOrientation() {
+    bool wantPortrait = (!showProjectsTab && !activeScript.empty());
+    int code = wantPortrait ? 1 : 0;
+    if (code != lastRequestedOrientation) {
+        lastRequestedOrientation = code;
+        if (callbacks.setOrientationPortrait) callbacks.setOrientationPortrait(wantPortrait);
+    }
+}
+
 void StudioApp::openProject(const std::string &projName, bool is3D) {
     stopSim();
     saveActiveScript();
@@ -137,6 +146,7 @@ void StudioApp::openProject(const std::string &projName, bool is3D) {
         openScript("main.lua");
         appendOutput("Loaded 2D LuaC project: " + projName, Col::muted());
     }
+    syncOrientation();
 }
 
 void StudioApp::dispose() {
@@ -180,6 +190,7 @@ void StudioApp::openScript(const std::string &relPath) {
     }
     lc_editor_set_text(content.c_str());
     editorScrollY = 0;
+    syncOrientation();
 }
 
 void StudioApp::saveActiveScript() {
@@ -210,6 +221,7 @@ void StudioApp::startSim() {
     showProjectsTab = false;
     activeScript.clear();
     last2DFrameJson.clear();
+    syncOrientation();
     computeLayout();
     luac_project_set_viewport(g_luacProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
     appendOutput(currentIs3D ? "3D Scene running." : "2D Canvas running.", Col::green());
@@ -234,6 +246,7 @@ void StudioApp::stopSim() {
             prePlaySceneJson.clear();
         }
     }
+    syncOrientation();
     computeLayout();
     if (wasRun) appendOutput("Stopped.", Col::muted());
 }
@@ -530,11 +543,152 @@ void StudioApp::addBtn(const Rect &r, const std::string &label, uint32_t bg, uin
     addHitBox(r, std::move(cb));
 }
 
+static uint32_t hsvToUiCol(float h, float s, float v) {
+    h = h - std::floor(h);
+    s = std::clamp(s, 0.0f, 1.0f);
+    v = std::clamp(v, 0.0f, 1.0f);
+    float r = v, g = v, b = v;
+    if (s > 1e-4f) {
+        float hh = h * 6.0f;
+        int i = (int)std::floor(hh) % 6;
+        float f = hh - std::floor(hh);
+        float p = v * (1.0f - s);
+        float q = v * (1.0f - s * f);
+        float t = v * (1.0f - s * (1.0f - f));
+        if (i == 0)      { r = v; g = t; b = p; }
+        else if (i == 1) { r = q; g = v; b = p; }
+        else if (i == 2) { r = p; g = v; b = t; }
+        else if (i == 3) { r = p; g = q; b = v; }
+        else if (i == 4) { r = t; g = p; b = v; }
+        else             { r = v; g = p; b = q; }
+    }
+    return StudioFont::rgba((uint8_t)std::lround(r * 255.0f),
+                            (uint8_t)std::lround(g * 255.0f),
+                            (uint8_t)std::lround(b * 255.0f), 255);
+}
+
+static std::string fmtHexColor(uint32_t argb) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "#%06X", (unsigned)(argb & 0xFFFFFFu));
+    return buf;
+}
+
+static bool parseHexColor(const std::string &in, uint32_t &outArgb) {
+    std::string s;
+    for (char ch : in) {
+        if (ch == '#' || ch == ' ') continue;
+        if ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) s.push_back(ch);
+        else return false;
+    }
+    if (s.size() != 6) return false;
+    uint32_t rgb = (uint32_t)std::strtoul(s.c_str(), nullptr, 16);
+    outArgb = 0xFF000000u | rgb;
+    return true;
+}
+
+void StudioApp::syncWheelFromArgb(uint32_t argb) {
+    float r = ((argb >> 16) & 0xFF) / 255.0f;
+    float g = ((argb >> 8) & 0xFF) / 255.0f;
+    float b = (argb & 0xFF) / 255.0f;
+    float mx = std::max({r, g, b});
+    float mn = std::min({r, g, b});
+    float d = mx - mn;
+    wheelV = mx;
+    wheelS = (mx > 1e-4f) ? (d / mx) : 0.0f;
+    if (d < 1e-4f) {
+        return; // Keep previous hue when picking pure white/gray/black
+    }
+    float h = 0.0f;
+    if (mx == r) h = (g - b) / d + (g < b ? 6.0f : 0.0f);
+    else if (mx == g) h = (b - r) / d + 2.0f;
+    else h = (r - g) / d + 4.0f;
+    wheelH = h / 6.0f;
+}
+
+uint32_t StudioApp::wheelArgb() const {
+    uint32_t uiCol = hsvToUiCol(wheelH, wheelS, wheelV);
+    uint8_t r = (uint8_t)(uiCol & 0xFF);
+    uint8_t g = (uint8_t)((uiCol >> 8) & 0xFF);
+    uint8_t b = (uint8_t)((uiCol >> 16) & 0xFF);
+    return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+void StudioApp::applyWheelColor(bool saveScene) {
+    uint32_t argb = wheelArgb();
+    if (modal == ModalKind::SKY || promptTargetKey == "SkyTop" || promptTargetKey == "SkyBot") {
+        if (auto *env = scene.findEnvironment()) {
+            env->skyPreset = "Custom";
+            bool editBot = (modal == ModalKind::SKY) ? skyEditBot : (promptTargetKey == "SkyBot");
+            if (editBot) env->skyBotColor = argb;
+            else env->skyTopColor = argb;
+            if (saveScene) scene.saveToFile(currentProjectDir + "/scene.json");
+        }
+        return;
+    }
+    if (auto *n = selectedNode()) {
+        n->argbColor = argb;
+        if (saveScene) scene.saveToFile(currentProjectDir + "/scene.json");
+    }
+}
+
+void StudioApp::emitColorWheel(float cx, float cy, float rad, const Rect &valBar) {
+    rWheel = {cx - rad, cy - rad, rad * 2.0f, rad * 2.0f};
+    rValBar = valBar;
+    if (uiBatches.empty()) pushBatch(false, {});
+    auto &v = uiBatches.back().verts;
+    float u = 1.5f / StudioFont::kAtlasSize;
+
+    // Outer border ring
+    emitCircle(cx, cy, rad + 1.5f * density, Col::border());
+
+    // Smooth HSV disc: center = (0, 0, V), rim = (H, 1, V). Linear RGB interp = exact HSV!
+    uint32_t cCenter = hsvToUiCol(0.0f, 0.0f, wheelV);
+    const int segs = 60;
+    for (int i = 0; i < segs; ++i) {
+        float h0 = (float)i / (float)segs;
+        float h1 = (float)(i + 1) / (float)segs;
+        float a0 = h0 * 6.2831853f;
+        float a1 = h1 * 6.2831853f;
+        uint32_t c0 = hsvToUiCol(h0, 1.0f, wheelV);
+        uint32_t c1 = hsvToUiCol(h1, 1.0f, wheelV);
+        v.push_back({cx, cy, u, u, cCenter});
+        v.push_back({cx + std::cos(a0) * rad, cy + std::sin(a0) * rad, u, u, c0});
+        v.push_back({cx + std::cos(a1) * rad, cy + std::sin(a1) * rad, u, u, c1});
+    }
+
+    // Current (H, S) marker on wheel
+    float ang = wheelH * 6.2831853f;
+    float mx = cx + std::cos(ang) * wheelS * rad;
+    float my = cy + std::sin(ang) * wheelS * rad;
+    emitCircle(mx, my, 5.5f * density, StudioFont::rgba(0, 0, 0, 220));
+    emitCircle(mx, my, 3.8f * density, hsvToUiCol(wheelH, wheelS, wheelV));
+    emitCircleOutline(mx, my, 5.5f * density, 1.3f * density, StudioFont::rgba(255, 255, 255, 255));
+
+    // Vertical Brightness (V) bar: top = full hue/sat at V=1, bottom = black (V=0)
+    uint32_t topCol = hsvToUiCol(wheelH, wheelS, 1.0f);
+    uint32_t botCol = StudioFont::rgba(0, 0, 0, 255);
+    UiVertex b0{valBar.x, valBar.y, u, u, topCol};
+    UiVertex b1{valBar.x + valBar.w, valBar.y, u, u, topCol};
+    UiVertex b2{valBar.x + valBar.w, valBar.y + valBar.h, u, u, botCol};
+    UiVertex b3{valBar.x, valBar.y + valBar.h, u, u, botCol};
+    v.push_back(b0); v.push_back(b1); v.push_back(b2);
+    v.push_back(b0); v.push_back(b2); v.push_back(b3);
+    emitRectOutline(valBar.x, valBar.y, valBar.w, valBar.h, 1.0f, Col::border());
+
+    // Brightness slider knob
+    float vy = valBar.y + (1.0f - std::clamp(wheelV, 0.0f, 1.0f)) * valBar.h;
+    emitRect(valBar.x - 2.0f * density, vy - 2.5f * density, valBar.w + 4.0f * density, 5.0f * density,
+             StudioFont::rgba(255, 255, 255, 255));
+    emitRectOutline(valBar.x - 2.0f * density, vy - 2.5f * density, valBar.w + 4.0f * density, 5.0f * density,
+                    1.0f, StudioFont::rgba(15, 23, 42, 255));
+}
+
 // =========================================================================
 // Frame Build
 // =========================================================================
 void StudioApp::buildFrame(float w, float h, float d) {
     width = w; height = h; density = std::max(1.5f, d);
+    syncOrientation();
     computeLayout();
     uiBatches.clear();
     hitBoxes.clear();
@@ -1035,7 +1189,13 @@ void StudioApp::buildTopRibbon() {
                 }
             });
         }
-        ribBtn("Color", false, 0, [this]() { if (selectedNode()) { promptTargetKey.clear(); modal = ModalKind::COLOR; } });
+        ribBtn("Color", false, 0, [this]() {
+            if (auto *n = selectedNode()) {
+                promptTargetKey.clear();
+                syncWheelFromArgb(n->argbColor);
+                modal = ModalKind::COLOR;
+            }
+        });
         ribBtn("Material", false, 0, [this]() { if (selectedNode()) modal = ModalKind::MATERIAL; });
         ribBtn("Delete", false, 0, [this]() {
             if (!selectedId.empty() && scene.removeById(selectedId)) {
@@ -1075,7 +1235,11 @@ void StudioApp::buildTopRibbon() {
         ribBtn("Output", showOutput, 0, [this]() { showOutput = !showOutput; });
         ribBtn("Grid", showGrid, 0, [this]() { showGrid = !showGrid; });
         ribBtn("Shadows", showShadows, 0, [this]() { showShadows = !showShadows; });
-        ribBtn("Sky", false, 0, [this]() { modal = ModalKind::SKY; });
+        ribBtn("Sky", false, 0, [this]() {
+            skyEditBot = false;
+            if (auto *e = scene.findEnvironment()) syncWheelFromArgb(e->skyTopColor);
+            modal = ModalKind::SKY;
+        });
         ribBtn("Colliders", showColliders, 0, [this]() { showColliders = !showColliders; });
         ribBtn("Play:Cam3D", useCamera3DInPlay, 0, [this]() { useCamera3DInPlay = !useCamera3DInPlay; });
         ribBtn("Reset Cam", false, 0, [this]() {
@@ -1114,6 +1278,7 @@ void StudioApp::buildDocTabs() {
                showProjectsTab = true;
                editorFocused = false;
                if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
+               syncOrientation();
            });
     x += rProj.w + 2 * density;
 
@@ -1125,6 +1290,7 @@ void StudioApp::buildDocTabs() {
                activeScript.clear();
                editorFocused = false;
                if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
+               syncOrientation();
            });
     x += rv.w + 2 * density;
 
@@ -1141,7 +1307,7 @@ void StudioApp::buildDocTabs() {
         });
         Rect rxBtn{rt.x + rt.w, rDocTabs.y + 1, 15 * density, h};
         addBtn(rxBtn, "x", act ? Col::header() : Col::bg(), Col::muted(), fs, [this, sp]() {
-            if (activeScript == sp) { saveActiveScript(); activeScript.clear(); }
+            if (activeScript == sp) { saveActiveScript(); activeScript.clear(); syncOrientation(); }
             openScripts.erase(std::remove(openScripts.begin(), openScripts.end(), sp), openScripts.end());
         });
         x += w + 2 * density;
@@ -1258,7 +1424,11 @@ void StudioApp::buildRightDock() {
         }
         if (n->isMeshNode()) {
             props.push_back({"Mesh", n->shape(), [this]() { modal = ModalKind::SHAPE; }});
-            props.push_back({"Color", "#", [this]() { promptTargetKey.clear(); modal = ModalKind::COLOR; }});
+            props.push_back({"Color", "#", [this, n]() {
+                promptTargetKey.clear();
+                syncWheelFromArgb(n->argbColor);
+                modal = ModalKind::COLOR;
+            }});
             props.push_back({"Material", n->material, [this]() { modal = ModalKind::MATERIAL; }});
             props.push_back({"Visible", n->visible ? "true" : "false", [this, n]() {
                 n->visible = !n->visible; scene.saveToFile(currentProjectDir + "/scene.json");
@@ -1305,14 +1475,20 @@ void StudioApp::buildRightDock() {
                 n->disabled = !n->disabled; scene.saveToFile(currentProjectDir + "/scene.json");
             }});
         } else if (n->className == "Environment" || n->className == "Lighting") {
-            props.push_back({"Sky Preset", n->skyPreset, [this]() {
+            props.push_back({"Sky Preset", n->skyPreset, [this, n]() {
+                skyEditBot = false;
+                syncWheelFromArgb(n->skyTopColor);
                 modal = ModalKind::SKY;
             }});
-            props.push_back({"Sky Top", "#", [this]() {
-                promptTargetKey = "SkyTop"; modal = ModalKind::COLOR;
+            props.push_back({"Sky Top", "#", [this, n]() {
+                promptTargetKey = "SkyTop";
+                syncWheelFromArgb(n->skyTopColor);
+                modal = ModalKind::COLOR;
             }});
-            props.push_back({"Sky Horizon", "#", [this]() {
-                promptTargetKey = "SkyBot"; modal = ModalKind::COLOR;
+            props.push_back({"Sky Horizon", "#", [this, n]() {
+                promptTargetKey = "SkyBot";
+                syncWheelFromArgb(n->skyBotColor);
+                modal = ModalKind::COLOR;
             }});
             props.push_back({"ClockTime", fmtNum(n->clockTime), [this, n]() {
                 promptTitle = "ClockTime (0..24)"; promptValue = fmtNum(n->clockTime);
@@ -1514,8 +1690,8 @@ void StudioApp::buildModal() {
         if (modal != ModalKind::TEXT_PROMPT) modal = ModalKind::NONE;
     });
 
-    float mw = std::min(width - 20 * density, 350.0f * density);
-    float mh = std::min(height - 30 * density, 350.0f * density);
+    float mw = std::min(width - 20 * density, (modal == ModalKind::SKY || modal == ModalKind::COLOR) ? 430.0f * density : 350.0f * density);
+    float mh = std::min(height - 20 * density, (modal == ModalKind::SKY || modal == ModalKind::COLOR) ? 325.0f * density : 350.0f * density);
     if (modal == ModalKind::TEXT_PROMPT) mh = 132.0f * density;
     Rect box{(width - mw) * 0.5f, (height - mh) * 0.5f, mw, mh};
     emitRect(box.x, box.y, box.w, box.h, Col::panel());
@@ -1609,38 +1785,59 @@ void StudioApp::buildModal() {
         std::string title = (promptTargetKey == "SkyTop") ? "Sky Top Color"
                           : ((promptTargetKey == "SkyBot") ? "Sky Horizon Color" : "Object Color");
         closeBtn(title);
-        static const uint32_t pal[12] = {
-            0xFFA3A2A5, 0xFFDC4C46, 0xFF3B82F6, 0xFF22C55E,
-            0xFFFACC15, 0xFFF97316, 0xFFA855F7, 0xFFEC4899,
-            0xFF38BDF8, 0xFF8B5CF6, 0xFF1E293B, 0xFFF8FAFC
+        float areaH = (box.y + box.h - pad) - y;
+        float barW = 20.0f * density;
+        float rightW = std::max(106.0f * density, mw * 0.34f);
+        float maxRadW = (mw - pad * 4 - barW - rightW) * 0.5f;
+        float rad = std::max(34.0f * density, std::min(areaH * 0.48f, maxRadW));
+        float cx = box.x + pad + rad;
+        float cy = y + areaH * 0.5f;
+        Rect valBar{cx + rad + pad, cy - rad, barW, rad * 2.0f};
+        emitColorWheel(cx, cy, rad, valBar);
+
+        float rx = valBar.x + valBar.w + pad;
+        float rw = box.x + box.w - pad - rx;
+        float ry = y + 2 * density;
+        uint32_t curArgb = wheelArgb();
+        emitRect(rx, ry, rw, 28 * density, Col::argbToUi(curArgb));
+        emitRectOutline(rx, ry, rw, 28 * density, 1.0f, Col::border());
+        ry += 34 * density;
+
+        addBtn({rx, ry, rw, 24 * density}, "Hex " + fmtHexColor(curArgb), Col::btn(), Col::text(), 8.3f * density, [this, curArgb]() {
+            promptTitle = "Custom Hex (#RRGGBB)";
+            promptValue = fmtHexColor(curArgb);
+            promptExtra = "COLOR";
+            promptTargetKey = "HexColor";
+            modal = ModalKind::TEXT_PROMPT;
+        });
+        ry += 30 * density;
+
+        static const uint32_t quick[6] = {
+            0xFFF8FAFC, 0xFFDC4C46, 0xFF3B82F6,
+            0xFF22C55E, 0xFFFACC15, 0xFF1E293B
         };
-        float cw = (mw - pad * 5) / 4.0f;
-        for (int i = 0; i < 12; ++i) {
-            float x = box.x + pad + (i % 4) * (cw + pad);
-            float ry = y + (i / 4) * 38 * density;
-            Rect cr{x, ry, cw, 32 * density};
-            emitRect(cr.x, cr.y, cr.w, cr.h, Col::argbToUi(pal[i]));
-            emitRectOutline(cr.x, cr.y, cr.w, cr.h, 1.0f, Col::border());
-            uint32_t cval = pal[i];
-            addHitBox(cr, [this, cval]() {
-                if (promptTargetKey == "SkyTop" || promptTargetKey == "SkyBot") {
-                    if (auto *env = scene.findEnvironment()) {
-                        env->skyPreset = "Custom";
-                        if (promptTargetKey == "SkyTop") env->skyTopColor = cval;
-                        else env->skyBotColor = cval;
-                        scene.saveToFile(currentProjectDir + "/scene.json");
-                    }
-                    promptTargetKey.clear();
-                    modal = ModalKind::SKY;
-                    return;
-                }
-                if (auto *n = selectedNode()) {
-                    n->argbColor = cval;
-                    scene.saveToFile(currentProjectDir + "/scene.json");
-                }
-                modal = ModalKind::NONE;
+        float sw = (rw - 8 * density) / 3.0f;
+        for (int i = 0; i < 6; ++i) {
+            Rect sr{rx + (i % 3) * (sw + 4 * density), ry + (i / 3) * 24 * density, sw, 20 * density};
+            emitRect(sr.x, sr.y, sr.w, sr.h, Col::argbToUi(quick[i]));
+            emitRectOutline(sr.x, sr.y, sr.w, sr.h, 1.0f, Col::border());
+            uint32_t cval = quick[i];
+            addHitBox(sr, [this, cval]() {
+                syncWheelFromArgb(cval);
+                applyWheelColor(true);
             });
         }
+        ry += 54 * density;
+        addBtn({rx, std::min(ry, box.y + box.h - pad - 24 * density), rw, 24 * density},
+               "Done", Col::btnAct(), Col::text(), fs, [this]() {
+                   applyWheelColor(true);
+                   if (promptTargetKey == "SkyTop" || promptTargetKey == "SkyBot") {
+                       promptTargetKey.clear();
+                       modal = ModalKind::SKY;
+                   } else {
+                       modal = ModalKind::NONE;
+                   }
+               });
     } else if (modal == ModalKind::SKY) {
         closeBtn("Sky & Atmosphere");
         SceneNode *env = scene.findEnvironment();
@@ -1652,38 +1849,94 @@ void StudioApp::buildModal() {
             {"Overcast", 0xFF64748B, 0xFFCBD5E1, 12.0f},
             {"Space",    0xFF03050C, 0xFF111827,  0.0f}
         };
-        float cw = (mw - pad * 3) * 0.5f;
+        // Row 1: 5 presets
+        float pw = (mw - pad * 2 - 4 * 4 * density) / 5.0f;
         for (int i = 0; i < 5; ++i) {
-            float x = box.x + pad + (i % 2) * (cw + pad);
-            float ry = y + (i / 2) * 30 * density;
+            float x = box.x + pad + i * (pw + 4 * density);
             bool cur = env && env->skyPreset == presets[i].name;
-            addBtn({x, ry, cw, 25 * density}, presets[i].name, cur ? Col::btnAct() : Col::btn(), Col::text(), fs, [this, i]() {
+            addBtn({x, y, pw, 22 * density}, presets[i].name, cur ? Col::btnAct() : Col::btn(), Col::text(), 8.0f * density, [this, i]() {
                 if (auto *e = scene.findEnvironment()) {
                     e->skyPreset = presets[i].name;
                     e->skyTopColor = presets[i].top;
                     e->skyBotColor = presets[i].bot;
                     e->clockTime = presets[i].ct;
+                    syncWheelFromArgb(skyEditBot ? e->skyBotColor : e->skyTopColor);
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
             });
         }
-        y += 96 * density;
+        y += 26 * density;
+
+        // Row 2: Target switch (Sky Top / Horizon) + ClockTime
         uint32_t topC = env ? env->skyTopColor : 0xFF1E6EC4;
         uint32_t botC = env ? env->skyBotColor : 0xFF8CC4F2;
-        addBtn({box.x + pad, y, cw, 26 * density}, "Sky Top Color", Col::btn(), Col::text(), fs, [this]() {
-            promptTargetKey = "SkyTop"; modal = ModalKind::COLOR;
-        });
-        emitRect(box.x + pad + cw - 18 * density, y + 5 * density, 12 * density, 16 * density, Col::argbToUi(topC));
-        addBtn({box.x + pad * 2 + cw, y, cw, 26 * density}, "Horizon Color", Col::btn(), Col::text(), fs, [this]() {
-            promptTargetKey = "SkyBot"; modal = ModalKind::COLOR;
-        });
-        emitRect(box.x + pad * 2 + cw * 2 - 18 * density, y + 5 * density, 12 * density, 16 * density, Col::argbToUi(botC));
-        y += 32 * density;
         float ct = env ? env->clockTime : 14.0f;
-        addBtn({box.x + pad, y, mw - pad * 2, 26 * density},
-               "ClockTime: " + fmtNum(ct) + " h", Col::btn(), Col::text(), fs, [this, ct]() {
+        float tw = (mw - pad * 2 - 8 * density) / 3.0f;
+        addBtn({box.x + pad, y, tw, 22 * density}, "Sky Top",
+               !skyEditBot ? Col::btnAct() : Col::btn(), Col::text(), 8.2f * density, [this, topC]() {
+                   skyEditBot = false;
+                   syncWheelFromArgb(topC);
+               });
+        emitRect(box.x + pad + tw - 14 * density, y + 4 * density, 10 * density, 14 * density, Col::argbToUi(topC));
+
+        addBtn({box.x + pad + tw + 4 * density, y, tw, 22 * density}, "Horizon",
+               skyEditBot ? Col::btnAct() : Col::btn(), Col::text(), 8.2f * density, [this, botC]() {
+                   skyEditBot = true;
+                   syncWheelFromArgb(botC);
+               });
+        emitRect(box.x + pad + tw * 2 + 4 * density - 14 * density, y + 4 * density, 10 * density, 14 * density, Col::argbToUi(botC));
+
+        addBtn({box.x + pad + (tw + 4 * density) * 2, y, tw, 22 * density},
+               "Time: " + fmtNum(ct) + "h", Col::btn(), Col::text(), 8.0f * density, [this, ct]() {
                    promptTitle = "ClockTime (0..24)"; promptValue = fmtNum(ct);
                    promptTargetKey = "ClockTime"; modal = ModalKind::TEXT_PROMPT;
+               });
+        y += 28 * density;
+
+        // Row 3: Live HSV Color Wheel + Brightness bar + Gradient Preview & Hex input
+        float areaH = (box.y + box.h - pad) - y;
+        float barW = 20.0f * density;
+        float rightW = std::max(106.0f * density, mw * 0.34f);
+        float maxRadW = (mw - pad * 4 - barW - rightW) * 0.5f;
+        float rad = std::max(34.0f * density, std::min(areaH * 0.48f, maxRadW));
+        float cx = box.x + pad + rad;
+        float cy = y + areaH * 0.5f;
+        Rect valBar{cx + rad + pad, cy - rad, barW, rad * 2.0f};
+        emitColorWheel(cx, cy, rad, valBar);
+
+        float rx = valBar.x + valBar.w + pad;
+        float rw = box.x + box.w - pad - rx;
+        float ry = y;
+        // Sky gradient preview box (top -> horizon)
+        float prevH = std::max(38.0f * density, areaH * 0.34f);
+        {
+            if (uiBatches.empty()) pushBatch(false, {});
+            auto &v = uiBatches.back().verts;
+            float u = 1.5f / StudioFont::kAtlasSize;
+            uint32_t uiT = Col::argbToUi(topC), uiB = Col::argbToUi(botC);
+            v.push_back({rx, ry, u, u, uiT});
+            v.push_back({rx + rw, ry, u, u, uiT});
+            v.push_back({rx + rw, ry + prevH, u, u, uiB});
+            v.push_back({rx, ry, u, u, uiT});
+            v.push_back({rx + rw, ry + prevH, u, u, uiB});
+            v.push_back({rx, ry + prevH, u, u, uiB});
+            emitRectOutline(rx, ry, rw, prevH, 1.0f, Col::border());
+        }
+        ry += prevH + 6 * density;
+
+        uint32_t activeC = skyEditBot ? botC : topC;
+        addBtn({rx, ry, rw, 24 * density}, "Hex " + fmtHexColor(activeC), Col::btn(), Col::text(), 8.2f * density, [this, activeC]() {
+            promptTitle = skyEditBot ? "Horizon Hex (#RRGGBB)" : "Sky Top Hex (#RRGGBB)";
+            promptValue = fmtHexColor(activeC);
+            promptExtra = "SKY";
+            promptTargetKey = "HexColor";
+            modal = ModalKind::TEXT_PROMPT;
+        });
+        ry += 29 * density;
+        addBtn({rx, std::min(ry, box.y + box.h - pad - 24 * density), rw, 24 * density},
+               "Done", Col::btnAct(), Col::text(), fs, [this]() {
+                   applyWheelColor(true);
+                   modal = ModalKind::NONE;
                });
     } else if (modal == ModalKind::MATERIAL) {
         closeBtn("Material");
@@ -1799,6 +2052,20 @@ void StudioApp::buildModal() {
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
                 modal = ModalKind::NONE;
+            } else if (promptTargetKey == "HexColor") {
+                uint32_t parsed = 0;
+                if (parseHexColor(promptValue, parsed)) {
+                    syncWheelFromArgb(parsed);
+                    if (promptExtra == "SKY") {
+                        modal = ModalKind::SKY;
+                        applyWheelColor(true);
+                    } else {
+                        modal = ModalKind::COLOR;
+                        applyWheelColor(true);
+                    }
+                } else {
+                    modal = (promptExtra == "SKY") ? ModalKind::SKY : ModalKind::COLOR;
+                }
             } else if (auto *n = selectedNode()) {
                 float a, b, c;
                 if (promptTargetKey == "Rename" && !promptValue.empty()) n->name = promptValue;
@@ -1951,12 +2218,47 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
         closePointerId = -1;
     }
 
+    auto updateWheelHS = [&](float px, float py, bool saveScene) {
+        float wcx = rWheel.x + rWheel.w * 0.5f;
+        float wcy = rWheel.y + rWheel.h * 0.5f;
+        float wr = std::max(1.0f, rWheel.w * 0.5f);
+        float dx = px - wcx, dy = py - wcy;
+        float dist = std::hypot(dx, dy);
+        float ang = std::atan2(dy, dx);
+        if (ang < 0.0f) ang += 6.2831853f;
+        wheelH = ang / 6.2831853f;
+        wheelS = std::clamp(dist / wr, 0.0f, 1.0f);
+        applyWheelColor(saveScene);
+    };
+    auto updateWheelVal = [&](float py, bool saveScene) {
+        wheelV = std::clamp(1.0f - (py - rValBar.y) / std::max(1.0f, rValBar.h), 0.0f, 1.0f);
+        applyWheelColor(saveScene);
+    };
+
     if (baseAct == 0) {
         downX = lastX = x0; downY = lastY = y0;
         moved = false;
         touchMode = 0;
         dragAxis = -1;
         lastPinch = -1;
+
+        if (modal == ModalKind::SKY || modal == ModalKind::COLOR) {
+            float wcx = rWheel.x + rWheel.w * 0.5f;
+            float wcy = rWheel.y + rWheel.h * 0.5f;
+            float wr = rWheel.w * 0.5f;
+            if (wr > 1.0f && std::hypot(x0 - wcx, y0 - wcy) <= wr + 8.0f * density) {
+                touchMode = 12;
+                updateWheelHS(x0, y0, false);
+                return;
+            }
+            Rect vbHit{rValBar.x - 10.0f * density, rValBar.y - 8.0f * density,
+                       rValBar.w + 20.0f * density, rValBar.h + 16.0f * density};
+            if (rValBar.w > 1.0f && vbHit.contains(x0, y0)) {
+                touchMode = 13;
+                updateWheelVal(y0, false);
+                return;
+            }
+        }
 
         if (modal == ModalKind::NONE) {
             if (rRibbon.contains(x0, y0)) touchMode = 5;
@@ -1987,6 +2289,8 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
     }
 
     if (baseAct == 2) {
+        if (touchMode == 12) { updateWheelHS(x0, y0, false); lastX = x0; lastY = y0; return; }
+        if (touchMode == 13) { updateWheelVal(y0, false); lastX = x0; lastY = y0; return; }
         if (std::hypot(x0 - downX, y0 - downY) > 6.0f * density) moved = true;
         float dx = x0 - lastX, dy = y0 - lastY;
         if (touchMode == 5) ribbonScrollX = std::max(0.0f, ribbonScrollX - dx);
@@ -2016,6 +2320,8 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
     }
 
     if (baseAct == 1 || baseAct == 3) {
+        if (touchMode == 12) { updateWheelHS(x0, y0, true); touchMode = 0; return; }
+        if (touchMode == 13) { updateWheelVal(y0, true); touchMode = 0; return; }
         if (touchMode == 3 && moved) scene.saveToFile(currentProjectDir + "/scene.json");
         if (!moved) {
             bool hit = false;

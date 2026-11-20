@@ -8,8 +8,8 @@
         android:supportsRtl="true">
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:screenOrientation="unspecified"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard"
+            android:screenOrientation="sensorLandscape"
             android:windowSoftInputMode="adjustResize"
             android:exported="true">
             <intent-filter>

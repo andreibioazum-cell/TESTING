@@ -65,6 +65,14 @@ Java_com_luac_studio_MainActivity_nativeStudioInit(
         if (mid) e->CallVoidMethod(g_activity, mid);
         e->DeleteLocalRef(cls);
     };
+    g_studio->callbacks.setOrientationPortrait = [](bool portrait) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbSetOrientation", "(Z)V");
+        if (mid) e->CallVoidMethod(g_activity, mid, portrait ? JNI_TRUE : JNI_FALSE);
+        e->DeleteLocalRef(cls);
+    };
     g_studio->callbacks.createProject = [](const std::string &kind, const std::string &name) {
         JNIEnv *e = getEnv();
         if (!e || !g_activity) return;

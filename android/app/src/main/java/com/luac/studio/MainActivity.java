@@ -2,6 +2,7 @@ package com.luac.studio;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
@@ -48,6 +49,7 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         store = new ProjectStore(this);
         ensureDefaultProjects();
 
@@ -165,6 +167,13 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     @SuppressWarnings("unused")
     public void nativeCbOpenFontPicker() {
         runOnUiThread(() -> fontPicker.launch(new String[]{"*/*"}));
+    }
+
+    @SuppressWarnings("unused")
+    public void nativeCbSetOrientation(boolean portrait) {
+        runOnUiThread(() -> setRequestedOrientation(
+            portrait ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                     : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE));
     }
 
     @SuppressWarnings("unused")

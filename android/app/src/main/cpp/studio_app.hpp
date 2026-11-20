@@ -22,6 +22,7 @@ struct DrawBatch {
 struct StudioCallbacks {
     std::function<void(bool)> setKeyboardVisible;
     std::function<void()> openFontPicker;
+    std::function<void(bool)> setOrientationPortrait;
     std::function<void(const std::string &kind, const std::string &name)> createProject;
     std::function<void(const std::string &oldName, const std::string &newName)> renameProject;
     std::function<void(const std::string &name)> deleteProject;
@@ -97,6 +98,11 @@ public:
     std::string promptTargetKey;
     std::string promptExtra;
 
+    // Color wheel state (HSV 0..1)
+    float wheelH = 0.58f, wheelS = 0.85f, wheelV = 0.77f;
+    bool skyEditBot = false;
+    int lastRequestedOrientation = -1; // -1=unset, 0=landscape, 1=portrait
+
     // Scroll offsets
     float ribbonScrollX = 0;
     float explorerScrollY = 0;
@@ -144,17 +150,23 @@ private:
     Rect currentClipRect{0, 0, 0, 0};
     bool hasClipRect = false;
 
-    int touchMode = 0; // 0=none, 1=orbit, 2=pan_pinch, 3=gizmo, 5=scroll_ribbon, 6=scroll_exp, 7=scroll_props, 8=scroll_ed, 9=scroll_out, 10=scroll_proj, 11=close_play
+    int touchMode = 0; // 0=none, 1=orbit, 2=pan_pinch, 3=gizmo, 5=scroll_ribbon, 6=scroll_exp, 7=scroll_props, 8=scroll_ed, 9=scroll_out, 10=scroll_proj, 11=close_play, 12=wheel_hs, 13=wheel_val
     int dragAxis = -1;
     int closePointerId = -1;
     float downX = 0, downY = 0, lastX = 0, lastY = 0, lastPinch = -1;
     bool moved = false;
+    Rect rWheel{0, 0, 0, 0}, rValBar{0, 0, 0, 0};
     struct GizmoTip { int axis; float sx, sy, bx, by; };
     std::vector<GizmoTip> gizmoTips;
 
     Vec3f eye{}, fwd{}, right{}, up{};
     float focalLen = 600.0f;
 
+    void syncOrientation();
+    void syncWheelFromArgb(uint32_t argb);
+    uint32_t wheelArgb() const;
+    void applyWheelColor(bool saveScene);
+    void emitColorWheel(float cx, float cy, float rad, const Rect &valBar);
     void computeLayout();
     void build3DScene();
     void build2DScene(const Rect &area);
