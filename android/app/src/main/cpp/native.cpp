@@ -6,7 +6,8 @@
 #include "luac.h"
 #include "studio_app.hpp"
 
-extern bool androidVulkanCreate(JNIEnv *env, jobject surface);
+extern bool androidVulkanCreate(JNIEnv *env, jobject surface, int width, int height);
+extern void androidVulkanResize(int width, int height);
 extern void androidVulkanDrawStudio(StudioApp *app, float density);
 extern void androidVulkanDestroy();
 
@@ -74,6 +75,20 @@ Java_com_luac_studio_MainActivity_nativeStudioInit(
             jstring jn = e->NewStringUTF(name.c_str());
             e->CallVoidMethod(g_activity, mid, jk, jn);
             e->DeleteLocalRef(jk);
+            e->DeleteLocalRef(jn);
+        }
+        e->DeleteLocalRef(cls);
+    };
+    g_studio->callbacks.renameProject = [](const std::string &oldName, const std::string &newName) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbRenameProject", "(Ljava/lang/String;Ljava/lang/String;)V");
+        if (mid) {
+            jstring jo = e->NewStringUTF(oldName.c_str());
+            jstring jn = e->NewStringUTF(newName.c_str());
+            e->CallVoidMethod(g_activity, mid, jo, jn);
+            e->DeleteLocalRef(jo);
             e->DeleteLocalRef(jn);
         }
         e->DeleteLocalRef(cls);
@@ -193,8 +208,14 @@ Java_com_luac_studio_MainActivity_nativeStudioDestroy(JNIEnv *env, jclass) {
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_luac_studio_MainActivity_nativeVulkanCreate(JNIEnv *env, jclass, jobject surface) {
-    return androidVulkanCreate(env, surface) ? JNI_TRUE : JNI_FALSE;
+Java_com_luac_studio_MainActivity_nativeVulkanCreate(JNIEnv *env, jclass, jobject surface, jint width, jint height) {
+    return androidVulkanCreate(env, surface, width, height) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_luac_studio_MainActivity_nativeVulkanResize(JNIEnv *, jclass, jint width, jint height) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    androidVulkanResize(width, height);
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -30,7 +30,6 @@ int lc_editor_tokenize_line(int line, int *out_triplets, int max_triplets);
 
 static void *g_luacProj = nullptr;
 
-// Theme palette helpers
 namespace Col {
 static inline uint32_t bg()       { return StudioFont::rgba(23, 25, 30); }
 static inline uint32_t panel()    { return StudioFont::rgba(31, 34, 41); }
@@ -111,6 +110,8 @@ void StudioApp::openProject(const std::string &projName, bool is3D) {
     saveActiveScript();
     openScripts.clear();
     activeScript.clear();
+    showProjectsTab = false;
+    activeRibbon = RibbonTab::HOME;
     currentProjectName = projName;
     currentProjectDir = projectsRoot + "/" + projName;
     currentIs3D = is3D;
@@ -122,12 +123,12 @@ void StudioApp::openProject(const std::string &projName, bool is3D) {
 
     if (is3D) {
         scene = StudioScene::loadOrCreate(currentProjectDir);
-        if (auto *ws = scene.findService("Workspace")) {
+        if (auto *ws = scene.findService("World3D")) {
             if (!ws->children.empty()) selectedId = ws->children[0].id;
         }
-        camTargetX = 0; camTargetY = 2.5f; camTargetZ = -3.0f;
-        camYaw = 0.36f; camPitch = 0.34f; camDist = 36.0f;
-        appendOutput("Loaded 3D Studio place: " + projName, Col::muted());
+        camTargetX = 0; camTargetY = 1.5f; camTargetZ = -3.0f;
+        camYaw = 0.36f; camPitch = 0.34f; camDist = 28.0f;
+        appendOutput("Loaded 3D project: " + projName, Col::muted());
     } else {
         scene = StudioScene();
         openScript("main.lua");
@@ -159,6 +160,7 @@ SceneNode *StudioApp::selectedNode() {
 void StudioApp::openScript(const std::string &relPath) {
     if (relPath.empty()) return;
     saveActiveScript();
+    showProjectsTab = false;
     if (std::find(openScripts.begin(), openScripts.end(), relPath) == openScripts.end()) {
         openScripts.push_back(relPath);
     }
@@ -186,7 +188,7 @@ void StudioApp::saveActiveScript() {
     if (out) out << txt;
 }
 
-void StudioApp::startSim(bool withAvatar) {
+void StudioApp::startSim() {
     saveActiveScript();
     if (runningLua) stopSim();
     if (currentIs3D) {
@@ -203,20 +205,9 @@ void StudioApp::startSim(bool withAvatar) {
     if (err) luac_free(err);
     luac_project_set_viewport(g_luacProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
     runningLua = true;
-    playMode = withAvatar && currentIs3D;
-    if (playMode) {
-        if (const auto *sp = scene.spawnLocation()) {
-            playerX = sp->posX; playerY = sp->posY + sp->sizeY * 0.5f + 2.5f; playerZ = sp->posZ;
-        } else {
-            playerX = 0; playerY = 4.0f; playerZ = 8.0f;
-        }
-        playerVy = 0; playerGrounded = false; playerYaw = 0; joyDx = 0; joyDy = 0;
-        activeScript.clear(); // return to 3D viewport on Play
-        appendOutput("Play started (R6 Avatar).", Col::green());
-    } else {
-        appendOutput(currentIs3D ? "Run started (LuaC server scripts)." : "Running 2D LuaC project...", Col::green());
-    }
-    if (!currentIs3D) activeScript.clear(); // switch to Viewport tab to watch 2D canvas
+    showProjectsTab = false;
+    activeScript.clear();
+    appendOutput(currentIs3D ? "3D Scene running." : "2D Canvas running.", Col::green());
 }
 
 void StudioApp::stopSim() {
@@ -224,11 +215,8 @@ void StudioApp::stopSim() {
         luac_project_close(g_luacProj);
         g_luacProj = nullptr;
     }
-    bool wasPlay = playMode || runningLua;
+    bool wasRun = runningLua;
     runningLua = false;
-    playMode = false;
-    joyPointerId = -1;
-    joyDx = joyDy = 0;
     if (currentIs3D && !prePlaySceneJson.empty()) {
         JsonVal j = MiniJson::parse(prePlaySceneJson);
         if (j.type == JsonVal::J_OBJ && j.get("root")) {
@@ -238,7 +226,7 @@ void StudioApp::stopSim() {
         }
         prePlaySceneJson.clear();
     }
-    if (wasPlay) appendOutput("Simulation stopped.", Col::muted());
+    if (wasRun) appendOutput("Stopped.", Col::muted());
 }
 
 void StudioApp::syncFromLua() {
@@ -317,110 +305,41 @@ void StudioApp::step(float dt) {
             if (currentIs3D) syncFromLua();
         }
     }
-    if (playMode) stepPlayPhysics(dt);
-}
-
-float StudioApp::surfaceHeightAt(const SceneNode &n, float px, float pz, float r) {
-    float hx = n.sizeX * 0.5f + r, hz = n.sizeZ * 0.5f + r;
-    if (std::fabs(px - n.posX) <= hx && std::fabs(pz - n.posZ) <= hz) {
-        return n.posY + n.sizeY * 0.5f;
-    }
-    return -1e9f;
-}
-
-float StudioApp::findGroundBelow(float px, float py, float pz) {
-    float best = -50.0f;
-    std::vector<const SceneNode *> parts;
-    scene.collect3DParts(parts);
-    for (const auto *n : parts) {
-        if (!n->canCollide) continue;
-        float top = surfaceHeightAt(*n, px, pz, 0.7f);
-        if (top <= py + 1.2f && top > best) best = top;
-    }
-    return best;
-}
-
-bool StudioApp::collidesHorizontal(float px, float py, float pz) {
-    std::vector<const SceneNode *> parts;
-    scene.collect3DParts(parts);
-    for (const auto *n : parts) {
-        if (!n->canCollide || n->className == "WedgePart") continue;
-        float top = n->posY + n->sizeY * 0.5f;
-        float bot = n->posY - n->sizeY * 0.5f;
-        if (py + 2.0f <= bot || py - 2.3f >= top - 0.8f) continue;
-        float hx = n->sizeX * 0.5f + 0.85f, hz = n->sizeZ * 0.5f + 0.85f;
-        if (std::fabs(px - n->posX) < hx && std::fabs(pz - n->posZ) < hz) return true;
-    }
-    return false;
-}
-
-void StudioApp::stepPlayPhysics(float dt) {
-    dt = std::min(dt, 0.05f);
-    float sinY = std::sin(camYaw), cosY = std::cos(camYaw);
-    float fwdX = -sinY, fwdZ = -cosY, rgtX = cosY, rgtZ = -sinY;
-    float mx = (rgtX * joyDx - fwdX * joyDy);
-    float mz = (rgtZ * joyDx - fwdZ * joyDy);
-    float len = std::hypot(mx, mz);
-    if (len > 0.05f) {
-        float speed = 16.0f * std::min(1.0f, len);
-        float vx = (mx / len) * speed * dt, vz = (mz / len) * speed * dt;
-        if (!collidesHorizontal(playerX + vx, playerY, playerZ)) playerX += vx;
-        if (!collidesHorizontal(playerX, playerY, playerZ + vz)) playerZ += vz;
-        playerYaw = std::atan2(mx, mz);
-        walkCycle += dt * 10.0f;
-    } else {
-        walkCycle = 0;
-    }
-    playerVy -= 42.0f * dt;
-    playerY += playerVy * dt;
-    float ground = findGroundBelow(playerX, playerY, playerZ);
-    float feet = playerY - 2.5f;
-    if (feet <= ground) {
-        playerY = ground + 2.5f;
-        playerVy = 0;
-        playerGrounded = true;
-    } else {
-        playerGrounded = false;
-    }
-    if (playerY < -25.0f) {
-        if (const auto *sp = scene.spawnLocation()) {
-            playerX = sp->posX; playerY = sp->posY + 3.0f; playerZ = sp->posZ;
-        } else {
-            playerX = 0; playerY = 5; playerZ = 8;
-        }
-        playerVy = 0;
-    }
-    camTargetX = playerX; camTargetY = playerY + 1.2f; camTargetZ = playerZ;
 }
 
 // =========================================================================
-// Layout & 2D Geometry Emission
+// Layout (responsive in both Portrait & Landscape!)
 // =========================================================================
 void StudioApp::computeLayout() {
-    float topTabsH = std::round(24.0f * density);
-    float ribbonH  = std::round(36.0f * density);
-    float docTabsH = std::round(22.0f * density);
-    float rightW   = (showExplorer || showProperties) ? std::round(146.0f * density) : 0.0f;
-    float botH     = showOutput ? std::round(70.0f * density) : std::round(24.0f * density);
+    bool landscape = width > height;
+    float topTabsH = std::round(22.0f * density);
+    float ribbonH  = std::round(32.0f * density);
+    float docTabsH = std::round(20.0f * density);
+    float rightW   = (!showProjectsTab && (showExplorer || showProperties))
+        ? std::min(std::round(146.0f * density), std::round(width * (landscape ? 0.24f : 0.36f)))
+        : 0.0f;
+    float botH     = showOutput
+        ? std::min(std::round(64.0f * density), std::round(height * (landscape ? 0.22f : 0.16f)))
+        : std::round(22.0f * density);
 
     rTopTabs    = {0, 0, width, topTabsH};
     rRibbon     = {0, topTabsH, width, ribbonH};
     float midTop = topTabsH + ribbonH;
-    float midH   = std::max(80.0f, height - midTop - botH);
+    float midH   = std::max(60.0f, height - midTop - botH);
     float leftW  = std::max(100.0f, width - rightW);
 
     rDocTabs    = {0, midTop, leftW, docTabsH};
-    rViewport   = {0, midTop + docTabsH, leftW, std::max(60.0f, midH - docTabsH)};
+    rViewport   = {0, midTop + docTabsH, leftW, std::max(50.0f, midH - docTabsH)};
     rRightDock  = {leftW, midTop, rightW, midH};
 
-    if (showExplorer && showProperties) {
+    if (rightW > 1.0f && showExplorer && showProperties) {
         float expH = std::round(midH * 0.48f);
         rExplorer   = {leftW, midTop, rightW, expH};
         rProperties = {leftW, midTop + expH, rightW, midH - expH};
-    } else if (showExplorer) {
+    } else if (rightW > 1.0f && showExplorer) {
         rExplorer   = rRightDock;
         rProperties = {0, 0, 0, 0};
-    } else if (showProperties) {
+    } else if (rightW > 1.0f && showProperties) {
         rExplorer   = {0, 0, 0, 0};
         rProperties = rRightDock;
     } else {
@@ -428,10 +347,10 @@ void StudioApp::computeLayout() {
     }
 
     rBottomDock = {0, height - botH, width, botH};
-    float cmdH = std::round(24.0f * density);
-    float hdrH = std::round(15.0f * density);
+    float cmdH = std::round(22.0f * density);
+    float hdrH = std::round(14.0f * density);
     if (showOutput) {
-        rOutLog = {0, rBottomDock.y + hdrH, width, std::max(10.0f, botH - hdrH - cmdH)};
+        rOutLog = {0, rBottomDock.y + hdrH, width, std::max(8.0f, botH - hdrH - cmdH)};
         rCmdBar = {0, height - cmdH, width, cmdH};
     } else {
         rOutLog = {0, 0, 0, 0};
@@ -476,20 +395,6 @@ void StudioApp::emitCircle(float cx, float cy, float r, uint32_t col) {
     }
 }
 
-void StudioApp::emitLine2D(float x0, float y0, float x1, float y1, float thick, uint32_t col) {
-    float dx = x1 - x0, dy = y1 - y0;
-    float len = std::hypot(dx, dy);
-    if (len < 0.5f) return;
-    float nx = -dy / len * thick * 0.5f, ny = dx / len * thick * 0.5f;
-    if (uiBatches.empty()) pushBatch(false, {});
-    auto &v = uiBatches.back().verts;
-    float u = 1.5f / StudioFont::kAtlasSize;
-    UiVertex a{x0 + nx, y0 + ny, u, u, col}, b{x1 + nx, y1 + ny, u, u, col};
-    UiVertex c{x1 - nx, y1 - ny, u, u, col}, d{x0 - nx, y0 - ny, u, u, col};
-    v.push_back(a); v.push_back(b); v.push_back(c);
-    v.push_back(a); v.push_back(c); v.push_back(d);
-}
-
 void StudioApp::emitText(const std::string &txt, float x, float y, float pxSize, uint32_t col, float maxW) {
     if (txt.empty()) return;
     if (uiBatches.empty()) pushBatch(false, {});
@@ -531,7 +436,7 @@ void StudioApp::addBtn(const Rect &r, const std::string &label, uint32_t bg, uin
 }
 
 // =========================================================================
-// Frame Build: 3D Scene + 2D Studio UI
+// Frame Build
 // =========================================================================
 void StudioApp::buildFrame(float w, float h, float d) {
     width = w; height = h; density = std::max(1.5f, d);
@@ -543,18 +448,17 @@ void StudioApp::buildFrame(float w, float h, float d) {
     frame3DOverlayLines.clear();
     gizmoTips.clear();
 
-    has3DViewportVisible = (activeScript.empty() && currentIs3D);
+    has3DViewportVisible = (!showProjectsTab && activeScript.empty() && currentIs3D);
 
-    // 1. Background behind UI
     pushBatch(false, {});
     emitRect(0, 0, width, height, Col::bg());
 
-    // 2. Viewport content (either 3D HUD/gizmos or 2D canvas or Code Editor)
-    if (!activeScript.empty()) {
+    if (showProjectsTab) {
+        buildProjectsTab(rViewport);
+    } else if (!activeScript.empty()) {
         buildCodeEditor(rViewport);
     } else if (currentIs3D) {
         build3DScene();
-        // HUD / Play controls overlay clipped to rViewport
         pushBatch(true, rViewport);
         std::vector<const SceneNode *> uiNodes;
         scene.collectUi(uiNodes);
@@ -564,42 +468,82 @@ void StudioApp::buildFrame(float w, float h, float d) {
                          std::max(10.0f, u->textSize * 0.65f * density), Col::argbToUi(u->argbColor));
             }
         }
-        // Compact camera / mode badge top-right of viewport
-        std::string badge = playMode ? "PLAY" : (runningLua ? "RUN" : "3D");
+        std::string badge = runningLua ? "PLAY" : "3D";
         float bw = font.measureWidth(badge, 10.0f * density) + 12.0f * density;
         Rect rb{rViewport.x + rViewport.w - bw - 6 * density, rViewport.y + 6 * density, bw, 16 * density};
         emitRect(rb.x, rb.y, rb.w, rb.h, StudioFont::rgba(15, 23, 42, 180));
-        emitTextCentered(badge, rb, 10.0f * density, playMode ? Col::green() : Col::accent());
-
-        if (playMode) {
-            joyR = 38.0f * density;
-            joyCx = rViewport.x + 56.0f * density;
-            joyCy = rViewport.y + rViewport.h - 56.0f * density;
-            jumpR = 26.0f * density;
-            jumpCx = rViewport.x + rViewport.w - 46.0f * density;
-            jumpCy = rViewport.y + rViewport.h - 52.0f * density;
-            emitCircle(joyCx, joyCy, joyR, StudioFont::rgba(255, 255, 255, 36));
-            emitCircle(joyCx + joyDx * joyR * 0.6f, joyCy + joyDy * joyR * 0.6f, 16.0f * density, StudioFont::rgba(255, 255, 255, 130));
-            emitCircle(jumpCx, jumpCy, jumpR, StudioFont::rgba(59, 130, 246, 175));
-            emitTextCentered("JUMP", {jumpCx - jumpR, jumpCy - 10 * density, jumpR * 2, 20 * density}, 9.5f * density, Col::text());
-        }
+        emitTextCentered(badge, rb, 10.0f * density, runningLua ? Col::green() : Col::accent());
     } else {
         build2DScene(rViewport);
     }
 
-    // 3. Docked IDE panels
     buildTopRibbon();
     buildDocTabs();
     buildRightDock();
     buildBottomDock();
 
-    // 4. Active Modal (on top of everything)
     if (modal != ModalKind::NONE) buildModal();
 }
 
+void StudioApp::buildProjectsTab(const Rect &area) {
+    pushBatch(true, area);
+    emitRect(area.x, area.y, area.w, area.h, Col::bg());
+    float pad = 10.0f * density;
+    float fs = 10.0f * density;
+
+    emitText("Projects", area.x + pad, area.y + pad, 13.0f * density, Col::text());
+    Rect b3d{area.x + pad, area.y + 32 * density, 118 * density, 26 * density};
+    Rect b2d{b3d.x + b3d.w + 8 * density, b3d.y, 118 * density, 26 * density};
+    addBtn(b3d, "+ New 3D World", Col::btnAct(), Col::text(), fs, [this]() {
+        promptTitle = "New 3D World Name"; promptValue = "World3D"; promptTargetKey = "New3D";
+        modal = ModalKind::TEXT_PROMPT;
+    });
+    addBtn(b2d, "+ New 2D Canvas", Col::btn(), Col::text(), fs, [this]() {
+        promptTitle = "New 2D Project Name"; promptValue = "Game2D"; promptTargetKey = "New2D";
+        modal = ModalKind::TEXT_PROMPT;
+    });
+
+    Rect listArea{area.x, area.y + 66 * density, area.w, std::max(40.0f, area.h - 66 * density)};
+    pushBatch(true, listArea);
+    auto list = callbacks.listProjects ? callbacks.listProjects() : std::vector<std::pair<std::string, bool>>{};
+    float rowH = 34.0f * density;
+    float maxScroll = std::max(0.0f, list.size() * rowH - listArea.h);
+    projectsScrollY = std::clamp(projectsScrollY, 0.0f, maxScroll);
+    float y = listArea.y - projectsScrollY;
+
+    for (const auto &pr : list) {
+        if (y + rowH >= listArea.y && y <= listArea.y + listArea.h) {
+            std::string pname = pr.first;
+            bool is3d = pr.second;
+            bool cur = (pname == currentProjectName);
+
+            float actW = 54.0f * density;
+            float openW = std::max(100.0f, listArea.w - pad * 2 - actW * 2 - 8 * density);
+            Rect rOpen{listArea.x + pad, y + 3 * density, openW, 28 * density};
+            addBtn(rOpen, pname + (is3d ? "  [3D]" : "  [2D]"), cur ? Col::selRow() : Col::panel(), Col::text(), fs, [this, pname, is3d]() {
+                openProject(pname, is3d);
+            });
+
+            Rect rRen{rOpen.x + rOpen.w + 4 * density, rOpen.y, actW, 28 * density};
+            addBtn(rRen, "Rename", Col::btn(), Col::text(), 8.5f * density, [this, pname]() {
+                promptTitle = "Rename Project"; promptValue = pname; promptExtra = pname; promptTargetKey = "RenameProj";
+                modal = ModalKind::TEXT_PROMPT;
+            });
+
+            Rect rDel{rRen.x + rRen.w + 4 * density, rOpen.y, actW, 28 * density};
+            addBtn(rDel, "Del", Col::btn(), cur ? Col::muted() : Col::red(), 8.5f * density, [this, pname]() {
+                if (callbacks.deleteProject && pname != currentProjectName) {
+                    callbacks.deleteProject(pname);
+                }
+            });
+        }
+        y += rowH;
+    }
+}
+
 void StudioApp::build3DScene() {
-    const auto *lit = scene.lighting();
-    float ct = lit ? lit->clockTime : 14.0f;
+    const auto *env = scene.environment();
+    float ct = env ? env->clockTime : 14.0f;
     if (ct >= 6.0f && ct <= 18.0f) {
         skyTop[0] = 0.12f; skyTop[1] = 0.43f; skyTop[2] = 0.77f;
         skyBot[0] = 0.55f; skyBot[1] = 0.77f; skyBot[2] = 0.95f;
@@ -608,23 +552,46 @@ void StudioApp::build3DScene() {
         skyBot[0] = 0.12f; skyBot[1] = 0.17f; skyBot[2] = 0.28f;
     }
 
-    // Camera matrices (right-handed Y-up, Vulkan NDC Y-down and Z in [0,1])
-    float dist = playMode ? 12.0f : camDist;
-    float cy = std::cos(camYaw), sy = std::sin(camYaw);
-    float cp = std::cos(camPitch), sp = std::sin(camPitch);
-    Vec3f target{camTargetX, camTargetY, camTargetZ};
-    eye = {target.x + dist * cp * sy, target.y + dist * sp, target.z + dist * cp * cy};
-    fwd = norm3(target - eye);
-    right = norm3(cross3(fwd, {0, 1, 0}));
-    up = cross3(right, fwd);
+    // Check DirectionalLight3D in scene
+    sunDir[0] = 0.55f; sunDir[1] = 0.85f; sunDir[2] = 0.40f; sunDir[3] = 0.0f;
+    std::vector<const SceneNode *> nodes3D;
+    scene.collect3DNodes(nodes3D);
+    for (const auto *n : nodes3D) {
+        if (n->className == "DirectionalLight3D") {
+            Vec3f dir = norm3({n->posX, std::max(1.0f, n->posY), n->posZ});
+            sunDir[0] = dir.x; sunDir[1] = dir.y; sunDir[2] = dir.z;
+            break;
+        }
+    }
+
+    // Camera matrices (uses active Camera3D during Play when enabled, else free orbit camera)
+    float fovDeg = 53.0f;
+    if (runningLua && useCamera3DInPlay) {
+        if (const auto *cam = scene.findActiveCamera()) {
+            fovDeg = std::clamp(cam->fov, 25.0f, 110.0f);
+            eye = {cam->posX, cam->posY, cam->posZ};
+            constexpr float kDeg = 3.14159265f / 180.0f;
+            float rx = cam->rotX * kDeg, ry = cam->rotY * kDeg;
+            fwd = norm3({-std::sin(ry) * std::cos(rx), std::sin(rx), -std::cos(ry) * std::cos(rx)});
+            right = norm3(cross3(fwd, {0, 1, 0}));
+            up = cross3(right, fwd);
+        }
+    } else {
+        float cy = std::cos(camYaw), sy = std::sin(camYaw);
+        float cp = std::cos(camPitch), sp = std::sin(camPitch);
+        Vec3f target{camTargetX, camTargetY, camTargetZ};
+        eye = {target.x + camDist * cp * sy, target.y + camDist * sp, target.z + camDist * cp * cy};
+        fwd = norm3(target - eye);
+        right = norm3(cross3(fwd, {0, 1, 0}));
+        up = cross3(right, fwd);
+    }
 
     float aspect = std::max(0.2f, rViewport.w / std::max(1.0f, rViewport.h));
-    float fovY = 0.92f; // ~53 deg
+    float fovY = fovDeg * (3.14159265f / 180.0f);
     float f = 1.0f / std::tan(fovY * 0.5f);
     focalLen = (rViewport.h * 0.5f) * f;
     float zn = 0.4f, zf = 400.0f;
 
-    // Column-major Vulkan projection (y flipped by -f, z mapped [0,1])
     float proj[16]{};
     proj[0] = f / aspect;
     proj[5] = -f;
@@ -632,7 +599,6 @@ void StudioApp::build3DScene() {
     proj[11] = -1.0f;
     proj[14] = (zn * zf) / (zn - zf);
 
-    // View matrix
     float view[16]{};
     view[0] = right.x; view[4] = right.y; view[8]  = right.z; view[12] = -dot3(right, eye);
     view[1] = up.x;    view[5] = up.y;    view[9]  = up.z;    view[13] = -dot3(up, eye);
@@ -641,64 +607,78 @@ void StudioApp::build3DScene() {
     mat4Mul(viewProj, proj, view);
 
     // 3D solid meshes
-    std::vector<const SceneNode *> parts;
-    scene.collect3DParts(parts);
-    for (const auto *p : parts) {
+    std::vector<const SceneNode *> meshes;
+    scene.collectMeshes(meshes);
+    for (const auto *p : meshes) {
         if (p->transparency >= 0.99f) continue;
         StudioScene::appendPartMesh(*p, frame3DMesh);
     }
 
-    // Play avatar (R6 block rig)
-    if (playMode) {
-        auto addLimb = [&](float lx, float ly, float lz, float sx, float sy2, float sz, uint32_t col) {
-            SceneNode m;
-            m.className = "Part";
-            float c = std::cos(playerYaw), s = std::sin(playerYaw);
-            m.posX = playerX + lx * c + lz * s;
-            m.posY = playerY + ly;
-            m.posZ = playerZ - lx * s + lz * c;
-            m.sizeX = sx; m.sizeY = sy2; m.sizeZ = sz;
-            m.rotY = playerYaw * 57.29578f;
-            m.argbColor = col;
-            StudioScene::appendPartMesh(m, frame3DMesh);
-        };
-        float swing = std::sin(walkCycle) * 0.45f;
-        addLimb(-0.48f, -1.5f, -swing, 0.9f, 2.0f, 0.9f, 0xFF1D4ED8);
-        addLimb( 0.48f, -1.5f,  swing, 0.9f, 2.0f, 0.9f, 0xFF1D4ED8);
-        addLimb( 0.00f,  0.5f,  0.0f,  1.9f, 2.0f, 1.0f, 0xFF3B82F6);
-        addLimb( 0.00f,  2.1f,  0.0f,  1.2f, 1.2f, 1.2f, 0xFFFDE047);
-    }
-
-    // Stud grid lines (depth-tested)
     auto addLine = [&](std::vector<MeshVertex> &dst, Vec3f a, Vec3f b, uint32_t col) {
         dst.push_back({a.x, a.y, a.z, 0, 1, 0, col});
         dst.push_back({b.x, b.y, b.z, 0, 1, 0, col});
     };
+    auto addBoxWire = [&](std::vector<MeshVertex> &dst, const SceneNode &node, float pad, uint32_t col) {
+        float hx = node.sizeX * 0.5f + pad, hy = node.sizeY * 0.5f + pad, hz = node.sizeZ * 0.5f + pad;
+        Vec3f c[8] = {
+            StudioScene::transformVert(node, -hx, -hy, -hz), StudioScene::transformVert(node,  hx, -hy, -hz),
+            StudioScene::transformVert(node,  hx,  hy, -hz), StudioScene::transformVert(node, -hx,  hy, -hz),
+            StudioScene::transformVert(node, -hx, -hy,  hz), StudioScene::transformVert(node,  hx, -hy,  hz),
+            StudioScene::transformVert(node,  hx,  hy,  hz), StudioScene::transformVert(node, -hx,  hy,  hz)
+        };
+        int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
+        for (auto &e : edges) addLine(dst, c[e[0]], c[e[1]], col);
+    };
+
     if (showGrid) {
         uint32_t gCol = StudioFont::rgba(75, 85, 102, 130);
-        for (int i = -60; i <= 60; i += 4) {
-            addLine(frame3DLines, {(float)i, 0.02f, -60}, {(float)i, 0.02f, 60}, gCol);
-            addLine(frame3DLines, {-60, 0.02f, (float)i}, {60, 0.02f, (float)i}, gCol);
+        for (int i = -40; i <= 40; i += 4) {
+            addLine(frame3DLines, {(float)i, 0.02f, -40}, {(float)i, 0.02f, 40}, gCol);
+            addLine(frame3DLines, {-40, 0.02f, (float)i}, {40, 0.02f, (float)i}, gCol);
         }
     }
 
-    // Selection wireframe + gizmo (overlay lines, no depth test)
-    if (!playMode) {
-        if (const auto *sel = selectedNode(); sel && sel->is3DPart()) {
-            float hx = sel->sizeX * 0.5f + 0.08f, hy = sel->sizeY * 0.5f + 0.08f, hz = sel->sizeZ * 0.5f + 0.08f;
-            Vec3f c[8] = {
-                StudioScene::transformVert(*sel, -hx, -hy, -hz), StudioScene::transformVert(*sel,  hx, -hy, -hz),
-                StudioScene::transformVert(*sel,  hx,  hy, -hz), StudioScene::transformVert(*sel, -hx,  hy, -hz),
-                StudioScene::transformVert(*sel, -hx, -hy,  hz), StudioScene::transformVert(*sel,  hx, -hy,  hz),
-                StudioScene::transformVert(*sel,  hx,  hy,  hz), StudioScene::transformVert(*sel, -hx,  hy,  hz)
-            };
-            uint32_t selCol = StudioFont::rgba(56, 189, 248, 255);
-            int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
-            for (auto &e : edges) addLine(frame3DOverlayLines, c[e[0]], c[e[1]], selCol);
+    // Editor wireframes for Godot-style Collision / Area / Camera3D / Lights
+    if (!runningLua) {
+        for (const auto *n : nodes3D) {
+            if (showColliders && (n->className == "CollisionBox" || n->className == "Area3D")) {
+                uint32_t cc = (n->className == "Area3D") ? StudioFont::rgba(250, 204, 21, 185) : StudioFont::rgba(34, 211, 238, 185);
+                addBoxWire(frame3DLines, *n, 0.03f, cc);
+            } else if (showColliders && n->className == "CollisionSphere") {
+                float r = std::max({n->sizeX, n->sizeY, n->sizeZ}) * 0.5f;
+                uint32_t cc = StudioFont::rgba(34, 211, 238, 185);
+                const int seg = 16;
+                for (int i = 0; i < seg; ++i) {
+                    float a0 = 6.283185f * i / seg, a1 = 6.283185f * (i + 1) / seg;
+                    Vec3f p{n->posX, n->posY, n->posZ};
+                    addLine(frame3DLines, {p.x + std::cos(a0)*r, p.y, p.z + std::sin(a0)*r}, {p.x + std::cos(a1)*r, p.y, p.z + std::sin(a1)*r}, cc);
+                    addLine(frame3DLines, {p.x + std::cos(a0)*r, p.y + std::sin(a0)*r, p.z}, {p.x + std::cos(a1)*r, p.y + std::sin(a1)*r, p.z}, cc);
+                }
+            } else if (n->className == "Camera3D") {
+                uint32_t camCol = StudioFont::rgba(168, 85, 247, 230);
+                Vec3f o{n->posX, n->posY, n->posZ};
+                Vec3f f0 = StudioScene::transformVert(*n, -1.0f,  0.65f, -2.0f);
+                Vec3f f1 = StudioScene::transformVert(*n,  1.0f,  0.65f, -2.0f);
+                Vec3f f2 = StudioScene::transformVert(*n,  1.0f, -0.65f, -2.0f);
+                Vec3f f3 = StudioScene::transformVert(*n, -1.0f, -0.65f, -2.0f);
+                addLine(frame3DLines, o, f0, camCol); addLine(frame3DLines, o, f1, camCol);
+                addLine(frame3DLines, o, f2, camCol); addLine(frame3DLines, o, f3, camCol);
+                addLine(frame3DLines, f0, f1, camCol); addLine(frame3DLines, f1, f2, camCol);
+                addLine(frame3DLines, f2, f3, camCol); addLine(frame3DLines, f3, f0, camCol);
+            } else if (n->className == "DirectionalLight3D" || n->className == "PointLight3D") {
+                uint32_t lc = StudioFont::rgba(250, 204, 21, 240);
+                Vec3f o{n->posX, n->posY, n->posZ};
+                addLine(frame3DLines, {o.x - 0.8f, o.y, o.z}, {o.x + 0.8f, o.y, o.z}, lc);
+                addLine(frame3DLines, {o.x, o.y - 0.8f, o.z}, {o.x, o.y + 0.8f, o.z}, lc);
+                addLine(frame3DLines, {o.x, o.y, o.z - 0.8f}, {o.x, o.y, o.z + 0.8f}, lc);
+            }
+        }
 
+        if (const auto *sel = selectedNode(); sel && sel->is3DNode()) {
+            addBoxWire(frame3DOverlayLines, *sel, 0.08f, StudioFont::rgba(56, 189, 248, 255));
             if (toolMode != ToolMode::SELECT) {
                 Vec3f orig{sel->posX, sel->posY, sel->posZ};
-                float gLen = std::max(3.5f, std::max({sel->sizeX, sel->sizeY, sel->sizeZ}) * 0.65f + 1.8f);
+                float gLen = std::max(3.0f, std::max({sel->sizeX, sel->sizeY, sel->sizeZ}) * 0.65f + 1.6f);
                 Vec3f tips[3] = {{orig.x + gLen, orig.y, orig.z}, {orig.x, orig.y + gLen, orig.z}, {orig.x, orig.y, orig.z + gLen}};
                 uint32_t cols[3] = {StudioFont::rgba(239,68,68), StudioFont::rgba(34,197,94), StudioFont::rgba(59,130,246)};
                 float bx = 0, by = 0;
@@ -717,7 +697,7 @@ void StudioApp::build2DScene(const Rect &area) {
     pushBatch(true, area);
     emitRect(area.x, area.y, area.w, area.h, StudioFont::rgba(15, 23, 42));
     if (last2DFrameJson.empty()) {
-        emitTextCentered("2D Canvas — Tap RUN to start " + currentProjectName, area, 12.0f * density, Col::muted());
+        emitTextCentered("2D Canvas — Tap Play to run " + currentProjectName, area, 12.0f * density, Col::muted());
         return;
     }
     JsonVal j = MiniJson::parse(last2DFrameJson);
@@ -738,8 +718,7 @@ void StudioApp::build2DScene(const Rect &area) {
     if (const JsonVal *ents = j.get("entities"); ents && ents->type == JsonVal::J_ARR) {
         for (const auto &e : ents->arr) {
             uint32_t col = StudioFont::rgba((uint8_t)e.d("r",100), (uint8_t)e.d("g",220), (uint8_t)e.d("b",120));
-            emitRect(area.x + (float)e.d("x"), area.y + (float)e.d("y"),
-                     (float)e.d("w", 16), (float)e.d("h", 16), col);
+            emitRect(area.x + (float)e.d("x"), area.y + (float)e.d("y"), (float)e.d("w", 16), (float)e.d("h", 16), col);
         }
     }
     if (const JsonVal *txts = j.get("texts"); txts && txts->type == JsonVal::J_ARR) {
@@ -751,72 +730,75 @@ void StudioApp::build2DScene(const Rect &area) {
 }
 
 void StudioApp::buildTopRibbon() {
-    float fs = 9.0f * density;
-    // 1. Top menu tabs bar (compact 24dp)
+    float fs = 8.8f * density;
     pushBatch(true, rTopTabs);
     emitRect(rTopTabs.x, rTopTabs.y, rTopTabs.w, rTopTabs.h, Col::bg());
     emitRect(rTopTabs.x, rTopTabs.y + rTopTabs.h - 1, rTopTabs.w, 1, Col::border());
 
     float cx = 4.0f * density;
-    Rect rProj{cx, 2 * density, 96 * density, rTopTabs.h - 4 * density};
-    addBtn(rProj, currentProjectName + " v", Col::header(), Col::text(), fs, [this]() {
-        modal = ModalKind::PROJECTS;
-    });
-    cx += rProj.w + 4 * density;
-
     struct TabDef { RibbonTab t; const char *lbl; };
     TabDef tabs[] = {
-        {RibbonTab::HOME, "HOME"}, {RibbonTab::MODEL, "MODEL"},
-        {RibbonTab::AVATAR, "AVATAR"}, {RibbonTab::TEST, "TEST"},
-        {RibbonTab::VIEW, "VIEW"}, {RibbonTab::PLUGINS, "PLUGINS"}
+        {RibbonTab::PROJECTS, "PROJECTS"},
+        {RibbonTab::HOME, "HOME"},
+        {RibbonTab::CREATE, "CREATE"},
+        {RibbonTab::VIEW, "VIEW"},
+        {RibbonTab::SCRIPTS, "SCRIPTS"}
     };
-    float rem = std::max(120.0f, rTopTabs.w - cx - 4 * density);
-    float tw = std::min(58.0f * density, rem / 6.0f);
+    float tw = std::min(74.0f * density, (rTopTabs.w - 8 * density) / 5.0f);
     for (auto &td : tabs) {
-        bool act = (activeRibbon == td.t);
+        bool act = (td.t == RibbonTab::PROJECTS) ? showProjectsTab : (!showProjectsTab && activeRibbon == td.t);
         Rect rt{cx, 2 * density, tw - 2 * density, rTopTabs.h - 4 * density};
-        addBtn(rt, td.lbl, act ? Col::btnAct() : Col::bg(), act ? Col::text() : Col::muted(), 8.5f * density, [this, td]() {
-            activeRibbon = td.t;
+        addBtn(rt, td.lbl, act ? Col::btnAct() : Col::bg(), act ? Col::text() : Col::muted(), 8.3f * density, [this, td]() {
+            if (td.t == RibbonTab::PROJECTS) {
+                showProjectsTab = true;
+            } else {
+                showProjectsTab = false;
+                activeRibbon = td.t;
+            }
         });
         cx += tw;
     }
 
-    // 2. Compact Ribbon action strip (36dp, horizontally scrollable)
     pushBatch(true, rRibbon);
     emitRect(rRibbon.x, rRibbon.y, rRibbon.w, rRibbon.h, Col::panel());
     emitRect(rRibbon.x, rRibbon.y + rRibbon.h - 1, rRibbon.w, 1, Col::border());
 
     float rx = 6.0f * density - ribbonScrollX;
-    float ry = rRibbon.y + 4 * density;
-    float rh = rRibbon.h - 8 * density;
+    float ry = rRibbon.y + 3 * density;
+    float rh = rRibbon.h - 6 * density;
     auto ribBtn = [&](const std::string &lbl, bool act, uint32_t customBg, std::function<void()> cb) {
-        float bw = std::max(40.0f * density, font.measureWidth(lbl, fs) + 14.0f * density);
+        float bw = std::max(38.0f * density, font.measureWidth(lbl, fs) + 12.0f * density);
         Rect r{rx, ry, bw, rh};
         uint32_t bg = customBg ? customBg : (act ? Col::btnAct() : Col::btn());
         addBtn(r, lbl, bg, Col::text(), fs, std::move(cb));
         rx += bw + 4 * density;
     };
 
+    if (showProjectsTab) {
+        ribBtn("+ 3D World", false, Col::btnAct(), [this]() {
+            promptTitle = "New 3D World Name"; promptValue = "World3D"; promptTargetKey = "New3D";
+            modal = ModalKind::TEXT_PROMPT;
+        });
+        ribBtn("+ 2D Canvas", false, 0, [this]() {
+            promptTitle = "New 2D Project Name"; promptValue = "Game2D"; promptTargetKey = "New2D";
+            modal = ModalKind::TEXT_PROMPT;
+        });
+        ribBtn("Back to Scene", false, 0, [this]() { showProjectsTab = false; });
+        return;
+    }
+
     if (activeRibbon == RibbonTab::HOME) {
-        if (runningLua || playMode) {
+        if (runningLua) {
             ribBtn("Stop", false, Col::red(), [this]() { stopSim(); });
         } else {
-            ribBtn("Play", false, Col::green(), [this]() { startSim(true); });
-            ribBtn("Run", false, Col::btn(), [this]() { startSim(false); });
+            ribBtn("Play", false, Col::green(), [this]() { startSim(); });
         }
         ribBtn("Select", toolMode == ToolMode::SELECT, 0, [this]() { toolMode = ToolMode::SELECT; });
         ribBtn("Move", toolMode == ToolMode::MOVE, 0, [this]() { toolMode = ToolMode::MOVE; });
         ribBtn("Scale", toolMode == ToolMode::SCALE, 0, [this]() { toolMode = ToolMode::SCALE; });
         ribBtn("Rotate", toolMode == ToolMode::ROTATE, 0, [this]() { toolMode = ToolMode::ROTATE; });
-        ribBtn("+ Part", false, 0, [this]() {
-            if (auto *ws = scene.findService("Workspace")) {
-                auto *p = scene.createPart(ws, "Part", "Part");
-                if (p) selectedId = p->id;
-                scene.saveToFile(currentProjectDir + "/scene.json");
-            }
-        });
-        ribBtn("Insert", false, 0, [this]() {
-            insertParentId.clear();
+        ribBtn("+ Node", false, 0, [this]() {
+            insertParentId = selectedId;
             modal = ModalKind::INSERT;
         });
         ribBtn("Color", false, 0, [this]() { if (selectedNode()) modal = ModalKind::COLOR; });
@@ -827,54 +809,44 @@ void StudioApp::buildTopRibbon() {
                 scene.saveToFile(currentProjectDir + "/scene.json");
             }
         });
-    } else if (activeRibbon == RibbonTab::MODEL) {
-        ribBtn("Block", false, 0, [this]() {
-            if (auto *p = scene.createPart(scene.findService("Workspace"), "Part", "Part")) selectedId = p->id;
-            scene.saveToFile(currentProjectDir + "/scene.json");
-        });
-        ribBtn("Wedge", false, 0, [this]() {
-            if (auto *p = scene.createPart(scene.findService("Workspace"), "WedgePart", "Wedge")) selectedId = p->id;
-            scene.saveToFile(currentProjectDir + "/scene.json");
-        });
-        ribBtn("Sphere", false, 0, [this]() {
-            if (auto *p = scene.createPart(scene.findService("Workspace"), "Sphere", "Sphere")) selectedId = p->id;
-            scene.saveToFile(currentProjectDir + "/scene.json");
-        });
-        ribBtn("Cylinder", false, 0, [this]() {
-            if (auto *p = scene.createPart(scene.findService("Workspace"), "Cylinder", "Cylinder")) selectedId = p->id;
-            scene.saveToFile(currentProjectDir + "/scene.json");
-        });
-        ribBtn("Spawn", false, 0, [this]() {
-            if (auto *p = scene.createPart(scene.findService("Workspace"), "SpawnLocation", "SpawnLocation")) selectedId = p->id;
-            scene.saveToFile(currentProjectDir + "/scene.json");
-        });
-        ribBtn(collisions ? "Collide:ON" : "Collide:OFF", collisions, 0, [this]() { collisions = !collisions; });
-        ribBtn(showGrid ? "Grid:ON" : "Grid:OFF", showGrid, 0, [this]() { showGrid = !showGrid; });
-    } else if (activeRibbon == RibbonTab::AVATAR) {
-        ribBtn("Play R6", playMode, Col::green(), [this]() { startSim(true); });
-        ribBtn("Reset Cam", false, 0, [this]() {
-            camTargetX = 0; camTargetY = 2.5f; camTargetZ = -3.0f; camYaw = 0.36f; camPitch = 0.34f; camDist = 36.0f;
-        });
-    } else if (activeRibbon == RibbonTab::TEST) {
-        if (runningLua || playMode) ribBtn("Stop", false, Col::red(), [this]() { stopSim(); });
-        ribBtn("Play Here", false, Col::green(), [this]() { startSim(true); });
-        ribBtn("Run Server", false, 0, [this]() { startSim(false); });
-        ribBtn("Save Place", false, 0, [this]() {
+        ribBtn("Save", false, 0, [this]() {
             saveActiveScript();
             if (currentIs3D) scene.saveToFile(currentProjectDir + "/scene.json");
-            appendOutput("Saved project.", Col::green());
+            appendOutput("Saved " + currentProjectName, Col::green());
         });
+    } else if (activeRibbon == RibbonTab::CREATE) {
+        auto quickAdd = [&](const std::string &cls) {
+            SceneNode *parent = selectedNode();
+            if (!parent || parent->isScript()) parent = scene.findService("World3D");
+            if (auto *p = scene.createNode(parent, cls, cls + std::to_string(scene.nextId))) {
+                selectedId = p->id;
+                scene.saveToFile(currentProjectDir + "/scene.json");
+            }
+        };
+        ribBtn("+ Box", false, 0, [quickAdd]() { quickAdd("Box"); });
+        ribBtn("+ Wedge", false, 0, [quickAdd]() { quickAdd("Wedge"); });
+        ribBtn("+ Sphere", false, 0, [quickAdd]() { quickAdd("Sphere"); });
+        ribBtn("+ Cylinder", false, 0, [quickAdd]() { quickAdd("Cylinder"); });
+        ribBtn("+ CollisionBox", false, 0, [quickAdd]() { quickAdd("CollisionBox"); });
+        ribBtn("+ StaticBody3D", false, 0, [quickAdd]() { quickAdd("StaticBody3D"); });
+        ribBtn("+ RigidBody3D", false, 0, [quickAdd]() { quickAdd("RigidBody3D"); });
+        ribBtn("+ Camera3D", false, 0, [quickAdd]() { quickAdd("Camera3D"); });
+        ribBtn("+ Light3D", false, 0, [quickAdd]() { quickAdd("PointLight3D"); });
     } else if (activeRibbon == RibbonTab::VIEW) {
         ribBtn("Explorer", showExplorer, 0, [this]() { showExplorer = !showExplorer; });
         ribBtn("Properties", showProperties, 0, [this]() { showProperties = !showProperties; });
         ribBtn("Output", showOutput, 0, [this]() { showOutput = !showOutput; });
         ribBtn("Grid", showGrid, 0, [this]() { showGrid = !showGrid; });
+        ribBtn("Colliders", showColliders, 0, [this]() { showColliders = !showColliders; });
+        ribBtn("Play:Cam3D", useCamera3DInPlay, 0, [this]() { useCamera3DInPlay = !useCamera3DInPlay; });
+        ribBtn("Reset Cam", false, 0, [this]() {
+            camTargetX = 0; camTargetY = 1.5f; camTargetZ = -3.0f; camYaw = 0.36f; camPitch = 0.34f; camDist = 28.0f;
+        });
         ribBtn("Settings", false, 0, [this]() { modal = ModalKind::SETTINGS; });
     } else {
-        ribBtn("Projects", false, 0, [this]() { modal = ModalKind::PROJECTS; });
         ribBtn("New Script", false, 0, [this]() {
-            if (auto *sss = scene.findService("ServerScriptService")) {
-                auto *s = scene.createPart(sss, "Script", "Script" + std::to_string(scene.nextId));
+            if (auto *sss = scene.findService("Scripts")) {
+                auto *s = scene.createNode(sss, "Script", "Script" + std::to_string(scene.nextId));
                 if (s) {
                     s->scriptPath = "scripts/" + s->name + ".lua";
                     openScript(s->scriptPath);
@@ -884,6 +856,7 @@ void StudioApp::buildTopRibbon() {
                 openScript("main.lua");
             }
         });
+        ribBtn("main.lua", activeScript == "main.lua", 0, [this]() { openScript("main.lua"); });
         ribBtn("Settings & Fonts", false, 0, [this]() { modal = ModalKind::SETTINGS; });
     }
 }
@@ -892,30 +865,42 @@ void StudioApp::buildDocTabs() {
     pushBatch(true, rDocTabs);
     emitRect(rDocTabs.x, rDocTabs.y, rDocTabs.w, rDocTabs.h, Col::bg());
     emitRect(rDocTabs.x, rDocTabs.y + rDocTabs.h - 1, rDocTabs.w, 1, Col::border());
-    float fs = 8.5f * density;
+    float fs = 8.3f * density;
     float x = rDocTabs.x + 2 * density;
     float h = rDocTabs.h - 2 * density;
-    Rect rv{x, rDocTabs.y + 1, 68 * density, h};
-    addBtn(rv, currentIs3D ? "Viewport" : "2D Canvas", activeScript.empty() ? Col::header() : Col::bg(),
-           activeScript.empty() ? Col::accent() : Col::muted(), fs, [this]() {
+
+    Rect rProj{x, rDocTabs.y + 1, 56 * density, h};
+    addBtn(rProj, "Projects", showProjectsTab ? Col::header() : Col::bg(),
+           showProjectsTab ? Col::accent() : Col::muted(), fs, [this]() {
+               showProjectsTab = true;
+               editorFocused = false;
+               if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
+           });
+    x += rProj.w + 2 * density;
+
+    Rect rv{x, rDocTabs.y + 1, 66 * density, h};
+    addBtn(rv, currentIs3D ? "3D Scene" : "2D Canvas", (!showProjectsTab && activeScript.empty()) ? Col::header() : Col::bg(),
+           (!showProjectsTab && activeScript.empty()) ? Col::accent() : Col::muted(), fs, [this]() {
                saveActiveScript();
+               showProjectsTab = false;
                activeScript.clear();
                editorFocused = false;
                if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
            });
     x += rv.w + 2 * density;
+
     for (size_t i = 0; i < openScripts.size(); ++i) {
         std::string sp = openScripts[i];
         std::string shortName = sp;
         auto slash = shortName.find_last_of('/');
         if (slash != std::string::npos) shortName = shortName.substr(slash + 1);
-        float w = std::max(54 * density, font.measureWidth(shortName, fs) + 22 * density);
-        bool act = (activeScript == sp);
-        Rect rt{x, rDocTabs.y + 1, w - 16 * density, h};
+        float w = std::max(52 * density, font.measureWidth(shortName, fs) + 20 * density);
+        bool act = (!showProjectsTab && activeScript == sp);
+        Rect rt{x, rDocTabs.y + 1, w - 15 * density, h};
         addBtn(rt, shortName, act ? Col::header() : Col::bg(), act ? Col::text() : Col::muted(), fs, [this, sp]() {
             openScript(sp);
         });
-        Rect rxBtn{rt.x + rt.w, rDocTabs.y + 1, 16 * density, h};
+        Rect rxBtn{rt.x + rt.w, rDocTabs.y + 1, 15 * density, h};
         addBtn(rxBtn, "x", act ? Col::header() : Col::bg(), Col::muted(), fs, [this, sp]() {
             if (activeScript == sp) { saveActiveScript(); activeScript.clear(); }
             openScripts.erase(std::remove(openScripts.begin(), openScripts.end(), sp), openScripts.end());
@@ -926,17 +911,16 @@ void StudioApp::buildDocTabs() {
 
 void StudioApp::buildRightDock() {
     if (rRightDock.w <= 1.0f) return;
-    float fs = 8.5f * density;
-    float hdrH = 16.0f * density;
-    float rowH = 18.0f * density;
+    float fs = 8.3f * density;
+    float hdrH = 15.0f * density;
+    float rowH = 17.0f * density;
 
-    // Explorer
     if (showExplorer && rExplorer.h > 1.0f) {
         pushBatch(true, rExplorer);
         emitRect(rExplorer.x, rExplorer.y, rExplorer.w, rExplorer.h, Col::panel());
         emitRect(rExplorer.x, rExplorer.y, 1, rExplorer.h, Col::border());
         emitRect(rExplorer.x, rExplorer.y, rExplorer.w, hdrH, Col::header());
-        emitText("Explorer", rExplorer.x + 5 * density, rExplorer.y + 2 * density, fs, Col::text());
+        emitText("Scene Tree", rExplorer.x + 5 * density, rExplorer.y + 2 * density, fs, Col::text());
         Rect rAdd{rExplorer.x + rExplorer.w - 18 * density, rExplorer.y + 1, 16 * density, hdrH - 2};
         addBtn(rAdd, "+", Col::btn(), Col::accent(), fs, [this]() {
             insertParentId = selectedId;
@@ -945,7 +929,6 @@ void StudioApp::buildRightDock() {
 
         Rect listArea{rExplorer.x + 1, rExplorer.y + hdrH, rExplorer.w - 1, rExplorer.h - hdrH};
         pushBatch(true, listArea);
-        explorerVisibleIds.clear();
         struct Row { const SceneNode *n; int depth; };
         std::vector<Row> rows;
         std::function<void(const SceneNode &, int)> flatten = [&](const SceneNode &node, int d) {
@@ -962,18 +945,20 @@ void StudioApp::buildRightDock() {
                 bool sel = (r.n->id == selectedId);
                 Rect rr{listArea.x, y, listArea.w, rowH};
                 if (sel) emitRect(rr.x, rr.y, rr.w, rr.h, Col::selRow());
-                float indent = (4 + r.depth * 9) * density;
+                float indent = (4 + r.depth * 8) * density;
                 std::string prefix = r.n->children.empty() ? "  " : (r.n->expanded ? "v " : "> ");
                 std::string lbl = prefix + r.n->name;
-                emitText(lbl, rr.x + indent, rr.y + 3 * density, 8.2f * density,
-                         sel ? Col::text() : (r.n->isScript() ? Col::accent() : Col::text()), rr.w - indent - 2);
+                uint32_t tc = sel ? Col::text() :
+                    (r.n->isScript() ? Col::accent() :
+                    (r.n->isCollisionNode() ? StudioFont::rgba(34, 211, 238) : Col::text()));
+                emitText(lbl, rr.x + indent, rr.y + 3 * density, 8.0f * density, tc, rr.w - indent - 2);
                 std::string nid = r.n->id;
                 hitBoxes.push_back({rr, [this, nid]() {
                     if (auto *node = scene.findById(nid)) {
                         if (selectedId == nid && !node->children.empty()) node->expanded = !node->expanded;
                         selectedId = nid;
                         if (node->isScript() && !node->scriptPath.empty()) openScript(node->scriptPath);
-                        if (node->is3DPart()) {
+                        if (node->is3DNode()) {
                             camTargetX = node->posX; camTargetY = node->posY; camTargetZ = node->posZ;
                         }
                     }
@@ -983,13 +968,12 @@ void StudioApp::buildRightDock() {
         }
     }
 
-    // Properties
     if (showProperties && rProperties.h > 1.0f) {
         pushBatch(true, rProperties);
         emitRect(rProperties.x, rProperties.y, rProperties.w, rProperties.h, Col::panel());
         emitRect(rProperties.x, rProperties.y, 1, rProperties.h, Col::border());
         emitRect(rProperties.x, rProperties.y, rProperties.w, hdrH, Col::header());
-        emitText("Properties", rProperties.x + 5 * density, rProperties.y + 2 * density, fs, Col::text());
+        emitText("Inspector", rProperties.x + 5 * density, rProperties.y + 2 * density, fs, Col::text());
 
         Rect pArea{rProperties.x + 1, rProperties.y + hdrH, rProperties.w - 1, rProperties.h - hdrH};
         pushBatch(true, pArea);
@@ -1004,11 +988,8 @@ void StudioApp::buildRightDock() {
             promptTitle = "Rename " + n->name; promptValue = n->name; promptTargetKey = "Rename";
             modal = ModalKind::TEXT_PROMPT;
         }});
-        props.push_back({"Class", n->className, nullptr});
-        if (n->is3DPart()) {
-            props.push_back({"Shape", n->shape(), [this]() { modal = ModalKind::SHAPE; }});
-            props.push_back({"Color", "#", [this]() { modal = ModalKind::COLOR; }});
-            props.push_back({"Material", n->material, [this]() { modal = ModalKind::MATERIAL; }});
+        props.push_back({"Type", n->className, nullptr});
+        if (n->is3DNode()) {
             props.push_back({"Position", fmtVec3(n->posX, n->posY, n->posZ), [this, n]() {
                 promptTitle = "Position (X, Y, Z)"; promptValue = fmtVec3(n->posX, n->posY, n->posZ);
                 promptTargetKey = "Position"; modal = ModalKind::TEXT_PROMPT;
@@ -1021,22 +1002,53 @@ void StudioApp::buildRightDock() {
                 promptTitle = "Rotation (X, Y, Z)"; promptValue = fmtVec3(n->rotX, n->rotY, n->rotZ);
                 promptTargetKey = "Rotation"; modal = ModalKind::TEXT_PROMPT;
             }});
-            props.push_back({"Anchored", n->anchored ? "true" : "false", [this, n]() {
-                n->anchored = !n->anchored; scene.saveToFile(currentProjectDir + "/scene.json");
-            }});
-            props.push_back({"CanCollide", n->canCollide ? "true" : "false", [this, n]() {
-                n->canCollide = !n->canCollide; scene.saveToFile(currentProjectDir + "/scene.json");
+        }
+        if (n->isMeshNode()) {
+            props.push_back({"Mesh", n->shape(), [this]() { modal = ModalKind::SHAPE; }});
+            props.push_back({"Color", "#", [this]() { modal = ModalKind::COLOR; }});
+            props.push_back({"Material", n->material, [this]() { modal = ModalKind::MATERIAL; }});
+            props.push_back({"Visible", n->visible ? "true" : "false", [this, n]() {
+                n->visible = !n->visible; scene.saveToFile(currentProjectDir + "/scene.json");
             }});
             props.push_back({"Transp", fmtNum(n->transparency), [this, n]() {
                 promptTitle = "Transparency (0..1)"; promptValue = fmtNum(n->transparency);
                 promptTargetKey = "Transparency"; modal = ModalKind::TEXT_PROMPT;
+            }});
+        }
+        if (n->isMeshNode() || n->isCollisionNode()) {
+            props.push_back({"Collidable", n->collidable ? "true" : "false", [this, n]() {
+                n->collidable = !n->collidable; scene.saveToFile(currentProjectDir + "/scene.json");
+            }});
+            props.push_back({"Static", n->staticBody ? "true" : "false", [this, n]() {
+                n->staticBody = !n->staticBody; scene.saveToFile(currentProjectDir + "/scene.json");
+            }});
+            if (!n->staticBody || n->className == "RigidBody3D") {
+                props.push_back({"Mass", fmtNum(n->mass), [this, n]() {
+                    promptTitle = "Mass (kg)"; promptValue = fmtNum(n->mass);
+                    promptTargetKey = "Mass"; modal = ModalKind::TEXT_PROMPT;
+                }});
+                props.push_back({"Gravity", fmtNum(n->gravityScale), [this, n]() {
+                    promptTitle = "Gravity Scale"; promptValue = fmtNum(n->gravityScale);
+                    promptTargetKey = "Gravity"; modal = ModalKind::TEXT_PROMPT;
+                }});
+            }
+        }
+        if (n->className == "Camera3D") {
+            props.push_back({"FOV", fmtNum(n->fov), [this, n]() {
+                promptTitle = "Camera3D FOV"; promptValue = fmtNum(n->fov);
+                promptTargetKey = "FOV"; modal = ModalKind::TEXT_PROMPT;
+            }});
+        } else if (n->className == "DirectionalLight3D" || n->className == "PointLight3D") {
+            props.push_back({"Energy", fmtNum(n->energy), [this, n]() {
+                promptTitle = "Light Energy"; promptValue = fmtNum(n->energy);
+                promptTargetKey = "Energy"; modal = ModalKind::TEXT_PROMPT;
             }});
         } else if (n->isScript()) {
             props.push_back({"Path", n->scriptPath, [this, n]() { openScript(n->scriptPath); }});
             props.push_back({"Disabled", n->disabled ? "true" : "false", [this, n]() {
                 n->disabled = !n->disabled; scene.saveToFile(currentProjectDir + "/scene.json");
             }});
-        } else if (n->className == "Lighting") {
+        } else if (n->className == "Environment" || n->className == "Lighting") {
             props.push_back({"ClockTime", fmtNum(n->clockTime), [this, n]() {
                 promptTitle = "ClockTime (0..24)"; promptValue = fmtNum(n->clockTime);
                 promptTargetKey = "ClockTime"; modal = ModalKind::TEXT_PROMPT;
@@ -1051,16 +1063,16 @@ void StudioApp::buildRightDock() {
         float maxScroll = std::max(0.0f, props.size() * rowH - pArea.h);
         propsScrollY = std::clamp(propsScrollY, 0.0f, maxScroll);
         float y = pArea.y - propsScrollY;
-        float splitX = pArea.x + pArea.w * 0.44f;
+        float splitX = pArea.x + pArea.w * 0.45f;
         for (const auto &p : props) {
             if (y + rowH >= pArea.y && y <= pArea.y + pArea.h) {
                 Rect pr{pArea.x, y, pArea.w, rowH};
                 emitRect(pr.x, pr.y + rowH - 1, pr.w, 1, Col::border());
-                emitText(p.k, pr.x + 4 * density, pr.y + 3 * density, 8.0f * density, Col::muted(), splitX - pr.x - 4);
+                emitText(p.k, pr.x + 4 * density, pr.y + 3 * density, 7.8f * density, Col::muted(), splitX - pr.x - 4);
                 if (p.k == "Color") {
                     emitRect(splitX + 2, pr.y + 3 * density, 24 * density, rowH - 6 * density, Col::argbToUi(n->argbColor));
                 } else {
-                    emitText(p.v, splitX + 2, pr.y + 3 * density, 8.0f * density,
+                    emitText(p.v, splitX + 2, pr.y + 3 * density, 7.8f * density,
                              p.onTap ? Col::text() : Col::muted(), pr.x + pr.w - splitX - 4);
                 }
                 if (p.onTap) hitBoxes.push_back({pr, p.onTap});
@@ -1078,33 +1090,32 @@ void StudioApp::buildBottomDock() {
     if (showOutput && rOutLog.h > 1.0f) {
         float hdrH = rOutLog.y - rBottomDock.y;
         emitRect(rBottomDock.x, rBottomDock.y, rBottomDock.w, hdrH, Col::header());
-        emitText("Output", rBottomDock.x + 6 * density, rBottomDock.y + 2 * density, 8.0f * density, Col::muted());
-        Rect rClr{rBottomDock.x + rBottomDock.w - 40 * density, rBottomDock.y + 1, 36 * density, hdrH - 2};
-        addBtn(rClr, "Clear", Col::btn(), Col::muted(), 7.5f * density, [this]() { outputLines.clear(); });
+        emitText("Output", rBottomDock.x + 6 * density, rBottomDock.y + 1.5f * density, 7.8f * density, Col::muted());
+        Rect rClr{rBottomDock.x + rBottomDock.w - 38 * density, rBottomDock.y + 1, 34 * density, hdrH - 2};
+        addBtn(rClr, "Clear", Col::btn(), Col::muted(), 7.3f * density, [this]() { outputLines.clear(); });
 
         pushBatch(true, rOutLog);
-        float lh = 11.5f * density;
+        float lh = 11.0f * density;
         float maxScroll = std::max(0.0f, outputLines.size() * lh - rOutLog.h);
         outputScrollY = std::clamp(outputScrollY, 0.0f, maxScroll);
         float y = rOutLog.y - outputScrollY;
         for (const auto &ol : outputLines) {
             if (y + lh >= rOutLog.y && y <= rOutLog.y + rOutLog.h) {
-                emitText(ol.text, rOutLog.x + 6 * density, y + 1, 8.0f * density, ol.color, rOutLog.w - 12 * density);
+                emitText(ol.text, rOutLog.x + 6 * density, y + 1, 7.8f * density, ol.color, rOutLog.w - 12 * density);
             }
             y += lh;
         }
     }
 
-    // Compact > Run a command bar
     pushBatch(true, rCmdBar);
     emitRect(rCmdBar.x, rCmdBar.y, rCmdBar.w, rCmdBar.h, Col::bg());
     emitRect(rCmdBar.x, rCmdBar.y, rCmdBar.w, 1, Col::border());
-    float runW = 40.0f * density;
+    float runW = 38.0f * density;
     Rect rInput{rCmdBar.x + 2 * density, rCmdBar.y + 2 * density, rCmdBar.w - runW - 6 * density, rCmdBar.h - 4 * density};
     emitRect(rInput.x, rInput.y, rInput.w, rInput.h, commandFocused ? Col::header() : Col::panel());
     if (commandFocused) emitRectOutline(rInput.x, rInput.y, rInput.w, rInput.h, 1.0f, Col::accent());
     std::string disp = commandText.empty() ? "> Run a command" : ("> " + commandText + (commandFocused ? "_" : ""));
-    emitText(disp, rInput.x + 4 * density, rInput.y + 4 * density, 8.5f * density,
+    emitText(disp, rInput.x + 4 * density, rInput.y + 3 * density, 8.2f * density,
              commandText.empty() ? Col::muted() : Col::text(), rInput.w - 8 * density);
     hitBoxes.push_back({rInput, [this]() {
         commandFocused = true;
@@ -1112,7 +1123,7 @@ void StudioApp::buildBottomDock() {
         if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(true);
     }});
     Rect rRun{rCmdBar.x + rCmdBar.w - runW - 2 * density, rCmdBar.y + 2 * density, runW, rCmdBar.h - 4 * density};
-    addBtn(rRun, "Run", Col::btnAct(), Col::text(), 8.5f * density, [this]() {
+    addBtn(rRun, "Run", Col::btnAct(), Col::text(), 8.2f * density, [this]() {
         std::string cmd = commandText;
         commandText.clear();
         execCommand(cmd);
@@ -1120,7 +1131,7 @@ void StudioApp::buildBottomDock() {
 }
 
 void StudioApp::buildCodeEditor(const Rect &area) {
-    float barH = 26.0f * density;
+    float barH = 24.0f * density;
     Rect codeRect{area.x, area.y, area.w, std::max(40.0f, area.h - barH)};
     Rect barRect{area.x, area.y + codeRect.h, area.w, barH};
 
@@ -1137,7 +1148,7 @@ void StudioApp::buildCodeEditor(const Rect &area) {
 
     int curLine = lc_editor_cursor_line();
     int curCol  = lc_editor_cursor_col();
-    float gutterW = prefLineNumbers ? 28.0f * density : 4.0f * density;
+    float gutterW = prefLineNumbers ? 26.0f * density : 4.0f * density;
 
     int firstLine = std::max(0, (int)(editorScrollY / lh));
     int lastLine  = std::min(totalLines - 1, (int)((editorScrollY + codeRect.h) / lh) + 1);
@@ -1157,18 +1168,17 @@ void StudioApp::buildCodeEditor(const Rect &area) {
         std::string lineStr(buf, bytes);
         int ntok = lc_editor_tokenize_line(ln, toks, 256);
 
-        // Render line char-by-char using token kind color map (ASCII/UTF-8 safe via char index)
         std::vector<uint32_t> colAt(lineStr.size() + 1, edFg);
         for (int ti = 0; ti < ntok; ++ti) {
             int c0 = toks[ti * 3 + 0], len = toks[ti * 3 + 1], k = toks[ti * 3 + 2];
             uint32_t tc = edFg;
-            if (k == 1) tc = StudioFont::rgba(198, 120, 221);      // keyword
-            else if (k == 2) tc = StudioFont::rgba(229, 192, 123); // type
-            else if (k == 3) tc = StudioFont::rgba(97, 175, 239);  // builtin
-            else if (k == 4) tc = StudioFont::rgba(152, 195, 121); // string
-            else if (k == 5) tc = StudioFont::rgba(209, 154, 102); // number
-            else if (k == 6) tc = StudioFont::rgba(108, 118, 134); // comment
-            else if (k == 7) tc = StudioFont::rgba(86, 182, 194);  // operator
+            if (k == 1) tc = StudioFont::rgba(198, 120, 221);
+            else if (k == 2) tc = StudioFont::rgba(229, 192, 123);
+            else if (k == 3) tc = StudioFont::rgba(97, 175, 239);
+            else if (k == 4) tc = StudioFont::rgba(152, 195, 121);
+            else if (k == 5) tc = StudioFont::rgba(209, 154, 102);
+            else if (k == 6) tc = StudioFont::rgba(108, 118, 134);
+            else if (k == 7) tc = StudioFont::rgba(86, 182, 194);
             for (int c = c0; c < c0 + len && c < (int)colAt.size(); ++c) colAt[(size_t)c] = tc;
         }
         float px = codeRect.x + gutterW + 3 * density;
@@ -1202,7 +1212,6 @@ void StudioApp::buildCodeEditor(const Rect &area) {
         }
     }
 
-    // Bottom quick-keys bar
     pushBatch(true, barRect);
     emitRect(barRect.x, barRect.y, barRect.w, barRect.h, Col::header());
     const char *keys[] = {"TAB", "( )", "\" \"", "=", "Undo", "Check", "Save"};
@@ -1210,7 +1219,7 @@ void StudioApp::buildCodeEditor(const Rect &area) {
     float kw = (barRect.w - 6 * density) / 7.0f;
     for (int i = 0; i < 7; ++i) {
         Rect kr{kx + i * kw, barRect.y + 2, kw - 2, barRect.h - 4};
-        addBtn(kr, keys[i], Col::btn(), Col::text(), 8.0f * density, [this, i]() {
+        addBtn(kr, keys[i], Col::btn(), Col::text(), 7.8f * density, [this, i]() {
             if (i == 0) lc_editor_insert(std::string(prefTabSpaces, ' ').c_str());
             else if (i == 1) lc_editor_insert("()");
             else if (i == 2) lc_editor_insert("\"\"");
@@ -1233,78 +1242,49 @@ void StudioApp::buildModal() {
     pushBatch(false, {});
     emitRect(0, 0, width, height, StudioFont::rgba(0, 0, 0, 165));
 
-    float mw = std::min(width - 24 * density, 340.0f * density);
-    float mh = std::min(height - 40 * density, 340.0f * density);
-    if (modal == ModalKind::TEXT_PROMPT) mh = 138.0f * density;
+    float mw = std::min(width - 20 * density, 350.0f * density);
+    float mh = std::min(height - 30 * density, 350.0f * density);
+    if (modal == ModalKind::TEXT_PROMPT) mh = 132.0f * density;
     Rect box{(width - mw) * 0.5f, (height - mh) * 0.5f, mw, mh};
     emitRect(box.x, box.y, box.w, box.h, Col::panel());
     emitRectOutline(box.x, box.y, box.w, box.h, 1.5f, Col::border());
-    // Catch taps inside modal background so they don't pass behind
     hitBoxes.push_back({box, []() {}});
 
-    float fs = 9.5f * density;
-    float pad = 10.0f * density;
+    float fs = 9.0f * density;
+    float pad = 9.0f * density;
     float y = box.y + pad;
 
     auto closeBtn = [&](const std::string &title) {
-        emitText(title, box.x + pad, y, 11.0f * density, Col::text());
-        Rect rc{box.x + box.w - 28 * density, y - 2, 20 * density, 20 * density};
+        emitText(title, box.x + pad, y, 10.5f * density, Col::text());
+        Rect rc{box.x + box.w - 26 * density, y - 2, 19 * density, 19 * density};
         addBtn(rc, "X", Col::btn(), Col::muted(), fs, [this]() {
             modal = ModalKind::NONE;
             if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
         });
-        y += 26.0f * density;
+        y += 24.0f * density;
     };
 
-    if (modal == ModalKind::PROJECTS) {
-        closeBtn("Projects");
-        Rect b3d{box.x + pad, y, (mw - pad * 3) * 0.5f, 24 * density};
-        Rect b2d{b3d.x + b3d.w + pad, y, b3d.w, 24 * density};
-        addBtn(b3d, "+ 3D World", Col::btnAct(), Col::text(), fs, [this]() {
-            promptTitle = "New 3D World Name"; promptValue = "NewPlace"; promptTargetKey = "New3D";
-            modal = ModalKind::TEXT_PROMPT;
-        });
-        addBtn(b2d, "+ 2D Canvas", Col::btn(), Col::text(), fs, [this]() {
-            promptTitle = "New 2D Project Name"; promptValue = "Game2D"; promptTargetKey = "New2D";
-            modal = ModalKind::TEXT_PROMPT;
-        });
-        y += 30 * density;
-
-        auto list = callbacks.listProjects ? callbacks.listProjects() : std::vector<std::pair<std::string, bool>>{};
-        for (const auto &pr : list) {
-            if (y + 26 * density > box.y + box.h - 6 * density) break;
-            std::string pname = pr.first;
-            bool is3d = pr.second;
-            bool cur = (pname == currentProjectName);
-            Rect rOpen{box.x + pad, y, mw - pad * 2 - 48 * density, 22 * density};
-            addBtn(rOpen, pname + (is3d ? " [3D]" : " [2D]"), cur ? Col::selRow() : Col::btn(), Col::text(), fs, [this, pname, is3d]() {
-                modal = ModalKind::NONE;
-                openProject(pname, is3d);
-            });
-            Rect rDel{rOpen.x + rOpen.w + 4 * density, y, 44 * density, 22 * density};
-            addBtn(rDel, "Del", Col::btn(), Col::red(), 8.5f * density, [this, pname]() {
-                if (callbacks.deleteProject && pname != currentProjectName) {
-                    callbacks.deleteProject(pname);
-                }
-            });
-            y += 26 * density;
-        }
-    } else if (modal == ModalKind::INSERT) {
-        closeBtn("Insert Object");
-        const char *cls[] = {"Part", "WedgePart", "Sphere", "Cylinder", "SpawnLocation", "Script", "TextLabel", "Folder"};
+    if (modal == ModalKind::INSERT) {
+        closeBtn("Add Node (3D / Physics / Logic)");
+        const char *cls[] = {
+            "Box", "Wedge", "Sphere", "Cylinder",
+            "Plane", "StaticBody3D", "RigidBody3D", "CollisionBox",
+            "CollisionSphere", "Area3D", "Camera3D", "DirectionalLight3D",
+            "PointLight3D", "Node3D", "Script", "Folder"
+        };
         float cw = (mw - pad * 3) * 0.5f;
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 16; ++i) {
             float x = box.x + pad + (i % 2) * (cw + pad);
-            float ry = y + (i / 2) * 28 * density;
+            float ry = y + (i / 2) * 26 * density;
+            if (ry + 22 * density > box.y + box.h - 4) break;
             std::string cn = cls[i];
-            addBtn({x, ry, cw, 24 * density}, cn, Col::btn(), Col::text(), fs, [this, cn]() {
+            addBtn({x, ry, cw, 22 * density}, cn, Col::btn(), Col::text(), 8.3f * density, [this, cn]() {
                 SceneNode *parent = insertParentId.empty() ? nullptr : scene.findById(insertParentId);
                 if (!parent) {
-                    if (cn == "Script") parent = scene.findService("ServerScriptService");
-                    else if (cn == "TextLabel") parent = scene.findService("StarterGui");
-                    else parent = scene.findService("Workspace");
+                    if (cn == "Script") parent = scene.findService("Scripts");
+                    else parent = scene.findService("World3D");
                 }
-                if (auto *created = scene.createPart(parent, cn, cn + std::to_string(scene.nextId))) {
+                if (auto *created = scene.createNode(parent, cn, cn + std::to_string(scene.nextId))) {
                     selectedId = created->id;
                     if (cn == "Script") {
                         created->scriptPath = "scripts/" + created->name + ".lua";
@@ -1316,7 +1296,7 @@ void StudioApp::buildModal() {
             });
         }
     } else if (modal == ModalKind::COLOR) {
-        closeBtn("Part Color");
+        closeBtn("Object Color");
         static const uint32_t pal[12] = {
             0xFFA3A2A5, 0xFFDC4C46, 0xFF3B82F6, 0xFF22C55E,
             0xFFFACC15, 0xFFF97316, 0xFFA855F7, 0xFFEC4899,
@@ -1355,11 +1335,11 @@ void StudioApp::buildModal() {
             });
         }
     } else if (modal == ModalKind::SHAPE) {
-        closeBtn("Part Shape");
-        const char *sh[] = {"Block", "Wedge", "Sphere", "Cylinder"};
-        for (int i = 0; i < 4; ++i) {
+        closeBtn("Mesh Shape");
+        const char *sh[] = {"Box", "Wedge", "Sphere", "Cylinder", "Plane"};
+        for (int i = 0; i < 5; ++i) {
             std::string sname = sh[i];
-            addBtn({box.x + pad, y + i * 30 * density, mw - pad * 2, 25 * density}, sname, Col::btn(), Col::text(), fs, [this, sname]() {
+            addBtn({box.x + pad, y + i * 28 * density, mw - pad * 2, 23 * density}, sname, Col::btn(), Col::text(), fs, [this, sname]() {
                 if (auto *n = selectedNode()) {
                     n->setShape(sname);
                     scene.saveToFile(currentProjectDir + "/scene.json");
@@ -1417,15 +1397,15 @@ void StudioApp::buildModal() {
                });
     } else if (modal == ModalKind::TEXT_PROMPT) {
         closeBtn(promptTitle);
-        Rect rIn{box.x + pad, y, mw - pad * 2, 26 * density};
+        Rect rIn{box.x + pad, y, mw - pad * 2, 25 * density};
         emitRect(rIn.x, rIn.y, rIn.w, rIn.h, Col::bg());
         emitRectOutline(rIn.x, rIn.y, rIn.w, rIn.h, 1.0f, Col::accent());
         emitText(promptValue + "_", rIn.x + 6 * density, rIn.y + 5 * density, fs, Col::text(), rIn.w - 12 * density);
         hitBoxes.push_back({rIn, [this]() {
             if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(true);
         }});
-        y += 34 * density;
-        Rect rOk{box.x + pad, y, mw - pad * 2, 26 * density};
+        y += 32 * density;
+        Rect rOk{box.x + pad, y, mw - pad * 2, 25 * density};
         addBtn(rOk, "Apply", Col::btnAct(), Col::text(), fs, [this]() {
             if (promptTargetKey == "New3D" && callbacks.createProject && !promptValue.empty()) {
                 callbacks.createProject("3d", promptValue);
@@ -1435,6 +1415,13 @@ void StudioApp::buildModal() {
                 callbacks.createProject("2d", promptValue);
                 modal = ModalKind::NONE;
                 openProject(promptValue, false);
+            } else if (promptTargetKey == "RenameProj" && callbacks.renameProject && !promptValue.empty()) {
+                callbacks.renameProject(promptExtra, promptValue);
+                if (currentProjectName == promptExtra) {
+                    currentProjectName = promptValue;
+                    currentProjectDir = projectsRoot + "/" + promptValue;
+                }
+                modal = ModalKind::NONE;
             } else if (auto *n = selectedNode()) {
                 float a, b, c;
                 if (promptTargetKey == "Rename" && !promptValue.empty()) n->name = promptValue;
@@ -1443,6 +1430,10 @@ void StudioApp::buildModal() {
                     n->sizeX = std::max(0.2f, a); n->sizeY = std::max(0.2f, b); n->sizeZ = std::max(0.2f, c);
                 } else if (promptTargetKey == "Rotation" && parseVec3(promptValue, a, b, c)) { n->rotX = a; n->rotY = b; n->rotZ = c; }
                 else if (promptTargetKey == "Transparency") n->transparency = std::clamp((float)std::atof(promptValue.c_str()), 0.0f, 0.95f);
+                else if (promptTargetKey == "Mass") n->mass = std::max(0.01f, (float)std::atof(promptValue.c_str()));
+                else if (promptTargetKey == "Gravity") n->gravityScale = (float)std::atof(promptValue.c_str());
+                else if (promptTargetKey == "FOV") n->fov = std::clamp((float)std::atof(promptValue.c_str()), 20.0f, 120.0f);
+                else if (promptTargetKey == "Energy") n->energy = std::max(0.0f, (float)std::atof(promptValue.c_str()));
                 else if (promptTargetKey == "ClockTime") n->clockTime = std::clamp((float)std::atof(promptValue.c_str()), 0.0f, 24.0f);
                 else if (promptTargetKey == "Text") n->text = promptValue;
                 scene.saveToFile(currentProjectDir + "/scene.json");
@@ -1473,11 +1464,11 @@ std::string StudioApp::raycastPart(float sx, float sy) {
     float nx = (sx - (rViewport.x + rViewport.w * 0.5f)) / focalLen;
     float ny = ((rViewport.y + rViewport.h * 0.5f) - sy) / focalLen;
     Vec3f dir = norm3(fwd + right * nx + up * ny);
-    std::vector<const SceneNode *> parts;
-    scene.collect3DParts(parts);
+    std::vector<const SceneNode *> nodes;
+    scene.collect3DNodes(nodes);
     float bestT = 1e9f;
     std::string bestId;
-    for (const auto *p : parts) {
+    for (const auto *p : nodes) {
         if (p->locked) continue;
         float hx = p->sizeX * 0.5f, hy = p->sizeY * 0.5f, hz = p->sizeZ * 0.5f;
         float tmin = -1e9f, tmax = 1e9f;
@@ -1507,7 +1498,7 @@ std::string StudioApp::raycastPart(float sx, float sy) {
 
 void StudioApp::applyGizmoDrag(float dx, float dy) {
     auto *n = selectedNode();
-    if (!n || !n->is3DPart() || dragAxis < 0) return;
+    if (!n || !n->is3DNode() || dragAxis < 0) return;
     float tipX = 0, tipY = 0, baseX = 0, baseY = 0;
     for (const auto &gt : gizmoTips) {
         if (gt.axis == dragAxis) { tipX = gt.sx; tipY = gt.sy; baseX = gt.bx; baseY = gt.by; break; }
@@ -1532,51 +1523,16 @@ void StudioApp::applyGizmoDrag(float dx, float dy) {
 }
 
 void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const int *ids, const float *xs, const float *ys) {
+    (void)pointerIndex;
     if (pointerCount <= 0) return;
     float x0 = xs[0], y0 = ys[0];
-    // Android MotionEvent constants: 0=DOWN, 1=UP, 2=MOVE, 3=CANCEL, 5=POINTER_DOWN, 6=POINTER_UP
     int baseAct = action & 0xFF;
 
-    // 1. Play mode multi-touch joystick + jump
-    if (playMode && modal == ModalKind::NONE && activeScript.empty() && currentIs3D) {
-        if (baseAct == 0 || baseAct == 5) {
-            int idx = (baseAct == 5) ? pointerIndex : 0;
-            float px = xs[idx], py = ys[idx];
-            if (std::hypot(px - jumpCx, py - jumpCy) <= jumpR * 1.4f) {
-                if (playerGrounded) { playerVy = 17.5f; playerGrounded = false; }
-                return;
-            }
-            if (std::hypot(px - joyCx, py - joyCy) <= joyR * 1.6f && joyPointerId < 0) {
-                joyPointerId = ids[idx];
-                joyDx = std::clamp((px - joyCx) / joyR, -1.0f, 1.0f);
-                joyDy = std::clamp((py - joyCy) / joyR, -1.0f, 1.0f);
-                return;
-            }
-        } else if (baseAct == 2) {
-            for (int i = 0; i < pointerCount; ++i) {
-                if (ids[i] == joyPointerId) {
-                    joyDx = std::clamp((xs[i] - joyCx) / joyR, -1.0f, 1.0f);
-                    joyDy = std::clamp((ys[i] - joyCy) / joyR, -1.0f, 1.0f);
-                } else if (rViewport.contains(xs[i], ys[i])) {
-                    camYaw -= (xs[i] - lastX) * 0.006f;
-                    camPitch = std::clamp(camPitch + (ys[i] - lastY) * 0.005f, 0.05f, 1.25f);
-                    lastX = xs[i]; lastY = ys[i];
-                }
-            }
-            return;
-        } else if (baseAct == 1 || baseAct == 6 || baseAct == 3) {
-            int idx = (baseAct == 6) ? pointerIndex : 0;
-            if (ids[idx] == joyPointerId || baseAct == 1 || baseAct == 3) {
-                joyPointerId = -1; joyDx = joyDy = 0;
-            }
-        }
-    }
-
-    // 2. 2D Lua project runtime touch forwarding
-    if (!currentIs3D && runningLua && g_luacProj && modal == ModalKind::NONE && activeScript.empty() && rViewport.contains(x0, y0)) {
+    // Forward viewport touches to user Lua scripts during Play (2D or 3D)
+    if (runningLua && g_luacProj && !showProjectsTab && modal == ModalKind::NONE && activeScript.empty() && rViewport.contains(x0, y0)) {
         int down = (baseAct == 0 || baseAct == 2 || baseAct == 5) ? 1 : 0;
         luac_project_touch(g_luacProj, ids[0], x0 - rViewport.x, y0 - rViewport.y, down);
-        if (baseAct == 2) return;
+        if (!currentIs3D && baseAct == 2) return;
     }
 
     if (baseAct == 0) {
@@ -1588,6 +1544,7 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
 
         if (modal == ModalKind::NONE) {
             if (rRibbon.contains(x0, y0)) touchMode = 5;
+            else if (showProjectsTab && rViewport.contains(x0, y0)) touchMode = 10;
             else if (showExplorer && rExplorer.contains(x0, y0)) touchMode = 6;
             else if (showProperties && rProperties.contains(x0, y0)) touchMode = 7;
             else if (showOutput && rOutLog.contains(x0, y0)) touchMode = 9;
@@ -1604,7 +1561,7 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
         return;
     }
 
-    if (baseAct == 5 && pointerCount >= 2 && rViewport.contains(x0, y0) && currentIs3D && activeScript.empty()) {
+    if (baseAct == 5 && pointerCount >= 2 && rViewport.contains(x0, y0) && currentIs3D && activeScript.empty() && !showProjectsTab) {
         touchMode = 2;
         lastPinch = std::hypot(xs[1] - xs[0], ys[1] - ys[0]);
         lastX = (xs[0] + xs[1]) * 0.5f;
@@ -1616,21 +1573,16 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
     if (baseAct == 2) {
         if (std::hypot(x0 - downX, y0 - downY) > 6.0f * density) moved = true;
         float dx = x0 - lastX, dy = y0 - lastY;
-        if (touchMode == 5) {
-            ribbonScrollX = std::max(0.0f, ribbonScrollX - dx);
-        } else if (touchMode == 6) {
-            explorerScrollY = std::max(0.0f, explorerScrollY - dy);
-        } else if (touchMode == 7) {
-            propsScrollY = std::max(0.0f, propsScrollY - dy);
-        } else if (touchMode == 8) {
-            editorScrollY = std::max(0.0f, editorScrollY - dy);
-        } else if (touchMode == 9) {
-            outputScrollY = std::max(0.0f, outputScrollY - dy);
-        } else if (touchMode == 3) {
-            applyGizmoDrag(dx, dy);
-        } else if (touchMode == 2 && pointerCount >= 2) {
+        if (touchMode == 5) ribbonScrollX = std::max(0.0f, ribbonScrollX - dx);
+        else if (touchMode == 10) projectsScrollY = std::max(0.0f, projectsScrollY - dy);
+        else if (touchMode == 6) explorerScrollY = std::max(0.0f, explorerScrollY - dy);
+        else if (touchMode == 7) propsScrollY = std::max(0.0f, propsScrollY - dy);
+        else if (touchMode == 8) editorScrollY = std::max(0.0f, editorScrollY - dy);
+        else if (touchMode == 9) outputScrollY = std::max(0.0f, outputScrollY - dy);
+        else if (touchMode == 3) applyGizmoDrag(dx, dy);
+        else if (touchMode == 2 && pointerCount >= 2) {
             float pinch = std::hypot(xs[1] - xs[0], ys[1] - ys[0]);
-            if (lastPinch > 0) camDist = std::clamp(camDist * (lastPinch / std::max(20.0f, pinch)), 5.0f, 160.0f);
+            if (lastPinch > 0) camDist = std::clamp(camDist * (lastPinch / std::max(20.0f, pinch)), 4.0f, 160.0f);
             lastPinch = pinch;
             float cx = (xs[0] + xs[1]) * 0.5f, cy = (ys[0] + ys[1]) * 0.5f;
             float pdx = cx - lastX, pdy = cy - lastY;
@@ -1650,7 +1602,6 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
     if (baseAct == 1 || baseAct == 3) {
         if (touchMode == 3 && moved) scene.saveToFile(currentProjectDir + "/scene.json");
         if (!moved) {
-            // Check hitboxes in reverse order (topmost drawn wins)
             bool hit = false;
             for (int i = (int)hitBoxes.size() - 1; i >= 0; --i) {
                 if (hitBoxes[(size_t)i].r.contains(x0, y0)) {
@@ -1661,17 +1612,17 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
             }
             if (!hit && modal == ModalKind::NONE) {
                 if (!rCmdBar.contains(x0, y0)) commandFocused = false;
-                if (!activeScript.empty() && rViewport.contains(x0, y0)) {
+                if (!showProjectsTab && !activeScript.empty() && rViewport.contains(x0, y0)) {
                     editorFocused = true;
                     float fs = std::max(9.0f, (float)prefFontSize * 0.72f) * density;
                     float lh = fs * 1.28f;
-                    float gutterW = prefLineNumbers ? 28.0f * density : 4.0f * density;
+                    float gutterW = prefLineNumbers ? 26.0f * density : 4.0f * density;
                     int tapLine = std::max(0, (int)((y0 - rViewport.y + editorScrollY) / lh));
                     float adv = std::max(4.0f, font.measureWidth("M", fs));
                     int tapCol = std::max(0, (int)((x0 - rViewport.x - gutterW) / adv));
                     lc_editor_set_cursor_line_col(tapLine, tapCol);
                     if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(true);
-                } else if (currentIs3D && activeScript.empty() && rViewport.contains(x0, y0) && !playMode) {
+                } else if (!showProjectsTab && currentIs3D && activeScript.empty() && rViewport.contains(x0, y0) && !runningLua) {
                     editorFocused = false;
                     if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
                     std::string hitId = raycastPart(x0, y0);
@@ -1685,26 +1636,19 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
 
 void StudioApp::onTextInput(const std::string &utf8) {
     if (utf8.empty()) return;
-    if (modal == ModalKind::TEXT_PROMPT) {
-        promptValue += utf8;
-    } else if (commandFocused) {
-        commandText += utf8;
-    } else if (!activeScript.empty()) {
-        lc_editor_insert(utf8.c_str());
-    }
+    if (modal == ModalKind::TEXT_PROMPT) promptValue += utf8;
+    else if (commandFocused) commandText += utf8;
+    else if (!activeScript.empty() && !showProjectsTab) lc_editor_insert(utf8.c_str());
 }
 
 void StudioApp::onKeyCode(int keyCode) {
-    // Android KeyEvent codes: DEL=67, ENTER=66, TAB=61, DPAD_UP=19, DOWN=20, LEFT=21, RIGHT=22
     auto popUtf8 = [](std::string &s) {
         while (!s.empty() && ((uint8_t)s.back() & 0xC0) == 0x80) s.pop_back();
         if (!s.empty()) s.pop_back();
     };
     if (modal == ModalKind::TEXT_PROMPT) {
         if (keyCode == 67) popUtf8(promptValue);
-        else if (keyCode == 66) {
-            if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
-        }
+        else if (keyCode == 66 && callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
         return;
     }
     if (commandFocused) {
@@ -1716,7 +1660,7 @@ void StudioApp::onKeyCode(int keyCode) {
         }
         return;
     }
-    if (!activeScript.empty()) {
+    if (!activeScript.empty() && !showProjectsTab) {
         if (keyCode == 67) lc_editor_backspace();
         else if (keyCode == 66) lc_editor_newline();
         else if (keyCode == 61) lc_editor_insert(std::string(prefTabSpaces, ' ').c_str());

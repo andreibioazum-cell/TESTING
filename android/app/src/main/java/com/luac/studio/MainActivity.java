@@ -65,7 +65,7 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
             if (store.is3DProject(f)) { initial = f; break; }
         }
         if (initial == null && !list.isEmpty()) initial = list.get(0);
-        String initName = initial != null ? initial.getName() : "FPS Arena";
+        String initName = initial != null ? initial.getName() : "3D World";
         boolean is3D = initial != null && store.is3DProject(initial);
 
         float density = getResources().getDisplayMetrics().density;
@@ -76,6 +76,7 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     }
 
     private void ensureDefaultProjects() {
+        store.upgradeLegacyStudioSdk();
         store.upgradeLegacySnakeIfUntouched();
         List<File> list = store.projects();
         boolean has3D = false, hasSnake = false;
@@ -84,7 +85,7 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
             if (f.getName().contains("Змейка")) hasSnake = true;
         }
         try {
-            if (!has3D) store.createFpsArenaProject("FPS Arena");
+            if (!has3D) store.create3DProject("3D World");
             if (!hasSnake) store.createSnakeProject("Змейка");
         } catch (Exception ignored) {
         }
@@ -169,8 +170,17 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     @SuppressWarnings("unused")
     public void nativeCbCreateProject(String kind, String name) {
         try {
-            if ("3d".equals(kind)) store.createFpsArenaProject(name);
+            if ("3d".equals(kind)) store.create3DProject(name);
             else store.createProject(name);
+        } catch (Exception ignored) {
+        }
+    }
+
+    @SuppressWarnings("unused")
+    public void nativeCbRenameProject(String oldName, String newName) {
+        try {
+            File target = new File(store.root, oldName);
+            if (target.isDirectory()) store.rename(target, newName);
         } catch (Exception ignored) {
         }
     }
@@ -217,12 +227,16 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
 
         @Override
         public void surfaceCreated(SurfaceHolder holder) {
-            surfaceReady = nativeVulkanCreate(holder.getSurface());
+            surfaceReady = nativeVulkanCreate(holder.getSurface(), getWidth(), getHeight());
         }
 
         @Override
         public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-            surfaceReady = nativeVulkanCreate(holder.getSurface());
+            if (surfaceReady) {
+                nativeVulkanResize(width, height);
+            } else {
+                surfaceReady = nativeVulkanCreate(holder.getSurface(), width, height);
+            }
         }
 
         @Override
@@ -323,7 +337,8 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     private static native void nativeStudioSetCustomFont(String path);
     private static native void nativeStudioDestroy();
 
-    private static native boolean nativeVulkanCreate(Surface surface);
+    private static native boolean nativeVulkanCreate(Surface surface, int width, int height);
+    private static native void nativeVulkanResize(int width, int height);
     private static native void nativeVulkanDraw();
     private static native void nativeVulkanDestroy();
 }

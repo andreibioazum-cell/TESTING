@@ -55,6 +55,7 @@ struct Renderer {
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     uint32_t family = 0, apiVersion = VK_API_VERSION_1_0, frameIndex = 0;
+    uint32_t requestedW = 0, requestedH = 0;
     VkQueue queue = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
@@ -247,7 +248,15 @@ void createSwapchain(VkSwapchainKHR old = VK_NULL_HANDLE) {
     VkSurfaceFormatKHR sel = fmts[0];
     for (auto &f : fmts) if (f.format == VK_FORMAT_R8G8B8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_UNORM) { sel = f; break; }
     r.format = sel.format;
-    r.extent = caps.currentExtent.width == UINT32_MAX ? caps.minImageExtent : caps.currentExtent;
+    if (r.requestedW > 0 && r.requestedH > 0) {
+        uint32_t w = std::clamp(r.requestedW, caps.minImageExtent.width, caps.maxImageExtent.width);
+        uint32_t h = std::clamp(r.requestedH, caps.minImageExtent.height, caps.maxImageExtent.height);
+        r.extent = {w, h};
+    } else if (caps.currentExtent.width != UINT32_MAX) {
+        r.extent = caps.currentExtent;
+    } else {
+        r.extent = caps.minImageExtent;
+    }
     uint32_t imgCount = caps.minImageCount + 1;
     if (caps.maxImageCount && imgCount > caps.maxImageCount) imgCount = caps.maxImageCount;
 
@@ -262,7 +271,10 @@ void createSwapchain(VkSwapchainKHR old = VK_NULL_HANDLE) {
     sci.imageExtent = r.extent; sci.imageArrayLayers = 1;
     sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    sci.preTransform = caps.currentTransform; sci.compositeAlpha = alpha;
+    sci.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+        ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+        : caps.currentTransform;
+    sci.compositeAlpha = alpha;
     sci.presentMode = VK_PRESENT_MODE_FIFO_KHR; sci.clipped = VK_TRUE; sci.oldSwapchain = old;
 
     VkSwapchainKHR next = VK_NULL_HANDLE;
@@ -659,7 +671,7 @@ void drawStudio(StudioApp *app, float density) {
                 vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vb3d.buf, &zero);
                 Push3D p3{};
                 std::memcpy(p3.mvp, app->viewProj, sizeof(p3.mvp));
-                p3.sunDir[0] = 0.55f; p3.sunDir[1] = 0.85f; p3.sunDir[2] = 0.40f; p3.sunDir[3] = 0.0f;
+                std::memcpy(p3.sunDir, app->sunDir, sizeof(p3.sunDir));
                 p3.skyTint[0] = 1.0f; p3.skyTint[1] = 1.0f; p3.skyTint[2] = 1.0f; p3.skyTint[3] = 0.42f;
 
                 if (!app->frame3DMesh.empty()) {
@@ -722,9 +734,11 @@ void drawStudio(StudioApp *app, float density) {
 }
 } // namespace
 
-bool androidVulkanCreate(JNIEnv *env, jobject surface) {
+bool androidVulkanCreate(JNIEnv *env, jobject surface, int width, int height) {
     try {
         destroy();
+        r.requestedW = width > 0 ? (uint32_t)width : 0;
+        r.requestedH = height > 0 ? (uint32_t)height : 0;
         ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
         if (!window) return false;
         initialize(window);
@@ -736,6 +750,19 @@ bool androidVulkanCreate(JNIEnv *env, jobject surface) {
         LOGE("Initialization failed: %s", error.what());
         destroy();
         return false;
+    }
+}
+
+void androidVulkanResize(int width, int height) {
+    if (!r.device || !r.swapchain) return;
+    if (width > 0 && height > 0) {
+        r.requestedW = (uint32_t)width;
+        r.requestedH = (uint32_t)height;
+    }
+    try {
+        recreateSwapchain();
+    } catch (const std::exception &error) {
+        LOGE("Resize swapchain failed: %s", error.what());
     }
 }
 

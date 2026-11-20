@@ -9,7 +9,7 @@
 struct Rect {
     float x = 0, y = 0, w = 0, h = 0;
     bool contains(float px, float py) const {
-        return px >= x && py >= y && px <= x + w && py <= y + h;
+        return px >= x && px >= 0 && px <= x + w && py >= y && py <= y + h;
     }
 };
 
@@ -23,17 +23,17 @@ struct StudioCallbacks {
     std::function<void(bool)> setKeyboardVisible;
     std::function<void()> openFontPicker;
     std::function<void(const std::string &kind, const std::string &name)> createProject;
-    std::function<void(const std::string &oldDir, const std::string &newName)> renameProject;
-    std::function<void(const std::string &dir)> deleteProject;
-    std::function<std::vector<std::pair<std::string, bool>>()> listProjects; // (name, is3D)
+    std::function<void(const std::string &oldName, const std::string &newName)> renameProject;
+    std::function<void(const std::string &name)> deleteProject;
+    std::function<std::vector<std::pair<std::string, bool>>()> listProjects;
     std::function<void(int family, int size, int theme, int tabSpaces, bool lineNums, const std::string &customFont)> savePrefs;
 };
 
 class StudioApp {
 public:
-    enum class RibbonTab { HOME, MODEL, AVATAR, TEST, VIEW, PLUGINS };
+    enum class RibbonTab { PROJECTS, HOME, CREATE, VIEW, SCRIPTS };
     enum class ToolMode { SELECT, MOVE, SCALE, ROTATE };
-    enum class ModalKind { NONE, PROJECTS, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT };
+    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT };
 
     float width = 1080.0f;
     float height = 2200.0f;
@@ -49,30 +49,26 @@ public:
     ToolMode toolMode = ToolMode::SELECT;
     RibbonTab activeRibbon = RibbonTab::HOME;
 
+    bool showProjectsTab = false;
     bool showExplorer = true;
     bool showProperties = true;
     bool showOutput = true;
     bool showGrid = true;
-    bool collisions = false;
+    bool showColliders = true;
+    bool useCamera3DInPlay = false;
 
-    // Camera state
-    float camTargetX = 0, camTargetY = 2.5f, camTargetZ = -3.0f;
-    float camYaw = 0.36f, camPitch = 0.34f, camDist = 36.0f;
+    // Editor / 3D camera state
+    float camTargetX = 0, camTargetY = 1.5f, camTargetZ = -3.0f;
+    float camYaw = 0.36f, camPitch = 0.34f, camDist = 28.0f;
 
-    // Play / Lua runtime state
+    // Lua runtime state (zero hardcoded avatar/joystick/jump — pure 3D + user Lua scripts)
     bool runningLua = false;
-    bool playMode = false;
     std::string prePlaySceneJson;
-    float playerX = 0, playerY = 3.5f, playerZ = 10.0f;
-    float playerVy = 0, playerYaw = 0, walkCycle = 0;
-    bool playerGrounded = false;
-    float joyDx = 0, joyDy = 0;
-    int joyPointerId = -1;
     std::string last2DFrameJson;
 
     // Script tabs & C++ code editor
-    std::vector<std::string> openScripts; // relative paths
-    std::string activeScript;             // empty => Viewport tab
+    std::vector<std::string> openScripts;
+    std::string activeScript;
     float editorScrollY = 0;
     bool editorFocused = false;
 
@@ -95,32 +91,30 @@ public:
     std::string insertParentId;
     std::string promptTitle;
     std::string promptValue;
-    std::string promptTargetKey; // "Rename", "Position", "Size", "Rotation", "Transparency", "ClockTime", "Text", "New3D", "New2D", "RenameProj"
+    std::string promptTargetKey;
     std::string promptExtra;
-    int modalScrollY = 0;
 
     // Scroll offsets
     float ribbonScrollX = 0;
     float explorerScrollY = 0;
     float propsScrollY = 0;
     float outputScrollY = 0;
+    float projectsScrollY = 0;
 
     StudioFont font;
     StudioCallbacks callbacks;
 
-    // Computed layout rects updated every frame
     Rect rTopTabs, rRibbon, rDocTabs, rViewport, rRightDock, rExplorer, rProperties, rBottomDock, rOutLog, rCmdBar;
 
-    // 3D frame outputs for Vulkan 3D pass
     std::vector<MeshVertex> frame3DMesh;
     std::vector<MeshVertex> frame3DLines;
-    std::vector<MeshVertex> frame3DOverlayLines; // gizmos drawn without depth test
+    std::vector<MeshVertex> frame3DOverlayLines;
     float viewProj[16]{};
     float skyTop[4]{0.12f, 0.43f, 0.77f, 1.0f};
     float skyBot[4]{0.55f, 0.77f, 0.95f, 1.0f};
+    float sunDir[4]{0.55f, 0.85f, 0.40f, 0.0f};
     bool has3DViewportVisible = true;
 
-    // 2D batched draw lists
     std::vector<DrawBatch> uiBatches;
 
     void init(const std::string &rootDir, const std::string &initialProjName, bool is3D,
@@ -140,24 +134,21 @@ private:
         std::function<void()> onTap;
     };
     std::vector<HitBox> hitBoxes;
-    std::vector<std::string> explorerVisibleIds;
 
-    // Touch tracking
-    int touchMode = 0; // 0=none, 1=orbit, 2=pan_pinch, 3=gizmo, 4=joystick, 5=scroll_ribbon, 6=scroll_exp, 7=scroll_props, 8=scroll_ed
+    int touchMode = 0; // 0=none, 1=orbit, 2=pan_pinch, 3=gizmo, 5=scroll_ribbon, 6=scroll_exp, 7=scroll_props, 8=scroll_ed, 9=scroll_out, 10=scroll_proj
     int dragAxis = -1;
     float downX = 0, downY = 0, lastX = 0, lastY = 0, lastPinch = -1;
     bool moved = false;
-    float joyCx = 0, joyCy = 0, joyR = 50, jumpCx = 0, jumpCy = 0, jumpR = 32;
     struct GizmoTip { int axis; float sx, sy, bx, by; };
     std::vector<GizmoTip> gizmoTips;
 
-    // Cached camera vectors for raycast/pan
     Vec3f eye{}, fwd{}, right{}, up{};
     float focalLen = 600.0f;
 
     void computeLayout();
     void build3DScene();
     void build2DScene(const Rect &area);
+    void buildProjectsTab(const Rect &area);
     void buildTopRibbon();
     void buildDocTabs();
     void buildRightDock();
@@ -165,7 +156,7 @@ private:
     void buildCodeEditor(const Rect &area);
     void buildModal();
 
-    void startSim(bool withAvatar);
+    void startSim();
     void stopSim();
     void execCommand(const std::string &cmd);
     void syncFromLua();
@@ -174,20 +165,14 @@ private:
     void openScript(const std::string &relPath);
     SceneNode *selectedNode();
 
-    void stepPlayPhysics(float dt);
-    float findGroundBelow(float px, float py, float pz);
-    float surfaceHeightAt(const SceneNode &n, float px, float pz, float r);
-    bool collidesHorizontal(float px, float py, float pz);
     bool projectPoint(Vec3f w, float &sx, float &sy) const;
     std::string raycastPart(float sx, float sy);
     void applyGizmoDrag(float dx, float dy);
 
-    // 2D quad/text emission helpers
     void pushBatch(bool scissor, Rect sc);
     void emitRect(float x, float y, float w, float h, uint32_t col);
     void emitRectOutline(float x, float y, float w, float h, float t, uint32_t col);
     void emitCircle(float cx, float cy, float r, uint32_t col);
-    void emitLine2D(float x0, float y0, float x1, float y1, float thick, uint32_t col);
     void emitText(const std::string &txt, float x, float y, float pxSize, uint32_t col, float maxW = 0.0f);
     void emitTextCentered(const std::string &txt, const Rect &r, float pxSize, uint32_t col);
     void addBtn(const Rect &r, const std::string &label, uint32_t bg, uint32_t fg, float pxSize, std::function<void()> cb);
