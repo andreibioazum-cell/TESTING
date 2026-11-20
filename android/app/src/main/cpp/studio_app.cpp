@@ -320,7 +320,7 @@ void StudioApp::step(float dt) {
 // Layout (responsive in both Portrait & Landscape!)
 // =========================================================================
 Rect StudioApp::closePlayBtnRect() const {
-    float sz = std::round(30.0f * density);
+    float sz = std::round(32.0f * density);
     float pad = std::round(10.0f * density);
     return {std::max(pad, width - sz - pad), pad, sz, sz};
 }
@@ -383,6 +383,20 @@ void StudioApp::pushBatch(bool scissor, Rect sc) {
     b.hasScissor = scissor;
     b.scissor = sc;
     uiBatches.push_back(std::move(b));
+    hasClipRect = scissor;
+    currentClipRect = sc;
+}
+
+void StudioApp::addHitBox(Rect r, std::function<void()> cb) {
+    if (hasClipRect) {
+        float x0 = std::max(r.x, currentClipRect.x);
+        float y0 = std::max(r.y, currentClipRect.y);
+        float x1 = std::min(r.x + r.w, currentClipRect.x + currentClipRect.w);
+        float y1 = std::min(r.y + r.h, currentClipRect.y + currentClipRect.h);
+        if (x1 <= x0 || y1 <= y0) return;
+        r = {x0, y0, x1 - x0, y1 - y0};
+    }
+    hitBoxes.push_back({r, std::move(cb)});
 }
 
 void StudioApp::emitRect(float x, float y, float w, float h, uint32_t col) {
@@ -513,7 +527,7 @@ void StudioApp::addBtn(const Rect &r, const std::string &label, uint32_t bg, uin
     emitRect(r.x, r.y, r.w, r.h, bg);
     emitRectOutline(r.x, r.y, r.w, r.h, 1.0f, Col::border());
     emitTextCentered(label, r, pxSize, fg);
-    hitBoxes.push_back({r, std::move(cb)});
+    addHitBox(r, std::move(cb));
 }
 
 // =========================================================================
@@ -524,6 +538,7 @@ void StudioApp::buildFrame(float w, float h, float d) {
     computeLayout();
     uiBatches.clear();
     hitBoxes.clear();
+    hasClipRect = false;
     frame3DMesh.clear();
     frame3DShadowCasters.clear();
     frame3DLines.clear();
@@ -569,10 +584,10 @@ void StudioApp::buildFrame(float w, float h, float d) {
     if (isPlayingFull) {
         pushBatch(false, {});
         Rect rClose = closePlayBtnRect();
-        emitRect(rClose.x, rClose.y, rClose.w, rClose.h, StudioFont::rgba(20, 26, 36, 220));
-        emitRectOutline(rClose.x, rClose.y, rClose.w, rClose.h, 1.5f * density, StudioFont::rgba(239, 68, 68, 230));
-        emitTextCentered("X", rClose, 13.0f * density, StudioFont::rgba(255, 255, 255, 255));
-        hitBoxes.push_back({rClose, [this]() { stopSim(); }});
+        emitRect(rClose.x, rClose.y, rClose.w, rClose.h, StudioFont::rgba(20, 26, 36, 225));
+        emitRectOutline(rClose.x, rClose.y, rClose.w, rClose.h, 1.5f * density, StudioFont::rgba(239, 68, 68, 235));
+        emitTextCentered("X", rClose, 13.5f * density, StudioFont::rgba(255, 255, 255, 255));
+        addHitBox(rClose, [this]() { stopSim(); });
         return;
     }
 
@@ -637,12 +652,30 @@ void StudioApp::buildProjectsTab(const Rect &area) {
 void StudioApp::build3DScene() {
     const auto *env = scene.environment();
     float ct = env ? env->clockTime : 14.0f;
-    if (ct >= 6.0f && ct <= 18.0f) {
-        skyTop[0] = 0.12f; skyTop[1] = 0.43f; skyTop[2] = 0.77f;
-        skyBot[0] = 0.55f; skyBot[1] = 0.77f; skyBot[2] = 0.95f;
+    std::string sp = env ? env->skyPreset : "Day";
+    uint32_t topCol = env ? env->skyTopColor : 0xFF1E6EC4;
+    uint32_t botCol = env ? env->skyBotColor : 0xFF8CC4F2;
+    auto argbToF = [](uint32_t c, float out[4]) {
+        out[0] = ((c >> 16) & 0xFF) / 255.0f;
+        out[1] = ((c >> 8)  & 0xFF) / 255.0f;
+        out[2] = ( c        & 0xFF) / 255.0f;
+        out[3] = 1.0f;
+    };
+    argbToF(topCol, skyTop);
+    argbToF(botCol, skyBot);
+
+    if (sp == "Night" || sp == "Space") {
+        skyTint[0] = 0.62f; skyTint[1] = 0.72f; skyTint[2] = 0.96f; skyTint[3] = 0.28f;
+    } else if (sp == "Sunset") {
+        skyTint[0] = 1.08f; skyTint[1] = 0.86f; skyTint[2] = 0.74f; skyTint[3] = 0.36f;
+    } else if (sp == "Overcast") {
+        skyTint[0] = 0.88f; skyTint[1] = 0.91f; skyTint[2] = 0.96f; skyTint[3] = 0.48f;
     } else {
-        skyTop[0] = 0.04f; skyTop[1] = 0.07f; skyTop[2] = 0.14f;
-        skyBot[0] = 0.12f; skyBot[1] = 0.17f; skyBot[2] = 0.28f;
+        bool nightTime = (ct < 6.0f || ct > 18.0f);
+        skyTint[0] = nightTime ? 0.65f : 1.0f;
+        skyTint[1] = nightTime ? 0.74f : 1.0f;
+        skyTint[2] = nightTime ? 0.95f : 1.0f;
+        skyTint[3] = nightTime ? 0.28f : 0.42f;
     }
 
     // Check DirectionalLight3D in scene
@@ -1002,7 +1035,7 @@ void StudioApp::buildTopRibbon() {
                 }
             });
         }
-        ribBtn("Color", false, 0, [this]() { if (selectedNode()) modal = ModalKind::COLOR; });
+        ribBtn("Color", false, 0, [this]() { if (selectedNode()) { promptTargetKey.clear(); modal = ModalKind::COLOR; } });
         ribBtn("Material", false, 0, [this]() { if (selectedNode()) modal = ModalKind::MATERIAL; });
         ribBtn("Delete", false, 0, [this]() {
             if (!selectedId.empty() && scene.removeById(selectedId)) {
@@ -1042,6 +1075,7 @@ void StudioApp::buildTopRibbon() {
         ribBtn("Output", showOutput, 0, [this]() { showOutput = !showOutput; });
         ribBtn("Grid", showGrid, 0, [this]() { showGrid = !showGrid; });
         ribBtn("Shadows", showShadows, 0, [this]() { showShadows = !showShadows; });
+        ribBtn("Sky", false, 0, [this]() { modal = ModalKind::SKY; });
         ribBtn("Colliders", showColliders, 0, [this]() { showColliders = !showColliders; });
         ribBtn("Play:Cam3D", useCamera3DInPlay, 0, [this]() { useCamera3DInPlay = !useCamera3DInPlay; });
         ribBtn("Reset Cam", false, 0, [this]() {
@@ -1117,27 +1151,27 @@ void StudioApp::buildDocTabs() {
 void StudioApp::buildRightDock() {
     if (rRightDock.w <= 1.0f) return;
     float fs = 8.3f * density;
-    float hdrH = 15.0f * density;
-    float rowH = 17.0f * density;
+    float hdrH = 21.0f * density;
+    float rowH = 18.0f * density;
 
     if (showExplorer && rExplorer.h > 1.0f) {
         pushBatch(true, rExplorer);
         emitRect(rExplorer.x, rExplorer.y, rExplorer.w, rExplorer.h, Col::panel());
         emitRect(rExplorer.x, rExplorer.y, 1, rExplorer.h, Col::border());
         emitRect(rExplorer.x, rExplorer.y, rExplorer.w, hdrH, Col::header());
-        emitText("Scene Tree", rExplorer.x + 5 * density, rExplorer.y + 2 * density, fs, Col::text());
-        Rect rMulti{rExplorer.x + rExplorer.w - 48 * density, rExplorer.y + 1, 28 * density, hdrH - 2};
-        addBtn(rMulti, "Mul", multiSelectMode ? Col::btnAct() : Col::btn(), Col::text(), 7.3f * density, [this]() {
+        emitText("Scene Tree", rExplorer.x + 5 * density, rExplorer.y + 5 * density, fs, Col::text(), rExplorer.w - 60 * density);
+        Rect rMulti{rExplorer.x + rExplorer.w - 56 * density, rExplorer.y + 2 * density, 30 * density, hdrH - 4 * density};
+        addBtn(rMulti, "Mul", multiSelectMode ? Col::btnAct() : Col::btn(), Col::text(), 7.6f * density, [this]() {
             multiSelectMode = !multiSelectMode;
             if (!multiSelectMode) multiSelectedIds.clear();
         });
-        Rect rAdd{rExplorer.x + rExplorer.w - 18 * density, rExplorer.y + 1, 16 * density, hdrH - 2};
-        addBtn(rAdd, "+", Col::btn(), Col::accent(), fs, [this]() {
+        Rect rAdd{rExplorer.x + rExplorer.w - 24 * density, rExplorer.y + 2 * density, 22 * density, hdrH - 4 * density};
+        addBtn(rAdd, "+", Col::btn(), Col::accent(), 10.5f * density, [this]() {
             insertParentId = selectedId;
             modal = ModalKind::INSERT;
         });
 
-        Rect listArea{rExplorer.x + 1, rExplorer.y + hdrH, rExplorer.w - 1, rExplorer.h - hdrH};
+        Rect listArea{rExplorer.x + 1, rExplorer.y + hdrH, rExplorer.w - 1, std::max(1.0f, rExplorer.h - hdrH)};
         pushBatch(true, listArea);
         struct Row { const SceneNode *n; int depth; };
         std::vector<Row> rows;
@@ -1165,7 +1199,7 @@ void StudioApp::buildRightDock() {
                     (r.n->isCollisionNode() ? StudioFont::rgba(34, 211, 238) : Col::text())));
                 emitText(lbl, rr.x + indent, rr.y + 3 * density, 8.0f * density, tc, rr.w - indent - 2);
                 std::string nid = r.n->id;
-                hitBoxes.push_back({rr, [this, nid]() {
+                addHitBox(rr, [this, nid]() {
                     if (multiSelectMode) {
                         auto it = std::find(multiSelectedIds.begin(), multiSelectedIds.end(), nid);
                         if (it != multiSelectedIds.end()) multiSelectedIds.erase(it);
@@ -1181,7 +1215,7 @@ void StudioApp::buildRightDock() {
                             camTargetX = node->posX; camTargetY = node->posY; camTargetZ = node->posZ;
                         }
                     }
-                }});
+                });
             }
             y += rowH;
         }
@@ -1192,9 +1226,9 @@ void StudioApp::buildRightDock() {
         emitRect(rProperties.x, rProperties.y, rProperties.w, rProperties.h, Col::panel());
         emitRect(rProperties.x, rProperties.y, 1, rProperties.h, Col::border());
         emitRect(rProperties.x, rProperties.y, rProperties.w, hdrH, Col::header());
-        emitText("Inspector", rProperties.x + 5 * density, rProperties.y + 2 * density, fs, Col::text());
+        emitText("Inspector", rProperties.x + 5 * density, rProperties.y + 5 * density, fs, Col::text());
 
-        Rect pArea{rProperties.x + 1, rProperties.y + hdrH, rProperties.w - 1, rProperties.h - hdrH};
+        Rect pArea{rProperties.x + 1, rProperties.y + hdrH, rProperties.w - 1, std::max(1.0f, rProperties.h - hdrH)};
         pushBatch(true, pArea);
         SceneNode *n = selectedNode();
         if (!n) {
@@ -1224,7 +1258,7 @@ void StudioApp::buildRightDock() {
         }
         if (n->isMeshNode()) {
             props.push_back({"Mesh", n->shape(), [this]() { modal = ModalKind::SHAPE; }});
-            props.push_back({"Color", "#", [this]() { modal = ModalKind::COLOR; }});
+            props.push_back({"Color", "#", [this]() { promptTargetKey.clear(); modal = ModalKind::COLOR; }});
             props.push_back({"Material", n->material, [this]() { modal = ModalKind::MATERIAL; }});
             props.push_back({"Visible", n->visible ? "true" : "false", [this, n]() {
                 n->visible = !n->visible; scene.saveToFile(currentProjectDir + "/scene.json");
@@ -1271,6 +1305,15 @@ void StudioApp::buildRightDock() {
                 n->disabled = !n->disabled; scene.saveToFile(currentProjectDir + "/scene.json");
             }});
         } else if (n->className == "Environment" || n->className == "Lighting") {
+            props.push_back({"Sky Preset", n->skyPreset, [this]() {
+                modal = ModalKind::SKY;
+            }});
+            props.push_back({"Sky Top", "#", [this]() {
+                promptTargetKey = "SkyTop"; modal = ModalKind::COLOR;
+            }});
+            props.push_back({"Sky Horizon", "#", [this]() {
+                promptTargetKey = "SkyBot"; modal = ModalKind::COLOR;
+            }});
             props.push_back({"ClockTime", fmtNum(n->clockTime), [this, n]() {
                 promptTitle = "ClockTime (0..24)"; promptValue = fmtNum(n->clockTime);
                 promptTargetKey = "ClockTime"; modal = ModalKind::TEXT_PROMPT;
@@ -1293,11 +1336,15 @@ void StudioApp::buildRightDock() {
                 emitText(p.k, pr.x + 4 * density, pr.y + 3 * density, 7.8f * density, Col::muted(), splitX - pr.x - 4);
                 if (p.k == "Color") {
                     emitRect(splitX + 2, pr.y + 3 * density, 24 * density, rowH - 6 * density, Col::argbToUi(n->argbColor));
+                } else if (p.k == "Sky Top") {
+                    emitRect(splitX + 2, pr.y + 3 * density, 24 * density, rowH - 6 * density, Col::argbToUi(n->skyTopColor));
+                } else if (p.k == "Sky Horizon") {
+                    emitRect(splitX + 2, pr.y + 3 * density, 24 * density, rowH - 6 * density, Col::argbToUi(n->skyBotColor));
                 } else {
                     emitText(p.v, splitX + 2, pr.y + 3 * density, 7.8f * density,
                              p.onTap ? Col::text() : Col::muted(), pr.x + pr.w - splitX - 4);
                 }
-                if (p.onTap) hitBoxes.push_back({pr, p.onTap});
+                if (p.onTap) addHitBox(pr, p.onTap);
             }
             y += rowH;
         }
@@ -1339,11 +1386,11 @@ void StudioApp::buildBottomDock() {
     std::string disp = commandText.empty() ? "> Run a command" : ("> " + commandText + (commandFocused ? "_" : ""));
     emitText(disp, rInput.x + 4 * density, rInput.y + 3 * density, 8.2f * density,
              commandText.empty() ? Col::muted() : Col::text(), rInput.w - 8 * density);
-    hitBoxes.push_back({rInput, [this]() {
+    addHitBox(rInput, [this]() {
         commandFocused = true;
         editorFocused = false;
         if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(true);
-    }});
+    });
     Rect rRun{rCmdBar.x + rCmdBar.w - runW - 2 * density, rCmdBar.y + 2 * density, runW, rCmdBar.h - 4 * density};
     addBtn(rRun, "Run", Col::btnAct(), Col::text(), 8.2f * density, [this]() {
         std::string cmd = commandText;
@@ -1463,6 +1510,9 @@ void StudioApp::buildCodeEditor(const Rect &area) {
 void StudioApp::buildModal() {
     pushBatch(false, {});
     emitRect(0, 0, width, height, StudioFont::rgba(0, 0, 0, 165));
+    addHitBox({0, 0, width, height}, [this]() {
+        if (modal != ModalKind::TEXT_PROMPT) modal = ModalKind::NONE;
+    });
 
     float mw = std::min(width - 20 * density, 350.0f * density);
     float mh = std::min(height - 30 * density, 350.0f * density);
@@ -1470,20 +1520,20 @@ void StudioApp::buildModal() {
     Rect box{(width - mw) * 0.5f, (height - mh) * 0.5f, mw, mh};
     emitRect(box.x, box.y, box.w, box.h, Col::panel());
     emitRectOutline(box.x, box.y, box.w, box.h, 1.5f, Col::border());
-    hitBoxes.push_back({box, []() {}});
+    addHitBox(box, []() {});
 
     float fs = 9.0f * density;
     float pad = 9.0f * density;
     float y = box.y + pad;
 
     auto closeBtn = [&](const std::string &title) {
-        emitText(title, box.x + pad, y, 10.5f * density, Col::text());
-        Rect rc{box.x + box.w - 26 * density, y - 2, 19 * density, 19 * density};
+        emitText(title, box.x + pad, y, 10.5f * density, Col::text(), mw - 44 * density);
+        Rect rc{box.x + box.w - 30 * density, y - 3 * density, 24 * density, 24 * density};
         addBtn(rc, "X", Col::btn(), Col::muted(), fs, [this]() {
             modal = ModalKind::NONE;
             if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
         });
-        y += 24.0f * density;
+        y += 26.0f * density;
     };
 
     if (modal == ModalKind::INSERT) {
@@ -1556,7 +1606,9 @@ void StudioApp::buildModal() {
             });
         }
     } else if (modal == ModalKind::COLOR) {
-        closeBtn("Object Color");
+        std::string title = (promptTargetKey == "SkyTop") ? "Sky Top Color"
+                          : ((promptTargetKey == "SkyBot") ? "Sky Horizon Color" : "Object Color");
+        closeBtn(title);
         static const uint32_t pal[12] = {
             0xFFA3A2A5, 0xFFDC4C46, 0xFF3B82F6, 0xFF22C55E,
             0xFFFACC15, 0xFFF97316, 0xFFA855F7, 0xFFEC4899,
@@ -1570,14 +1622,69 @@ void StudioApp::buildModal() {
             emitRect(cr.x, cr.y, cr.w, cr.h, Col::argbToUi(pal[i]));
             emitRectOutline(cr.x, cr.y, cr.w, cr.h, 1.0f, Col::border());
             uint32_t cval = pal[i];
-            hitBoxes.push_back({cr, [this, cval]() {
+            addHitBox(cr, [this, cval]() {
+                if (promptTargetKey == "SkyTop" || promptTargetKey == "SkyBot") {
+                    if (auto *env = scene.findEnvironment()) {
+                        env->skyPreset = "Custom";
+                        if (promptTargetKey == "SkyTop") env->skyTopColor = cval;
+                        else env->skyBotColor = cval;
+                        scene.saveToFile(currentProjectDir + "/scene.json");
+                    }
+                    promptTargetKey.clear();
+                    modal = ModalKind::SKY;
+                    return;
+                }
                 if (auto *n = selectedNode()) {
                     n->argbColor = cval;
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
                 modal = ModalKind::NONE;
-            }});
+            });
         }
+    } else if (modal == ModalKind::SKY) {
+        closeBtn("Sky & Atmosphere");
+        SceneNode *env = scene.findEnvironment();
+        struct SkyDef { const char *name; uint32_t top, bot; float ct; };
+        static const SkyDef presets[] = {
+            {"Day",      0xFF1E6EC4, 0xFF8CC4F2, 14.0f},
+            {"Sunset",   0xFF4A2559, 0xFFF97316, 18.5f},
+            {"Night",    0xFF0A1224, 0xFF1E2B47, 23.0f},
+            {"Overcast", 0xFF64748B, 0xFFCBD5E1, 12.0f},
+            {"Space",    0xFF03050C, 0xFF111827,  0.0f}
+        };
+        float cw = (mw - pad * 3) * 0.5f;
+        for (int i = 0; i < 5; ++i) {
+            float x = box.x + pad + (i % 2) * (cw + pad);
+            float ry = y + (i / 2) * 30 * density;
+            bool cur = env && env->skyPreset == presets[i].name;
+            addBtn({x, ry, cw, 25 * density}, presets[i].name, cur ? Col::btnAct() : Col::btn(), Col::text(), fs, [this, i]() {
+                if (auto *e = scene.findEnvironment()) {
+                    e->skyPreset = presets[i].name;
+                    e->skyTopColor = presets[i].top;
+                    e->skyBotColor = presets[i].bot;
+                    e->clockTime = presets[i].ct;
+                    scene.saveToFile(currentProjectDir + "/scene.json");
+                }
+            });
+        }
+        y += 96 * density;
+        uint32_t topC = env ? env->skyTopColor : 0xFF1E6EC4;
+        uint32_t botC = env ? env->skyBotColor : 0xFF8CC4F2;
+        addBtn({box.x + pad, y, cw, 26 * density}, "Sky Top Color", Col::btn(), Col::text(), fs, [this]() {
+            promptTargetKey = "SkyTop"; modal = ModalKind::COLOR;
+        });
+        emitRect(box.x + pad + cw - 18 * density, y + 5 * density, 12 * density, 16 * density, Col::argbToUi(topC));
+        addBtn({box.x + pad * 2 + cw, y, cw, 26 * density}, "Horizon Color", Col::btn(), Col::text(), fs, [this]() {
+            promptTargetKey = "SkyBot"; modal = ModalKind::COLOR;
+        });
+        emitRect(box.x + pad * 2 + cw * 2 - 18 * density, y + 5 * density, 12 * density, 16 * density, Col::argbToUi(botC));
+        y += 32 * density;
+        float ct = env ? env->clockTime : 14.0f;
+        addBtn({box.x + pad, y, mw - pad * 2, 26 * density},
+               "ClockTime: " + fmtNum(ct) + " h", Col::btn(), Col::text(), fs, [this, ct]() {
+                   promptTitle = "ClockTime (0..24)"; promptValue = fmtNum(ct);
+                   promptTargetKey = "ClockTime"; modal = ModalKind::TEXT_PROMPT;
+               });
     } else if (modal == ModalKind::MATERIAL) {
         closeBtn("Material");
         const char *mats[] = {"Plastic", "SmoothPlastic", "Slate", "Metal", "Wood", "Neon", "Glass", "Brick"};
@@ -1661,9 +1768,9 @@ void StudioApp::buildModal() {
         emitRect(rIn.x, rIn.y, rIn.w, rIn.h, Col::bg());
         emitRectOutline(rIn.x, rIn.y, rIn.w, rIn.h, 1.0f, Col::accent());
         emitText(promptValue + "_", rIn.x + 6 * density, rIn.y + 5 * density, fs, Col::text(), rIn.w - 12 * density);
-        hitBoxes.push_back({rIn, [this]() {
+        addHitBox(rIn, [this]() {
             if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(true);
-        }});
+        });
         y += 32 * density;
         Rect rOk{box.x + pad, y, mw - pad * 2, 25 * density};
         addBtn(rOk, "Apply", Col::btnAct(), Col::text(), fs, [this]() {
@@ -1684,6 +1791,12 @@ void StudioApp::buildModal() {
                 if (currentProjectName == promptExtra) {
                     currentProjectName = promptValue;
                     currentProjectDir = projectsRoot + "/" + promptValue;
+                }
+                modal = ModalKind::NONE;
+            } else if (promptTargetKey == "ClockTime") {
+                if (auto *env = scene.findEnvironment()) {
+                    env->clockTime = std::clamp((float)std::atof(promptValue.c_str()), 0.0f, 24.0f);
+                    scene.saveToFile(currentProjectDir + "/scene.json");
                 }
                 modal = ModalKind::NONE;
             } else if (auto *n = selectedNode()) {
@@ -1793,31 +1906,49 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
     float x0 = xs[0], y0 = ys[0];
     int baseAct = action & 0xFF;
 
-    // Intercept top-right Close ('X') button before forwarding touches to running game
+    // Intercept top-right Close ('X') button (single-touch or multi-touch) before forwarding to game
     if (runningLua && !showProjectsTab && modal == ModalKind::NONE && activeScript.empty()) {
-        if (baseAct == 0 && closePlayBtnRect().contains(x0, y0)) {
-            downX = lastX = x0; downY = lastY = y0;
-            moved = false;
-            touchMode = 11;
-            dragAxis = -1;
-            lastPinch = -1;
+        Rect rcHit = closePlayBtnRect();
+        float pad = 10.0f * density;
+        rcHit.x -= pad; rcHit.y -= pad; rcHit.w += pad * 2.0f; rcHit.h += pad * 2.0f;
+
+        int pi = (baseAct == 5 || baseAct == 6) ? std::max(0, std::min(pointerIndex, pointerCount - 1)) : 0;
+        if ((baseAct == 0 || baseAct == 5) && rcHit.contains(xs[pi], ys[pi])) {
+            closePointerId = ids[pi];
+            if (baseAct == 0) {
+                downX = lastX = x0; downY = lastY = y0;
+                moved = false;
+                touchMode = 11;
+                dragAxis = -1;
+                lastPinch = -1;
+            }
             return;
         }
-        if (touchMode != 11 && g_luacProj) {
+        if ((baseAct == 1 || baseAct == 6) && closePointerId != -1 && ids[pi] == closePointerId) {
+            bool inside = rcHit.contains(xs[pi], ys[pi]);
+            closePointerId = -1;
+            if (baseAct == 1) touchMode = 0;
+            if (inside) { stopSim(); return; }
+        }
+        if (baseAct == 3) closePointerId = -1;
+
+        if (g_luacProj) {
             if (baseAct == 2) {
                 for (int i = 0; i < pointerCount; ++i) {
+                    if (ids[i] == closePointerId) continue;
                     if (rViewport.contains(xs[i], ys[i])) {
                         luac_project_touch(g_luacProj, ids[i], xs[i] - rViewport.x, ys[i] - rViewport.y, 1);
                     }
                 }
-            } else {
-                int pi = (baseAct == 5 || baseAct == 6) ? std::max(0, std::min(pointerIndex, pointerCount - 1)) : 0;
+            } else if (ids[pi] != closePointerId) {
                 if (rViewport.contains(xs[pi], ys[pi])) {
                     int down = (baseAct == 0 || baseAct == 5) ? 1 : 0;
                     luac_project_touch(g_luacProj, ids[pi], xs[pi] - rViewport.x, ys[pi] - rViewport.y, down);
                 }
             }
         }
+    } else {
+        closePointerId = -1;
     }
 
     if (baseAct == 0) {

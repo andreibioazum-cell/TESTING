@@ -62,6 +62,9 @@ struct SceneNode {
     std::string text = "3D Scene";
     int textSize = 18;
     float clockTime = 14.0f;
+    std::string skyPreset = "Day";
+    uint32_t skyTopColor = 0xFF1E6EC4;
+    uint32_t skyBotColor = 0xFF8CC4F2;
 
     std::vector<SceneNode> children;
 
@@ -349,6 +352,12 @@ public:
     const SceneNode *findActiveCamera() const { return findClassRec(root, "Camera3D"); }
     const SceneNode *environment() const {
         for (const auto &c : root.children) {
+            if (c.className == "Environment" || c.className == "Lighting") return &c;
+        }
+        return nullptr;
+    }
+    SceneNode *findEnvironment() {
+        for (auto &c : root.children) {
             if (c.className == "Environment" || c.className == "Lighting") return &c;
         }
         return nullptr;
@@ -684,6 +693,9 @@ private:
            << ",\"text\":" << MiniJson::esc(n.text)
            << ",\"textSize\":" << n.textSize
            << ",\"clockTime\":" << n.clockTime
+           << ",\"skyPreset\":" << MiniJson::esc(n.skyPreset)
+           << ",\"skyTopColor\":" << (int32_t)n.skyTopColor
+           << ",\"skyBotColor\":" << (int32_t)n.skyBotColor
            << ",\"children\":[";
         for (size_t i = 0; i < n.children.size(); ++i) {
             if (i) os << ",";
@@ -718,6 +730,9 @@ private:
         n.text = j.s("text", "3D Scene");
         n.textSize = (int)j.d("textSize", 18);
         n.clockTime = (float)j.d("clockTime", 14.0);
+        n.skyPreset = j.s("skyPreset", "Day");
+        n.skyTopColor = (uint32_t)(int64_t)j.d("skyTopColor", (double)(int32_t)0xFF1E6EC4);
+        n.skyBotColor = (uint32_t)(int64_t)j.d("skyBotColor", (double)(int32_t)0xFF8CC4F2);
         if (const JsonVal *kids = j.get("children")) {
             if (kids->type == JsonVal::J_ARR) {
                 for (const auto &kc : kids->arr) n.children.push_back(nodeFromJson(kc));

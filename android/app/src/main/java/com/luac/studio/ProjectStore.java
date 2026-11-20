@@ -258,7 +258,7 @@ final class ProjectStore {
 
     private static String playerScriptLua() {
         return "-- Player Character Controller (written in Lua)\n" +
-            "-- Left joystick = Move | Right button = Jump\n" +
+            "-- Left joystick = Move | Right button = Jump | Right drag = Rotate Camera\n" +
             "player = world:FindFirstChild('Player')\n" +
             "cam = world:FindFirstChild('Camera3D')\n" +
             "float vy = 0.0\n" +
@@ -267,8 +267,14 @@ final class ProjectStore {
             "float move_z = 0.0\n" +
             "int move_tid = -1\n" +
             "int jump_tid = -1\n" +
+            "int cam_tid = -1\n" +
             "float joy_ox = 0.0\n" +
-            "float joy_oy = 0.0\n\n" +
+            "float joy_oy = 0.0\n" +
+            "float cam_lx = 0.0\n" +
+            "float cam_ly = 0.0\n" +
+            "float cam_yaw = 0.0\n" +
+            "float cam_pitch = 0.32\n" +
+            "float cam_dist = 12.5\n\n" +
             "func _joy_metrics():\n" +
             "    w = screen_width()\n" +
             "    h = screen_height()\n" +
@@ -281,7 +287,8 @@ final class ProjectStore {
             "    return w, h, jx, jy, jr, bx, by, br\n\n" +
             "func on_touch(int id, float x, float y, bool down):\n" +
             "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
-            "    if id ~= move_tid and (x > w * 0.5 or id == jump_tid):\n" +
+            "    d_jump = math.sqrt((x - bx) * (x - bx) + (y - by) * (y - by))\n" +
+            "    if id == jump_tid or (id ~= move_tid and id ~= cam_tid and d_jump <= br * 1.35):\n" +
             "        if down:\n" +
             "            if jump_tid == -1:\n" +
             "                jump_tid = id\n" +
@@ -292,11 +299,26 @@ final class ProjectStore {
             "            if jump_tid == id:\n" +
             "                jump_tid = -1\n" +
             "        return\n" +
+            "    d_joy = math.sqrt((x - jx) * (x - jx) + (y - jy) * (y - jy))\n" +
+            "    if id == cam_tid or (id ~= move_tid and x > w * 0.36 and d_joy > jr * 1.45):\n" +
+            "        if down:\n" +
+            "            if cam_tid == -1:\n" +
+            "                cam_tid = id\n" +
+            "                cam_lx = x\n" +
+            "                cam_ly = y\n" +
+            "            elseif cam_tid == id:\n" +
+            "                cam_yaw -= (x - cam_lx) * 0.0065\n" +
+            "                cam_pitch = math.max(0.08, math.min(1.15, cam_pitch + (y - cam_ly) * 0.0055))\n" +
+            "                cam_lx = x\n" +
+            "                cam_ly = y\n" +
+            "        else:\n" +
+            "            if cam_tid == id:\n" +
+            "                cam_tid = -1\n" +
+            "        return\n" +
             "    if down:\n" +
             "        if move_tid == -1:\n" +
             "            move_tid = id\n" +
-            "            dist_base = math.sqrt((x - jx) * (x - jx) + (y - jy) * (y - jy))\n" +
-            "            if dist_base <= jr * 1.45:\n" +
+            "            if d_joy <= jr * 1.45:\n" +
             "                joy_ox = jx\n" +
             "                joy_oy = jy\n" +
             "            else:\n" +
@@ -322,20 +344,26 @@ final class ProjectStore {
             "    if not player:\n" +
             "        return\n" +
             "    speed = 11.0\n" +
+            "    cy = math.cos(cam_yaw)\n" +
+            "    sy = math.sin(cam_yaw)\n" +
+            "    wx = move_x * cy + move_z * sy\n" +
+            "    wz = -move_x * sy + move_z * cy\n" +
             "    p = player.Position\n" +
-            "    p.X += move_x * speed * dt\n" +
-            "    p.Z += move_z * speed * dt\n" +
+            "    p.X += wx * speed * dt\n" +
+            "    p.Z += wz * speed * dt\n" +
             "    vy -= 26.0 * dt\n" +
             "    p.Y += vy * dt\n" +
             "    if p.Y <= 1.5:\n" +
             "        p.Y = 1.5\n" +
             "        vy = 0.0\n" +
             "        grounded = true\n" +
-            "    if math.abs(move_x) > 0.05 or math.abs(move_z) > 0.05:\n" +
-            "        player.Rotation = Vector3.new(0, math.deg(math.atan2(move_x, move_z)), 0)\n" +
+            "    if math.abs(wx) > 0.05 or math.abs(wz) > 0.05:\n" +
+            "        player.Rotation = Vector3.new(0, math.deg(math.atan2(wx, wz)), 0)\n" +
             "    if cam:\n" +
-            "        cam.Position = Vector3.new(p.X, p.Y + 5.5, p.Z + 12.0)\n" +
-            "        cam.Rotation = Vector3.new(-18.0, 0.0, 0.0)\n\n" +
+            "        cp = math.cos(cam_pitch)\n" +
+            "        sp = math.sin(cam_pitch)\n" +
+            "        cam.Position = Vector3.new(p.X + sy * cp * cam_dist, p.Y + 1.4 + sp * cam_dist, p.Z + cy * cp * cam_dist)\n" +
+            "        cam.Rotation = Vector3.new(-math.deg(cam_pitch), math.deg(cam_yaw), 0.0)\n\n" +
             "func draw():\n" +
             "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
             "    draw_circle(jx, jy, jr, 0.08, 0.12, 0.18, 0.45)\n" +
@@ -413,7 +441,7 @@ final class ProjectStore {
             if (playerFile.isFile()) {
                 try {
                     String p = read(playerFile);
-                    if (p.contains("-- Player Character Controller (written in Lua)") && !p.contains("func draw():")) {
+                    if (p.contains("-- Player Character Controller (written in Lua)") && !p.contains("cam_yaw")) {
                         write(playerFile, playerScriptLua());
                     }
                 } catch (IOException ignored) {

@@ -701,7 +701,7 @@ void drawStudio(StudioApp *app, float density) {
         SceneUbo ubo{};
         std::memcpy(ubo.lightVP, app->lightVP, sizeof(ubo.lightVP));
         std::memcpy(ubo.sunDir, app->sunDir, sizeof(ubo.sunDir));
-        ubo.skyTint[0] = 1.0f; ubo.skyTint[1] = 1.0f; ubo.skyTint[2] = 1.0f; ubo.skyTint[3] = 0.42f;
+        std::memcpy(ubo.skyTint, app->skyTint, sizeof(ubo.skyTint));
         std::memcpy(f.ubo3d.mapped, &ubo, sizeof(ubo));
 
         size_t cnt3D = app->frame3DMesh.size() + app->frame3DShadowCasters.size()

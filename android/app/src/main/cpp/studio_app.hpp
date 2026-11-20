@@ -33,7 +33,7 @@ class StudioApp {
 public:
     enum class RibbonTab { PROJECTS, HOME, CREATE, VIEW, SCRIPTS };
     enum class ToolMode { SELECT, MOVE, SCALE, ROTATE };
-    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT, NEW_PROJECT, REPARENT };
+    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT, NEW_PROJECT, REPARENT, SKY };
 
     float width = 1080.0f;
     float height = 2200.0f;
@@ -117,6 +117,7 @@ public:
     float lightVP[16]{};
     float skyTop[4]{0.12f, 0.43f, 0.77f, 1.0f};
     float skyBot[4]{0.55f, 0.77f, 0.95f, 1.0f};
+    float skyTint[4]{1.0f, 1.0f, 1.0f, 0.42f};
     float sunDir[4]{0.55f, 0.85f, 0.40f, 0.0f};
     bool has3DViewportVisible = true;
 
@@ -132,6 +133,7 @@ public:
     void onTextInput(const std::string &utf8);
     void onKeyCode(int keyCode);
     void dispose();
+    Rect closePlayBtnRect() const;
 
 private:
     struct HitBox {
@@ -139,9 +141,12 @@ private:
         std::function<void()> onTap;
     };
     std::vector<HitBox> hitBoxes;
+    Rect currentClipRect{0, 0, 0, 0};
+    bool hasClipRect = false;
 
-    int touchMode = 0; // 0=none, 1=orbit, 2=pan_pinch, 3=gizmo, 5=scroll_ribbon, 6=scroll_exp, 7=scroll_props, 8=scroll_ed, 9=scroll_out, 10=scroll_proj
+    int touchMode = 0; // 0=none, 1=orbit, 2=pan_pinch, 3=gizmo, 5=scroll_ribbon, 6=scroll_exp, 7=scroll_props, 8=scroll_ed, 9=scroll_out, 10=scroll_proj, 11=close_play
     int dragAxis = -1;
+    int closePointerId = -1;
     float downX = 0, downY = 0, lastX = 0, lastY = 0, lastPinch = -1;
     bool moved = false;
     struct GizmoTip { int axis; float sx, sy, bx, by; };
@@ -151,7 +156,6 @@ private:
     float focalLen = 600.0f;
 
     void computeLayout();
-    Rect closePlayBtnRect() const;
     void build3DScene();
     void build2DScene(const Rect &area);
     void renderLuaDrawOverlay(const Rect &area, bool applyClearColor);
@@ -177,6 +181,7 @@ private:
     void applyGizmoDrag(float dx, float dy);
 
     void pushBatch(bool scissor, Rect sc);
+    void addHitBox(Rect r, std::function<void()> cb);
     void emitRect(float x, float y, float w, float h, uint32_t col);
     void emitRectOutline(float x, float y, float w, float h, float t, uint32_t col);
     void emitRoundRect(float x, float y, float w, float h, float rad, uint32_t col);
