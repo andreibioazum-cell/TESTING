@@ -54,6 +54,7 @@ struct SceneNode {
     float energy = 1.2f;
     float range = 16.0f;
     bool visible = true;
+    bool castShadow = true;
     bool locked = false;
     bool disabled = false;
 
@@ -82,6 +83,7 @@ struct SceneNode {
     }
     bool isScript() const { return className == "Script" || className == "LocalScript"; }
     bool isUi() const { return className == "TextLabel" || className == "Frame"; }
+    bool isGroup() const { return className == "Folder" || className == "Model"; }
 
     std::string shape() const {
         if (className == "Wedge" || className == "WedgePart") return "Wedge";
@@ -269,6 +271,7 @@ public:
         auto gMesh = makeNode(m.genId(), "GroundMesh", "Box");
         gMesh.posY = -1.0f; gMesh.sizeX = 80; gMesh.sizeY = 2; gMesh.sizeZ = 80;
         gMesh.argbColor = 0xFF7B8390; gMesh.material = "SmoothPlastic";
+        gMesh.castShadow = false;
         auto gCol = makeNode(m.genId(), "GroundCollider", "CollisionBox");
         gCol.posY = -1.0f; gCol.sizeX = 80; gCol.sizeY = 2; gCol.sizeZ = 80;
         ground.children.push_back(gMesh);
@@ -382,6 +385,76 @@ public:
         if (id == root.id) return false;
         for (const auto &svc : root.children) if (svc.id == id) return false;
         return removeRec(root, id);
+    }
+
+    static void moveNodeDelta(SceneNode &node, float dx, float dy, float dz) {
+        if (node.is3DNode()) {
+            node.posX += dx;
+            node.posY += dy;
+            node.posZ += dz;
+        }
+        for (auto &c : node.children) moveNodeDelta(c, dx, dy, dz);
+    }
+
+    static bool isDescendantOrSelf(const SceneNode &anc, const std::string &id) {
+        if (anc.id == id) return true;
+        for (const auto &c : anc.children) if (isDescendantOrSelf(c, id)) return true;
+        return false;
+    }
+
+    bool reparentNode(const std::string &id, const std::string &newParentId) {
+        if (id.empty() || newParentId.empty() || id == newParentId) return false;
+        for (const auto &svc : root.children) if (svc.id == id) return false;
+        SceneNode *src = findById(id);
+        SceneNode *dst = findById(newParentId);
+        if (!src || !dst || isDescendantOrSelf(*src, newParentId)) return false;
+        SceneNode extracted;
+        if (!extractRec(root, id, extracted)) return false;
+        dst = findById(newParentId);
+        if (!dst) return false;
+        dst->expanded = true;
+        dst->children.push_back(std::move(extracted));
+        return true;
+    }
+
+    std::string groupNodes(const std::vector<std::string> &ids, const std::string &groupClass) {
+        if (ids.empty()) return "";
+        SceneNode *firstParent = nullptr;
+        for (const auto &id : ids) {
+            bool isSvc = false;
+            for (const auto &svc : root.children) if (svc.id == id) isSvc = true;
+            if (!isSvc) {
+                firstParent = findParentOf(id);
+                if (firstParent) break;
+            }
+        }
+        if (!firstParent) firstParent = findService("World3D");
+        if (!firstParent) return "";
+        std::string gName = groupClass + std::to_string(nextId);
+        SceneNode grp = makeNode(genId(), gName, groupClass);
+        grp.expanded = true;
+        firstParent->expanded = true;
+        firstParent->children.push_back(std::move(grp));
+        std::string gid = firstParent->children.back().id;
+        for (const auto &id : ids) reparentNode(id, gid);
+        return gid;
+    }
+
+    bool ungroupNode(const std::string &groupId) {
+        SceneNode *grp = findById(groupId);
+        SceneNode *parent = findParentOf(groupId);
+        if (!grp || !parent || !grp->isGroup()) return false;
+        std::string parentId = parent->id;
+        std::vector<SceneNode> kids = std::move(grp->children);
+        if (!removeById(groupId)) return false;
+        parent = findById(parentId);
+        if (!parent) return false;
+        for (auto &k : kids) parent->children.push_back(std::move(k));
+        return true;
+    }
+
+    void collectContainers(std::vector<const SceneNode *> &out) const {
+        for (const auto &c : root.children) collectContainersRec(c, out);
     }
 
     std::string toJson() const {
@@ -558,6 +631,10 @@ private:
         if (n.isUi()) out.push_back(&n);
         for (const auto &c : n.children) collectUiRec(c, out);
     }
+    static void collectContainersRec(const SceneNode &n, std::vector<const SceneNode *> &out) {
+        if (n.className == "World3D" || n.className == "Scripts" || n.isGroup()) out.push_back(&n);
+        for (const auto &c : n.children) collectContainersRec(c, out);
+    }
     static const SceneNode *findClassRec(const SceneNode &n, const std::string &cls) {
         if (n.className == cls) return &n;
         for (const auto &c : n.children) if (auto *r = findClassRec(c, cls)) return r;
@@ -567,6 +644,17 @@ private:
         for (auto it = n.children.begin(); it != n.children.end(); ++it) {
             if (it->id == id) { n.children.erase(it); return true; }
             if (removeRec(*it, id)) return true;
+        }
+        return false;
+    }
+    static bool extractRec(SceneNode &n, const std::string &id, SceneNode &out) {
+        for (auto it = n.children.begin(); it != n.children.end(); ++it) {
+            if (it->id == id) {
+                out = std::move(*it);
+                n.children.erase(it);
+                return true;
+            }
+            if (extractRec(*it, id, out)) return true;
         }
         return false;
     }
@@ -589,6 +677,7 @@ private:
            << ",\"energy\":" << n.energy
            << ",\"range\":" << n.range
            << ",\"visible\":" << (n.visible ? "true" : "false")
+           << ",\"castShadow\":" << (n.castShadow ? "true" : "false")
            << ",\"locked\":" << (n.locked ? "true" : "false")
            << ",\"disabled\":" << (n.disabled ? "true" : "false")
            << ",\"scriptPath\":" << MiniJson::esc(n.scriptPath)
@@ -622,6 +711,7 @@ private:
         n.energy = (float)j.d("energy", 1.2);
         n.range = (float)j.d("range", 16.0);
         n.visible = j.bl("visible", true);
+        n.castShadow = j.bl("castShadow", true);
         n.locked = j.bl("locked", false);
         n.disabled = j.bl("disabled", false);
         n.scriptPath = j.s("scriptPath", "");

@@ -97,6 +97,7 @@ void StudioApp::init(const std::string &rootDir, const std::string &initialProjN
 
     applyFont(customFont, fontFamily);
     openProject(initialProjName, is3D);
+    showProjectsTab = true;
 }
 
 void StudioApp::applyFont(const std::string &customPath, int family) {
@@ -116,6 +117,8 @@ void StudioApp::openProject(const std::string &projName, bool is3D) {
     currentProjectDir = projectsRoot + "/" + projName;
     currentIs3D = is3D;
     selectedId.clear();
+    multiSelectMode = false;
+    multiSelectedIds.clear();
     outputLines.clear();
     editorScrollY = 0;
     explorerScrollY = 0;
@@ -444,6 +447,7 @@ void StudioApp::buildFrame(float w, float h, float d) {
     uiBatches.clear();
     hitBoxes.clear();
     frame3DMesh.clear();
+    frame3DShadowCasters.clear();
     frame3DLines.clear();
     frame3DOverlayLines.clear();
     gizmoTips.clear();
@@ -494,15 +498,9 @@ void StudioApp::buildProjectsTab(const Rect &area) {
     float fs = 10.0f * density;
 
     emitText("Projects", area.x + pad, area.y + pad, 13.0f * density, Col::text());
-    Rect b3d{area.x + pad, area.y + 32 * density, 118 * density, 26 * density};
-    Rect b2d{b3d.x + b3d.w + 8 * density, b3d.y, 118 * density, 26 * density};
-    addBtn(b3d, "+ New 3D World", Col::btnAct(), Col::text(), fs, [this]() {
-        promptTitle = "New 3D World Name"; promptValue = "World3D"; promptTargetKey = "New3D";
-        modal = ModalKind::TEXT_PROMPT;
-    });
-    addBtn(b2d, "+ New 2D Canvas", Col::btn(), Col::text(), fs, [this]() {
-        promptTitle = "New 2D Project Name"; promptValue = "Game2D"; promptTargetKey = "New2D";
-        modal = ModalKind::TEXT_PROMPT;
+    Rect bNew{area.x + pad, area.y + 32 * density, 128 * density, 26 * density};
+    addBtn(bNew, "+ New Project", Col::btnAct(), Col::text(), fs, [this]() {
+        modal = ModalKind::NEW_PROJECT;
     });
 
     Rect listArea{area.x, area.y + 66 * density, area.w, std::max(40.0f, area.h - 66 * density)};
@@ -608,12 +606,39 @@ void StudioApp::build3DScene() {
     view[15] = 1.0f;
     mat4Mul(viewProj, proj, view);
 
-    // 3D solid meshes
+    // Light view-projection for shadow map
+    Vec3f lDir = norm3({sunDir[0], sunDir[1], sunDir[2]});
+    Vec3f lFocus = (runningLua && useCamera3DInPlay)
+        ? Vec3f{eye.x + fwd.x * 8.0f, 0.0f, eye.z + fwd.z * 8.0f}
+        : Vec3f{camTargetX, 0.0f, camTargetZ};
+    Vec3f lEye = lFocus + lDir * 45.0f;
+    Vec3f lFwd = norm3(lFocus - lEye);
+    Vec3f upHint = (std::fabs(lFwd.y) > 0.98f) ? Vec3f{0, 0, 1} : Vec3f{0, 1, 0};
+    Vec3f lRight = norm3(cross3(lFwd, upHint));
+    Vec3f lUp = cross3(lRight, lFwd);
+    float S = 38.0f, lzn = 1.0f, lzf = 110.0f;
+    float lProj[16]{};
+    lProj[0] = 1.0f / S;
+    lProj[5] = -1.0f / S;
+    lProj[10] = 1.0f / (lzn - lzf);
+    lProj[14] = lzn / (lzn - lzf);
+    lProj[15] = 1.0f;
+    float lView[16]{};
+    lView[0] = lRight.x; lView[4] = lRight.y; lView[8]  = lRight.z; lView[12] = -dot3(lRight, lEye);
+    lView[1] = lUp.x;    lView[5] = lUp.y;    lView[9]  = lUp.z;    lView[13] = -dot3(lUp, lEye);
+    lView[2] = -lFwd.x;  lView[6] = -lFwd.y;  lView[10] = -lFwd.z;  lView[14] = dot3(lFwd, lEye);
+    lView[15] = 1.0f;
+    mat4Mul(lightVP, lProj, lView);
+
+    // 3D solid meshes + shadow casters
     std::vector<const SceneNode *> meshes;
     scene.collectMeshes(meshes);
     for (const auto *p : meshes) {
         if (p->transparency >= 0.99f) continue;
         StudioScene::appendPartMesh(*p, frame3DMesh);
+        if (showShadows && p->castShadow) {
+            StudioScene::appendPartMesh(*p, frame3DShadowCasters);
+        }
     }
 
     auto addLine = [&](std::vector<MeshVertex> &dst, Vec3f a, Vec3f b, uint32_t col) {
@@ -676,11 +701,23 @@ void StudioApp::build3DScene() {
             }
         }
 
-        if (const auto *sel = selectedNode(); sel && sel->is3DNode()) {
-            addBoxWire(frame3DOverlayLines, *sel, 0.08f, StudioFont::rgba(56, 189, 248, 255));
+        if (const auto *sel = selectedNode(); sel && (sel->is3DNode() || (sel->isGroup() && toolMode == ToolMode::MOVE))) {
+            Vec3f orig{sel->posX, sel->posY, sel->posZ};
+            float gScale = 2.0f;
+            if (sel->is3DNode()) {
+                addBoxWire(frame3DOverlayLines, *sel, 0.08f, StudioFont::rgba(56, 189, 248, 255));
+                gScale = std::max({sel->sizeX, sel->sizeY, sel->sizeZ});
+            } else {
+                Vec3f sum{0, 0, 0}; int cnt = 0;
+                std::function<void(const SceneNode &)> avg = [&](const SceneNode &nd) {
+                    if (nd.is3DNode()) { sum = sum + Vec3f{nd.posX, nd.posY, nd.posZ}; cnt++; }
+                    for (const auto &c : nd.children) avg(c);
+                };
+                avg(*sel);
+                if (cnt > 0) orig = sum * (1.0f / (float)cnt);
+            }
             if (toolMode != ToolMode::SELECT) {
-                Vec3f orig{sel->posX, sel->posY, sel->posZ};
-                float gLen = std::max(3.0f, std::max({sel->sizeX, sel->sizeY, sel->sizeZ}) * 0.65f + 1.6f);
+                float gLen = std::max(3.0f, gScale * 0.65f + 1.6f);
                 Vec3f tips[3] = {{orig.x + gLen, orig.y, orig.z}, {orig.x, orig.y + gLen, orig.z}, {orig.x, orig.y, orig.z + gLen}};
                 uint32_t cols[3] = {StudioFont::rgba(239,68,68), StudioFont::rgba(34,197,94), StudioFont::rgba(59,130,246)};
                 float bx = 0, by = 0;
@@ -777,8 +814,12 @@ void StudioApp::buildTopRibbon() {
     };
 
     if (showProjectsTab) {
-        ribBtn("+ 3D World", false, Col::btnAct(), [this]() {
-            promptTitle = "New 3D World Name"; promptValue = "World3D"; promptTargetKey = "New3D";
+        ribBtn("+ 3D Example", false, Col::btnAct(), [this]() {
+            promptTitle = "New 3D Example Name"; promptValue = "Demo3D"; promptTargetKey = "New3DExample";
+            modal = ModalKind::TEXT_PROMPT;
+        });
+        ribBtn("+ 3D Scratch (Player)", false, 0, [this]() {
+            promptTitle = "New 3D Scratch Name"; promptValue = "MyGame3D"; promptTargetKey = "New3DScratch";
             modal = ModalKind::TEXT_PROMPT;
         });
         ribBtn("+ 2D Canvas", false, 0, [this]() {
@@ -803,6 +844,32 @@ void StudioApp::buildTopRibbon() {
             insertParentId = selectedId;
             modal = ModalKind::INSERT;
         });
+        auto groupWith = [this](const std::string &grpCls) {
+            std::vector<std::string> ids = multiSelectedIds;
+            if (ids.empty() && !selectedId.empty()) ids.push_back(selectedId);
+            if (!ids.empty()) {
+                std::string gid = scene.groupNodes(ids, grpCls);
+                if (!gid.empty()) {
+                    selectedId = gid;
+                    multiSelectedIds.clear();
+                    multiSelectMode = false;
+                    scene.saveToFile(currentProjectDir + "/scene.json");
+                }
+            }
+        };
+        ribBtn("Group Folder", false, 0, [groupWith]() { groupWith("Folder"); });
+        ribBtn("Group Model", false, 0, [groupWith]() { groupWith("Model"); });
+        ribBtn("Move To", false, 0, [this]() {
+            if (!selectedId.empty() || !multiSelectedIds.empty()) modal = ModalKind::REPARENT;
+        });
+        if (auto *sn = selectedNode(); sn && sn->isGroup()) {
+            ribBtn("Ungroup", false, 0, [this]() {
+                if (scene.ungroupNode(selectedId)) {
+                    selectedId.clear();
+                    scene.saveToFile(currentProjectDir + "/scene.json");
+                }
+            });
+        }
         ribBtn("Color", false, 0, [this]() { if (selectedNode()) modal = ModalKind::COLOR; });
         ribBtn("Material", false, 0, [this]() { if (selectedNode()) modal = ModalKind::MATERIAL; });
         ribBtn("Delete", false, 0, [this]() {
@@ -829,6 +896,9 @@ void StudioApp::buildTopRibbon() {
         ribBtn("+ Wedge", false, 0, [quickAdd]() { quickAdd("Wedge"); });
         ribBtn("+ Sphere", false, 0, [quickAdd]() { quickAdd("Sphere"); });
         ribBtn("+ Cylinder", false, 0, [quickAdd]() { quickAdd("Cylinder"); });
+        ribBtn("+ Plane", false, 0, [quickAdd]() { quickAdd("Plane"); });
+        ribBtn("+ Model", false, 0, [quickAdd]() { quickAdd("Model"); });
+        ribBtn("+ Folder", false, 0, [quickAdd]() { quickAdd("Folder"); });
         ribBtn("+ CollisionBox", false, 0, [quickAdd]() { quickAdd("CollisionBox"); });
         ribBtn("+ StaticBody3D", false, 0, [quickAdd]() { quickAdd("StaticBody3D"); });
         ribBtn("+ RigidBody3D", false, 0, [quickAdd]() { quickAdd("RigidBody3D"); });
@@ -839,6 +909,7 @@ void StudioApp::buildTopRibbon() {
         ribBtn("Properties", showProperties, 0, [this]() { showProperties = !showProperties; });
         ribBtn("Output", showOutput, 0, [this]() { showOutput = !showOutput; });
         ribBtn("Grid", showGrid, 0, [this]() { showGrid = !showGrid; });
+        ribBtn("Shadows", showShadows, 0, [this]() { showShadows = !showShadows; });
         ribBtn("Colliders", showColliders, 0, [this]() { showColliders = !showColliders; });
         ribBtn("Play:Cam3D", useCamera3DInPlay, 0, [this]() { useCamera3DInPlay = !useCamera3DInPlay; });
         ribBtn("Reset Cam", false, 0, [this]() {
@@ -923,6 +994,11 @@ void StudioApp::buildRightDock() {
         emitRect(rExplorer.x, rExplorer.y, 1, rExplorer.h, Col::border());
         emitRect(rExplorer.x, rExplorer.y, rExplorer.w, hdrH, Col::header());
         emitText("Scene Tree", rExplorer.x + 5 * density, rExplorer.y + 2 * density, fs, Col::text());
+        Rect rMulti{rExplorer.x + rExplorer.w - 48 * density, rExplorer.y + 1, 28 * density, hdrH - 2};
+        addBtn(rMulti, "Mul", multiSelectMode ? Col::btnAct() : Col::btn(), Col::text(), 7.3f * density, [this]() {
+            multiSelectMode = !multiSelectMode;
+            if (!multiSelectMode) multiSelectedIds.clear();
+        });
         Rect rAdd{rExplorer.x + rExplorer.w - 18 * density, rExplorer.y + 1, 16 * density, hdrH - 2};
         addBtn(rAdd, "+", Col::btn(), Col::accent(), fs, [this]() {
             insertParentId = selectedId;
@@ -944,18 +1020,27 @@ void StudioApp::buildRightDock() {
         float y = listArea.y - explorerScrollY;
         for (const auto &r : rows) {
             if (y + rowH >= listArea.y && y <= listArea.y + listArea.h) {
-                bool sel = (r.n->id == selectedId);
+                bool mSel = std::find(multiSelectedIds.begin(), multiSelectedIds.end(), r.n->id) != multiSelectedIds.end();
+                bool sel = (r.n->id == selectedId) || mSel;
                 Rect rr{listArea.x, y, listArea.w, rowH};
-                if (sel) emitRect(rr.x, rr.y, rr.w, rr.h, Col::selRow());
+                if (sel) emitRect(rr.x, rr.y, rr.w, rr.h, mSel ? StudioFont::rgba(29, 78, 137) : Col::selRow());
                 float indent = (4 + r.depth * 8) * density;
                 std::string prefix = r.n->children.empty() ? "  " : (r.n->expanded ? "v " : "> ");
-                std::string lbl = prefix + r.n->name;
+                std::string lbl = prefix + r.n->name + (r.n->className == "Model" ? " [M]" : (r.n->className == "Folder" ? " [F]" : ""));
                 uint32_t tc = sel ? Col::text() :
                     (r.n->isScript() ? Col::accent() :
-                    (r.n->isCollisionNode() ? StudioFont::rgba(34, 211, 238) : Col::text()));
+                    (r.n->isGroup() ? StudioFont::rgba(251, 191, 36) :
+                    (r.n->isCollisionNode() ? StudioFont::rgba(34, 211, 238) : Col::text())));
                 emitText(lbl, rr.x + indent, rr.y + 3 * density, 8.0f * density, tc, rr.w - indent - 2);
                 std::string nid = r.n->id;
                 hitBoxes.push_back({rr, [this, nid]() {
+                    if (multiSelectMode) {
+                        auto it = std::find(multiSelectedIds.begin(), multiSelectedIds.end(), nid);
+                        if (it != multiSelectedIds.end()) multiSelectedIds.erase(it);
+                        else multiSelectedIds.push_back(nid);
+                        selectedId = nid;
+                        return;
+                    }
                     if (auto *node = scene.findById(nid)) {
                         if (selectedId == nid && !node->children.empty()) node->expanded = !node->expanded;
                         selectedId = nid;
@@ -1011,6 +1096,9 @@ void StudioApp::buildRightDock() {
             props.push_back({"Material", n->material, [this]() { modal = ModalKind::MATERIAL; }});
             props.push_back({"Visible", n->visible ? "true" : "false", [this, n]() {
                 n->visible = !n->visible; scene.saveToFile(currentProjectDir + "/scene.json");
+            }});
+            props.push_back({"CastShadow", n->castShadow ? "true" : "false", [this, n]() {
+                n->castShadow = !n->castShadow; scene.saveToFile(currentProjectDir + "/scene.json");
             }});
             props.push_back({"Transp", fmtNum(n->transparency), [this, n]() {
                 promptTitle = "Transparency (0..1)"; promptValue = fmtNum(n->transparency);
@@ -1267,12 +1355,12 @@ void StudioApp::buildModal() {
     };
 
     if (modal == ModalKind::INSERT) {
-        closeBtn("Add Node (3D / Physics / Logic)");
+        closeBtn("Add Node (3D / Group / Logic)");
         const char *cls[] = {
             "Box", "Wedge", "Sphere", "Cylinder",
-            "Plane", "StaticBody3D", "RigidBody3D", "CollisionBox",
-            "CollisionSphere", "Area3D", "Camera3D", "DirectionalLight3D",
-            "PointLight3D", "Node3D", "Script", "Folder"
+            "Plane", "Model", "Folder", "StaticBody3D",
+            "RigidBody3D", "CollisionBox", "CollisionSphere", "Area3D",
+            "Camera3D", "DirectionalLight3D", "PointLight3D", "Script"
         };
         float cw = (mw - pad * 3) * 0.5f;
         for (int i = 0; i < 16; ++i) {
@@ -1294,6 +1382,44 @@ void StudioApp::buildModal() {
                     }
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
+                modal = ModalKind::NONE;
+            });
+        }
+    } else if (modal == ModalKind::NEW_PROJECT) {
+        closeBtn("Create New Project");
+        addBtn({box.x + pad, y, mw - pad * 2, 34 * density},
+               "3D Example (Demo World)", Col::btnAct(), Col::text(), fs, [this]() {
+                   promptTitle = "New 3D Example Name"; promptValue = "Demo3D"; promptTargetKey = "New3DExample";
+                   modal = ModalKind::TEXT_PROMPT;
+               });
+        y += 42 * density;
+        addBtn({box.x + pad, y, mw - pad * 2, 34 * density},
+               "3D From Scratch (With Player)", Col::green(), Col::text(), fs, [this]() {
+                   promptTitle = "New 3D Scratch Name"; promptValue = "MyGame3D"; promptTargetKey = "New3DScratch";
+                   modal = ModalKind::TEXT_PROMPT;
+               });
+        y += 42 * density;
+        addBtn({box.x + pad, y, mw - pad * 2, 34 * density},
+               "2D Canvas (LuaC)", Col::btn(), Col::text(), fs, [this]() {
+                   promptTitle = "New 2D Project Name"; promptValue = "Game2D"; promptTargetKey = "New2D";
+                   modal = ModalKind::TEXT_PROMPT;
+               });
+    } else if (modal == ModalKind::REPARENT) {
+        closeBtn("Move Into Folder / Model");
+        std::vector<const SceneNode *> containers;
+        scene.collectContainers(containers);
+        for (size_t i = 0; i < containers.size(); ++i) {
+            float ry = y + i * 26 * density;
+            if (ry + 22 * density > box.y + box.h - 4) break;
+            std::string dstId = containers[i]->id;
+            std::string dstLabel = containers[i]->name + "  [" + containers[i]->className + "]";
+            addBtn({box.x + pad, ry, mw - pad * 2, 22 * density}, dstLabel, Col::btn(), Col::text(), 8.5f * density, [this, dstId]() {
+                std::vector<std::string> ids = multiSelectedIds;
+                if (ids.empty() && !selectedId.empty()) ids.push_back(selectedId);
+                for (const auto &id : ids) scene.reparentNode(id, dstId);
+                multiSelectedIds.clear();
+                multiSelectMode = false;
+                scene.saveToFile(currentProjectDir + "/scene.json");
                 modal = ModalKind::NONE;
             });
         }
@@ -1409,8 +1535,12 @@ void StudioApp::buildModal() {
         y += 32 * density;
         Rect rOk{box.x + pad, y, mw - pad * 2, 25 * density};
         addBtn(rOk, "Apply", Col::btnAct(), Col::text(), fs, [this]() {
-            if (promptTargetKey == "New3D" && callbacks.createProject && !promptValue.empty()) {
-                callbacks.createProject("3d", promptValue);
+            if ((promptTargetKey == "New3DExample" || promptTargetKey == "New3D") && callbacks.createProject && !promptValue.empty()) {
+                callbacks.createProject("3d_example", promptValue);
+                modal = ModalKind::NONE;
+                openProject(promptValue, true);
+            } else if (promptTargetKey == "New3DScratch" && callbacks.createProject && !promptValue.empty()) {
+                callbacks.createProject("3d_scratch", promptValue);
                 modal = ModalKind::NONE;
                 openProject(promptValue, true);
             } else if (promptTargetKey == "New2D" && callbacks.createProject && !promptValue.empty()) {
@@ -1500,7 +1630,7 @@ std::string StudioApp::raycastPart(float sx, float sy) {
 
 void StudioApp::applyGizmoDrag(float dx, float dy) {
     auto *n = selectedNode();
-    if (!n || !n->is3DNode() || dragAxis < 0) return;
+    if (!n || (!n->is3DNode() && !n->isGroup()) || dragAxis < 0) return;
     float tipX = 0, tipY = 0, baseX = 0, baseY = 0;
     for (const auto &gt : gizmoTips) {
         if (gt.axis == dragAxis) { tipX = gt.sx; tipY = gt.sy; baseX = gt.bx; baseY = gt.by; break; }
@@ -1509,14 +1639,16 @@ void StudioApp::applyGizmoDrag(float dx, float dy) {
     float vlen = std::hypot(vx, vy);
     float delta = (vlen > 4.0f) ? ((dx * vx + dy * vy) / vlen) * 0.05f : (dx - dy) * 0.04f;
     if (toolMode == ToolMode::MOVE) {
-        if (dragAxis == 0) n->posX += delta;
-        else if (dragAxis == 1) n->posY += delta;
-        else n->posZ += delta;
-    } else if (toolMode == ToolMode::SCALE) {
+        float mx = (dragAxis == 0) ? delta : 0.0f;
+        float my = (dragAxis == 1) ? delta : 0.0f;
+        float mz = (dragAxis == 2) ? delta : 0.0f;
+        if (n->isGroup()) StudioScene::moveNodeDelta(*n, mx, my, mz);
+        else { n->posX += mx; n->posY += my; n->posZ += mz; }
+    } else if (toolMode == ToolMode::SCALE && n->is3DNode()) {
         if (dragAxis == 0) n->sizeX = std::max(0.4f, n->sizeX + delta);
         else if (dragAxis == 1) n->sizeY = std::max(0.4f, n->sizeY + delta);
         else n->sizeZ = std::max(0.4f, n->sizeZ + delta);
-    } else if (toolMode == ToolMode::ROTATE) {
+    } else if (toolMode == ToolMode::ROTATE && n->is3DNode()) {
         float deg = delta * 18.0f;
         if (dragAxis == 0) n->rotX += deg;
         else if (dragAxis == 1) n->rotY += deg;

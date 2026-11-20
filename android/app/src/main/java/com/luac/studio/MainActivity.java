@@ -170,7 +170,8 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     @SuppressWarnings("unused")
     public void nativeCbCreateProject(String kind, String name) {
         try {
-            if ("3d".equals(kind)) store.create3DProject(name);
+            if ("3d_scratch".equals(kind)) store.create3DScratchProject(name);
+            else if ("3d".equals(kind) || "3d_example".equals(kind)) store.create3DProject(name);
             else store.createProject(name);
         } catch (Exception ignored) {
         }

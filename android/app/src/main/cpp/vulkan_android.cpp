@@ -14,6 +14,7 @@
 #include "studio_app.hpp"
 #include "mesh3d_vert_spv.h"
 #include "mesh3d_frag_spv.h"
+#include "shadow_vert_spv.h"
 #include "ui2d_vert_spv.h"
 #include "ui2d_frag_spv.h"
 
@@ -22,9 +23,15 @@
 
 namespace {
 constexpr uint32_t kFrames = 2;
+constexpr uint32_t kShadowSize = 1024;
 
 struct Push3D {
     float mvp[16];
+    float flags[4];
+};
+
+struct SceneUbo {
+    float lightVP[16];
     float sunDir[4];
     float skyTint[4];
 };
@@ -47,6 +54,8 @@ struct Frame {
     VkFence fence = VK_NULL_HANDLE;
     DynBuffer vb3d;
     DynBuffer vb2d;
+    DynBuffer ubo3d;
+    VkDescriptorSet descSet3D = VK_NULL_HANDLE;
 };
 
 struct Renderer {
@@ -74,12 +83,22 @@ struct Renderer {
     std::vector<VkFence> imagesInFlight;
     std::array<Frame, kFrames> frames{};
 
+    // Shadow map pass
+    VkImage shadowImg = VK_NULL_HANDLE;
+    VkDeviceMemory shadowMem = VK_NULL_HANDLE;
+    VkImageView shadowView = VK_NULL_HANDLE;
+    VkSampler shadowSampler = VK_NULL_HANDLE;
+    VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
+    VkFramebuffer shadowFb = VK_NULL_HANDLE;
+
     // Pipelines & descriptors
+    VkDescriptorSetLayout descLayout3D = VK_NULL_HANDLE;
     VkDescriptorSetLayout descLayout = VK_NULL_HANDLE;
     VkDescriptorPool descPool = VK_NULL_HANDLE;
     VkDescriptorSet descSet = VK_NULL_HANDLE;
     VkPipelineLayout layout3D = VK_NULL_HANDLE;
     VkPipelineLayout layout2D = VK_NULL_HANDLE;
+    VkPipeline pipeShadow = VK_NULL_HANDLE;
     VkPipeline pipe3DMesh = VK_NULL_HANDLE;
     VkPipeline pipe3DLines = VK_NULL_HANDLE;
     VkPipeline pipe3DOverlay = VK_NULL_HANDLE;
@@ -117,6 +136,7 @@ void ensureDynBuffer(DynBuffer &b, VkDeviceSize need, VkBufferUsageFlags usage) 
     if (b.cap >= need && b.buf) return;
     destroyDynBuffer(b);
     VkDeviceSize cap = std::max<VkDeviceSize>(need * 2, 65536);
+    if (usage == VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) cap = std::max<VkDeviceSize>(need, 256);
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, cap, usage, VK_SHARING_MODE_EXCLUSIVE};
     check(vkCreateBuffer(r.device, &bi, nullptr, &b.buf), "vkCreateBuffer");
     VkMemoryRequirements mr{};
@@ -228,6 +248,55 @@ void createDepth() {
     iv.format = r.depthFormat;
     iv.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
     check(vkCreateImageView(r.device, &iv, nullptr, &r.depthView), "vkCreateImageView(depth)");
+}
+
+void createShadowResources() {
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = VK_FORMAT_D16_UNORM;
+    ii.extent = {kShadowSize, kShadowSize, 1};
+    ii.mipLevels = 1; ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    check(vkCreateImage(r.device, &ii, nullptr, &r.shadowImg), "vkCreateImage(shadow)");
+    VkMemoryRequirements mr{};
+    vkGetImageMemoryRequirements(r.device, r.shadowImg, &mr);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, mr.size,
+                            findMemType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+    check(vkAllocateMemory(r.device, &ai, nullptr, &r.shadowMem), "vkAllocateMemory(shadow)");
+    check(vkBindImageMemory(r.device, r.shadowImg, r.shadowMem, 0), "vkBindImageMemory(shadow)");
+
+    VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    iv.image = r.shadowImg; iv.viewType = VK_IMAGE_VIEW_TYPE_2D; iv.format = VK_FORMAT_D16_UNORM;
+    iv.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    check(vkCreateImageView(r.device, &iv, nullptr, &r.shadowView), "vkCreateImageView(shadow)");
+
+    VkSamplerCreateInfo sc{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sc.magFilter = VK_FILTER_NEAREST; sc.minFilter = VK_FILTER_NEAREST;
+    sc.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sc.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    check(vkCreateSampler(r.device, &sc, nullptr, &r.shadowSampler), "vkCreateSampler(shadow)");
+
+    VkAttachmentDescription att{0, VK_FORMAT_D16_UNORM, VK_SAMPLE_COUNT_1_BIT,
+        VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
+        VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkAttachmentReference dRef{0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub{0, VK_PIPELINE_BIND_POINT_GRAPHICS, 0, nullptr, 0, nullptr, nullptr, &dRef};
+    VkSubpassDependency deps[2]{
+        {VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+         VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, 0},
+        {0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, 0}
+    };
+    VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, nullptr, 0, 1, &att, 1, &sub, 2, deps};
+    check(vkCreateRenderPass(r.device, &rp, nullptr, &r.shadowRenderPass), "vkCreateRenderPass(shadow)");
+
+    VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, nullptr, 0, r.shadowRenderPass,
+        1, &r.shadowView, kShadowSize, kShadowSize, 1};
+    check(vkCreateFramebuffer(r.device, &fb, nullptr, &r.shadowFb), "vkCreateFramebuffer(shadow)");
 }
 
 void destroySwapchainViews() {
@@ -360,30 +429,57 @@ void createAtlasTexture() {
 }
 
 void createPipelines() {
-    VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-    VkDescriptorSetLayoutCreateInfo dsl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
-    check(vkCreateDescriptorSetLayout(r.device, &dsl, nullptr, &r.descLayout), "vkCreateDescriptorSetLayout");
+    // 2D UI descriptor layout
+    VkDescriptorSetLayoutBinding b2{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo dsl2{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b2};
+    check(vkCreateDescriptorSetLayout(r.device, &dsl2, nullptr, &r.descLayout), "vkCreateDescriptorSetLayout(2D)");
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
-    VkDescriptorPoolCreateInfo dpc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1, 1, &ps};
+    // 3D descriptor layout (shadow map + scene UBO)
+    VkDescriptorSetLayoutBinding b3[2]{
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
+    };
+    VkDescriptorSetLayoutCreateInfo dsl3{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, b3};
+    check(vkCreateDescriptorSetLayout(r.device, &dsl3, nullptr, &r.descLayout3D), "vkCreateDescriptorSetLayout(3D)");
+
+    VkDescriptorPoolSize ps[2]{
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 + kFrames},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFrames}
+    };
+    VkDescriptorPoolCreateInfo dpc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1 + kFrames, 2, ps};
     check(vkCreateDescriptorPool(r.device, &dpc, nullptr, &r.descPool), "vkCreateDescriptorPool");
 
-    VkDescriptorSetAllocateInfo dsa{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, r.descPool, 1, &r.descLayout};
-    check(vkAllocateDescriptorSets(r.device, &dsa, &r.descSet), "vkAllocateDescriptorSets");
-
+    VkDescriptorSetAllocateInfo dsa2{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, r.descPool, 1, &r.descLayout};
+    check(vkAllocateDescriptorSets(r.device, &dsa2, &r.descSet), "vkAllocateDescriptorSets(2D)");
     VkDescriptorImageInfo dii{r.atlasSampler, r.atlasView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet wds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, r.descSet, 0, 0, 1,
-                           VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &dii, nullptr, nullptr};
-    vkUpdateDescriptorSets(r.device, 1, &wds, 0, nullptr);
+    VkWriteDescriptorSet wds2{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, r.descSet, 0, 0, 1,
+                            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &dii, nullptr, nullptr};
+    vkUpdateDescriptorSets(r.device, 1, &wds2, 0, nullptr);
+
+    for (auto &f : r.frames) {
+        ensureDynBuffer(f.ubo3d, sizeof(SceneUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        VkDescriptorSetAllocateInfo dsa3{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, r.descPool, 1, &r.descLayout3D};
+        check(vkAllocateDescriptorSets(r.device, &dsa3, &f.descSet3D), "vkAllocateDescriptorSets(3D)");
+        VkDescriptorImageInfo shInfo{r.shadowSampler, r.shadowView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkDescriptorBufferInfo uboInfo{f.ubo3d.buf, 0, sizeof(SceneUbo)};
+        VkWriteDescriptorSet wds3[2]{
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, f.descSet3D, 0, 0, 1,
+             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shInfo, nullptr, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, f.descSet3D, 1, 0, 1,
+             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &uboInfo, nullptr}
+        };
+        vkUpdateDescriptorSets(r.device, 2, wds3, 0, nullptr);
+    }
 
     VkPushConstantRange pc3{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push3D)};
-    VkPipelineLayoutCreateInfo pl3{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 0, nullptr, 1, &pc3};
+    VkPipelineLayoutCreateInfo pl3{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &r.descLayout3D, 1, &pc3};
     check(vkCreatePipelineLayout(r.device, &pl3, nullptr, &r.layout3D), "vkCreatePipelineLayout(3D)");
 
     VkPushConstantRange pc2{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Push2D)};
     VkPipelineLayoutCreateInfo pl2{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &r.descLayout, 1, &pc2};
     check(vkCreatePipelineLayout(r.device, &pl2, nullptr, &r.layout2D), "vkCreatePipelineLayout(2D)");
 
+    VkShaderModule shv = makeShader(shadow_vert_spv, sizeof(shadow_vert_spv));
     VkShaderModule m3v = makeShader(mesh3d_vert_spv, sizeof(mesh3d_vert_spv));
     VkShaderModule m3f = makeShader(mesh3d_frag_spv, sizeof(mesh3d_frag_spv));
     VkShaderModule u2v = makeShader(ui2d_vert_spv, sizeof(ui2d_vert_spv));
@@ -435,13 +531,24 @@ void createPipelines() {
     gp.layout = r.layout3D; gp.renderPass = r.renderPass;
     check(vkCreateGraphicsPipelines(r.device, VK_NULL_HANDLE, 1, &gp, nullptr, &r.pipe3DMesh), "pipe3DMesh");
 
-    rs3.cullMode = VK_CULL_MODE_NONE; rs3.lineWidth = 1.0f;
     ds3.depthWriteEnable = VK_FALSE;
     gp.pInputAssemblyState = &iaLine;
     check(vkCreateGraphicsPipelines(r.device, VK_NULL_HANDLE, 1, &gp, nullptr, &r.pipe3DLines), "pipe3DLines");
 
     ds3.depthTestEnable = VK_FALSE;
     check(vkCreateGraphicsPipelines(r.device, VK_NULL_HANDLE, 1, &gp, nullptr, &r.pipe3DOverlay), "pipe3DOverlay");
+
+    // Shadow map pipeline (depth-only)
+    VkPipelineShaderStageCreateInfo stSh{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, shv, "main"};
+    VkPipelineColorBlendStateCreateInfo cbShadow{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, nullptr, 0, VK_FALSE, VK_LOGIC_OP_COPY, 0, nullptr};
+    VkPipelineDepthStencilStateCreateInfo dsShadow{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    dsShadow.depthTestEnable = VK_TRUE; dsShadow.depthWriteEnable = VK_TRUE; dsShadow.depthCompareOp = VK_COMPARE_OP_LESS;
+    VkGraphicsPipelineCreateInfo gpSh{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gpSh.stageCount = 1; gpSh.pStages = &stSh; gpSh.pVertexInputState = &vi3; gpSh.pInputAssemblyState = &iaTri;
+    gpSh.pViewportState = &vp; gpSh.pRasterizationState = &rs3; gpSh.pMultisampleState = &ms;
+    gpSh.pDepthStencilState = &dsShadow; gpSh.pColorBlendState = &cbShadow; gpSh.pDynamicState = &dyn;
+    gpSh.layout = r.layout3D; gpSh.renderPass = r.shadowRenderPass;
+    check(vkCreateGraphicsPipelines(r.device, VK_NULL_HANDLE, 1, &gpSh, nullptr, &r.pipeShadow), "pipeShadow");
 
     // 2D UI pipeline
     VkPipelineShaderStageCreateInfo st2[2]{
@@ -456,9 +563,11 @@ void createPipelines() {
     };
     VkPipelineVertexInputStateCreateInfo vi2{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, nullptr, 0, 1, &bind2, 3, attr2};
     gp.pStages = st2; gp.pVertexInputState = &vi2; gp.pInputAssemblyState = &iaTri;
-    gp.layout = r.layout2D;
+    gp.pDepthStencilState = &ds3; gp.pColorBlendState = &cb;
+    gp.layout = r.layout2D; gp.renderPass = r.renderPass;
     check(vkCreateGraphicsPipelines(r.device, VK_NULL_HANDLE, 1, &gp, nullptr, &r.pipeUi2D), "pipeUi2D");
 
+    vkDestroyShaderModule(r.device, shv, nullptr);
     vkDestroyShaderModule(r.device, m3v, nullptr);
     vkDestroyShaderModule(r.device, m3f, nullptr);
     vkDestroyShaderModule(r.device, u2v, nullptr);
@@ -478,6 +587,7 @@ void initialize(ANativeWindow *window) {
     createInstance(window);
     createDevice();
     createSwapchain();
+    createShadowResources();
     createAtlasTexture();
     createPipelines();
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr, 0, r.family};
@@ -497,11 +607,13 @@ void destroy() {
     for (auto &f : r.frames) {
         destroyDynBuffer(f.vb3d);
         destroyDynBuffer(f.vb2d);
+        destroyDynBuffer(f.ubo3d);
         if (f.fence) vkDestroyFence(r.device, f.fence, nullptr);
         if (f.acquire) vkDestroySemaphore(r.device, f.acquire, nullptr);
         if (f.pool) vkDestroyCommandPool(r.device, f.pool, nullptr);
     }
     destroyDynBuffer(r.atlasStage);
+    if (r.pipeShadow) vkDestroyPipeline(r.device, r.pipeShadow, nullptr);
     if (r.pipe3DMesh) vkDestroyPipeline(r.device, r.pipe3DMesh, nullptr);
     if (r.pipe3DLines) vkDestroyPipeline(r.device, r.pipe3DLines, nullptr);
     if (r.pipe3DOverlay) vkDestroyPipeline(r.device, r.pipe3DOverlay, nullptr);
@@ -509,11 +621,19 @@ void destroy() {
     if (r.layout3D) vkDestroyPipelineLayout(r.device, r.layout3D, nullptr);
     if (r.layout2D) vkDestroyPipelineLayout(r.device, r.layout2D, nullptr);
     if (r.descPool) vkDestroyDescriptorPool(r.device, r.descPool, nullptr);
+    if (r.descLayout3D) vkDestroyDescriptorSetLayout(r.device, r.descLayout3D, nullptr);
     if (r.descLayout) vkDestroyDescriptorSetLayout(r.device, r.descLayout, nullptr);
     if (r.atlasSampler) vkDestroySampler(r.device, r.atlasSampler, nullptr);
     if (r.atlasView) vkDestroyImageView(r.device, r.atlasView, nullptr);
     if (r.atlasImg) vkDestroyImage(r.device, r.atlasImg, nullptr);
     if (r.atlasMem) vkFreeMemory(r.device, r.atlasMem, nullptr);
+
+    if (r.shadowFb) vkDestroyFramebuffer(r.device, r.shadowFb, nullptr);
+    if (r.shadowRenderPass) vkDestroyRenderPass(r.device, r.shadowRenderPass, nullptr);
+    if (r.shadowSampler) vkDestroySampler(r.device, r.shadowSampler, nullptr);
+    if (r.shadowView) vkDestroyImageView(r.device, r.shadowView, nullptr);
+    if (r.shadowImg) vkDestroyImage(r.device, r.shadowImg, nullptr);
+    if (r.shadowMem) vkFreeMemory(r.device, r.shadowMem, nullptr);
 
     for (auto s : r.renderFinished) if (s) vkDestroySemaphore(r.device, s, nullptr);
     destroySwapchainViews();
@@ -572,13 +692,20 @@ void drawStudio(StudioApp *app, float density) {
         r.uploadedAtlasVersion = app->font.atlasVersion;
     }
 
-    // Pack dynamic vertex buffers for 3D + 2D
-    uint32_t offMesh = 0, offLine = 0, offOv = 0;
+    // Pack dynamic vertex buffers + UBO for 3D + 2D
+    uint32_t offMesh = 0, offShadow = 0, offLine = 0, offOv = 0;
     uint32_t skyOffset = 0;
     std::vector<uint32_t> batchOffsets;
 
     if (app) {
-        size_t cnt3D = app->frame3DMesh.size() + app->frame3DLines.size() + app->frame3DOverlayLines.size();
+        SceneUbo ubo{};
+        std::memcpy(ubo.lightVP, app->lightVP, sizeof(ubo.lightVP));
+        std::memcpy(ubo.sunDir, app->sunDir, sizeof(ubo.sunDir));
+        ubo.skyTint[0] = 1.0f; ubo.skyTint[1] = 1.0f; ubo.skyTint[2] = 1.0f; ubo.skyTint[3] = 0.42f;
+        std::memcpy(f.ubo3d.mapped, &ubo, sizeof(ubo));
+
+        size_t cnt3D = app->frame3DMesh.size() + app->frame3DShadowCasters.size()
+                     + app->frame3DLines.size() + app->frame3DOverlayLines.size();
         if (cnt3D > 0) {
             ensureDynBuffer(f.vb3d, cnt3D * sizeof(MeshVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
             uint8_t *dst = static_cast<uint8_t *>(f.vb3d.mapped);
@@ -586,6 +713,10 @@ void drawStudio(StudioApp *app, float density) {
             if (!app->frame3DMesh.empty()) {
                 std::memcpy(dst + cur * sizeof(MeshVertex), app->frame3DMesh.data(), app->frame3DMesh.size() * sizeof(MeshVertex));
                 offMesh = (uint32_t)cur; cur += app->frame3DMesh.size();
+            }
+            if (!app->frame3DShadowCasters.empty()) {
+                std::memcpy(dst + cur * sizeof(MeshVertex), app->frame3DShadowCasters.data(), app->frame3DShadowCasters.size() * sizeof(MeshVertex));
+                offShadow = (uint32_t)cur; cur += app->frame3DShadowCasters.size();
             }
             if (!app->frame3DLines.empty()) {
                 std::memcpy(dst + cur * sizeof(MeshVertex), app->frame3DLines.data(), app->frame3DLines.size() * sizeof(MeshVertex));
@@ -603,7 +734,6 @@ void drawStudio(StudioApp *app, float density) {
         auto *dst2 = static_cast<UiVertex *>(f.vb2d.mapped);
         size_t cur2 = 0;
 
-        // Sky gradient quad covering rViewport
         float u = 1.5f / StudioFont::kAtlasSize;
         uint32_t cTop = StudioFont::rgba((uint8_t)(app->skyTop[0] * 255), (uint8_t)(app->skyTop[1] * 255), (uint8_t)(app->skyTop[2] * 255));
         uint32_t cBot = StudioFont::rgba((uint8_t)(app->skyBot[0] * 255), (uint8_t)(app->skyBot[1] * 255), (uint8_t)(app->skyBot[2] * 255));
@@ -624,6 +754,29 @@ void drawStudio(StudioApp *app, float density) {
                 cur2 += bv.size();
             }
         }
+    }
+
+    // 0. Shadow Map pass
+    {
+        VkClearValue shClr{};
+        shClr.depthStencil = {1.0f, 0};
+        VkRenderPassBeginInfo shRp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, nullptr, r.shadowRenderPass,
+            r.shadowFb, {{0, 0}, {kShadowSize, kShadowSize}}, 1, &shClr};
+        vkCmdBeginRenderPass(f.cmd, &shRp, VK_SUBPASS_CONTENTS_INLINE);
+        if (app && app->has3DViewportVisible && !app->frame3DShadowCasters.empty() && f.vb3d.buf) {
+            VkViewport shVp{0, 0, (float)kShadowSize, (float)kShadowSize, 0.0f, 1.0f};
+            VkRect2D shSc{{0, 0}, {kShadowSize, kShadowSize}};
+            vkCmdSetViewport(f.cmd, 0, 1, &shVp);
+            vkCmdSetScissor(f.cmd, 0, 1, &shSc);
+            vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeShadow);
+            VkDeviceSize zero = 0;
+            vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vb3d.buf, &zero);
+            Push3D shPush{};
+            std::memcpy(shPush.mvp, app->lightVP, sizeof(shPush.mvp));
+            vkCmdPushConstants(f.cmd, r.layout3D, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push3D), &shPush);
+            vkCmdDraw(f.cmd, (uint32_t)app->frame3DShadowCasters.size(), 1, offShadow, 0);
+        }
+        vkCmdEndRenderPass(f.cmd);
     }
 
     VkClearValue clears[2]{};
@@ -653,7 +806,6 @@ void drawStudio(StudioApp *app, float density) {
             uint32_t vh = std::min(r.extent.height - (uint32_t)vy, (uint32_t)std::max(1.0f, app->rViewport.h));
             VkRect2D vSc{{vx, vy}, {vw, vh}};
 
-            // Sky gradient
             setFullVp();
             vkCmdSetScissor(f.cmd, 0, 1, &vSc);
             vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeUi2D);
@@ -662,24 +814,23 @@ void drawStudio(StudioApp *app, float density) {
             vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vb2d.buf, &zero);
             vkCmdDraw(f.cmd, 6, 1, skyOffset, 0);
 
-            // 3D viewport transform
             VkViewport vp3{(float)vx, (float)vy, (float)vw, (float)vh, 0.0f, 1.0f};
             vkCmdSetViewport(f.cmd, 0, 1, &vp3);
             vkCmdSetScissor(f.cmd, 0, 1, &vSc);
 
             if (f.vb3d.buf) {
                 vkCmdBindVertexBuffers(f.cmd, 0, 1, &f.vb3d.buf, &zero);
+                vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.layout3D, 0, 1, &f.descSet3D, 0, nullptr);
                 Push3D p3{};
                 std::memcpy(p3.mvp, app->viewProj, sizeof(p3.mvp));
-                std::memcpy(p3.sunDir, app->sunDir, sizeof(p3.sunDir));
-                p3.skyTint[0] = 1.0f; p3.skyTint[1] = 1.0f; p3.skyTint[2] = 1.0f; p3.skyTint[3] = 0.42f;
+                p3.flags[0] = 0.0f; // lit + shadows
 
                 if (!app->frame3DMesh.empty()) {
                     vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipe3DMesh);
                     vkCmdPushConstants(f.cmd, r.layout3D, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push3D), &p3);
                     vkCmdDraw(f.cmd, (uint32_t)app->frame3DMesh.size(), 1, offMesh, 0);
                 }
-                p3.sunDir[3] = 1.0f; // unlit lines
+                p3.flags[0] = 1.0f; // unlit lines
                 if (!app->frame3DLines.empty()) {
                     vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipe3DLines);
                     vkCmdPushConstants(f.cmd, r.layout3D, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push3D), &p3);

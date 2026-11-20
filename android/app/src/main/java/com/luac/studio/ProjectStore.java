@@ -256,6 +256,99 @@ final class ProjectStore {
         return project;
     }
 
+    File create3DScratchProject(String requested) throws IOException {
+        String name = safeName(requested, "MyGame3D");
+        File project = unique(root, name);
+        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) {
+            throw new IOException("Cannot create project folders");
+        }
+        write(new File(project, "main.lua"),
+            "-- " + name + " (From Scratch + Player Script)\n" +
+            "json = require('json')\n" +
+            "sdk = require('scripts.studio_sdk')\n" +
+            "scene = sdk.Scene()\n" +
+            "world = scene:GetNode('World3D')\n\n" +
+            "sdk.load_scene('scene.json', world)\n" +
+            "require('scripts.player')\n\n" +
+            "func update(float dt):\n" +
+            "    scene:step(dt)\n");
+        write(new File(project, "scripts/player.lua"),
+            "-- Player Character Controller (written in Lua)\n" +
+            "-- Left half drag = Move | Right half tap = Jump\n" +
+            "player = world:FindFirstChild('Player')\n" +
+            "cam = world:FindFirstChild('Camera3D')\n" +
+            "float vy = 0.0\n" +
+            "bool grounded = true\n" +
+            "float move_x = 0.0\n" +
+            "float move_z = 0.0\n" +
+            "int move_tid = -1\n" +
+            "float joy_ox = 0.0\n" +
+            "float joy_oy = 0.0\n\n" +
+            "func on_touch(int id, float x, float y, int down):\n" +
+            "    w = screen_width()\n" +
+            "    if x > w * 0.5:\n" +
+            "        if down == 1 and grounded:\n" +
+            "            vy = 11.5\n" +
+            "            grounded = false\n" +
+            "        return\n" +
+            "    if down == 1:\n" +
+            "        if move_tid == -1:\n" +
+            "            move_tid = id\n" +
+            "            joy_ox = x\n" +
+            "            joy_oy = y\n" +
+            "        elseif move_tid == id:\n" +
+            "            dx = x - joy_ox\n" +
+            "            dy = y - joy_oy\n" +
+            "            len = math.sqrt(dx * dx + dy * dy)\n" +
+            "            if len > 6.0:\n" +
+            "                s = math.min(1.0, len / 75.0)\n" +
+            "                move_x = (dx / len) * s\n" +
+            "                move_z = (dy / len) * s\n" +
+            "            else:\n" +
+            "                move_x = 0.0\n" +
+            "                move_z = 0.0\n" +
+            "    else:\n" +
+            "        if move_tid == id:\n" +
+            "            move_tid = -1\n" +
+            "            move_x = 0.0\n" +
+            "            move_z = 0.0\n\n" +
+            "func on_update(float dt):\n" +
+            "    if not player:\n" +
+            "        return\n" +
+            "    speed = 11.0\n" +
+            "    p = player.Position\n" +
+            "    p.X += move_x * speed * dt\n" +
+            "    p.Z += move_z * speed * dt\n" +
+            "    vy -= 26.0 * dt\n" +
+            "    p.Y += vy * dt\n" +
+            "    if p.Y <= 1.5:\n" +
+            "        p.Y = 1.5\n" +
+            "        vy = 0.0\n" +
+            "        grounded = true\n" +
+            "    if math.abs(move_x) > 0.05 or math.abs(move_z) > 0.05:\n" +
+            "        player.Rotation = Vector3.new(0, math.deg(math.atan2(move_x, move_z)), 0)\n" +
+            "    if cam:\n" +
+            "        cam.Position = Vector3.new(p.X, p.Y + 5.5, p.Z + 12.0)\n" +
+            "        cam.Rotation = Vector3.new(-18.0, 0.0, 0.0)\n\n" +
+            "scene.OnUpdate:Connect(on_update)\n");
+        write(new File(project, "scripts/studio_sdk.lua"), studioSdkLua());
+        write(new File(project, "scene.json"),
+            "{\"nextId\":20,\"root\":{\"id\":\"n0\",\"name\":\"SceneTree\",\"className\":\"SceneTree\",\"expanded\":true,\"children\":[" +
+            "{\"id\":\"n1\",\"name\":\"World3D\",\"className\":\"World3D\",\"expanded\":true,\"children\":[" +
+            "{\"id\":\"n2\",\"name\":\"Ground\",\"className\":\"Box\",\"posX\":0,\"posY\":-1,\"posZ\":0,\"sizeX\":80,\"sizeY\":2,\"sizeZ\":80,\"color\":-8682592,\"material\":\"SmoothPlastic\",\"staticBody\":true,\"collidable\":true,\"castShadow\":false,\"children\":[]}," +
+            "{\"id\":\"n3\",\"name\":\"Player\",\"className\":\"Box\",\"posX\":0,\"posY\":1.5,\"posZ\":0,\"sizeX\":1.8,\"sizeY\":3,\"sizeZ\":1.8,\"color\":-13058052,\"material\":\"Plastic\",\"staticBody\":false,\"collidable\":true,\"castShadow\":true,\"children\":[]}," +
+            "{\"id\":\"n4\",\"name\":\"Camera3D\",\"className\":\"Camera3D\",\"posX\":0,\"posY\":7,\"posZ\":12,\"rotX\":-18,\"fov\":60,\"children\":[]}," +
+            "{\"id\":\"n5\",\"name\":\"DirectionalLight3D\",\"className\":\"DirectionalLight3D\",\"posX\":10,\"posY\":18,\"posZ\":10,\"energy\":1.2,\"children\":[]}" +
+            "]}," +
+            "{\"id\":\"n6\",\"name\":\"Scripts\",\"className\":\"Scripts\",\"expanded\":true,\"children\":[" +
+            "{\"id\":\"n7\",\"name\":\"PlayerScript\",\"className\":\"Script\",\"scriptPath\":\"scripts/player.lua\",\"children\":[]}" +
+            "]}," +
+            "{\"id\":\"n8\",\"name\":\"Environment\",\"className\":\"Environment\",\"expanded\":false,\"clockTime\":14,\"children\":[]}," +
+            "{\"id\":\"n9\",\"name\":\"HUD\",\"className\":\"HUD\",\"expanded\":false,\"children\":[]}" +
+            "]}}\n");
+        return project;
+    }
+
     void upgradeLegacyStudioSdk() {
         final String legacyName = "rob" + "lox_sdk";
         for (File project : projects()) {

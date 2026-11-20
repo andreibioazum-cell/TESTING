@@ -29,12 +29,14 @@ endfunction()
 
 compile_spv_header("${CMAKE_CURRENT_LIST_DIR}/shaders/mesh3d.vert" "mesh3d_vert_spv" "${SHADER_GEN_DIR}/mesh3d_vert_spv.h")
 compile_spv_header("${CMAKE_CURRENT_LIST_DIR}/shaders/mesh3d.frag" "mesh3d_frag_spv" "${SHADER_GEN_DIR}/mesh3d_frag_spv.h")
+compile_spv_header("${CMAKE_CURRENT_LIST_DIR}/shaders/shadow.vert" "shadow_vert_spv" "${SHADER_GEN_DIR}/shadow_vert_spv.h")
 compile_spv_header("${CMAKE_CURRENT_LIST_DIR}/shaders/ui2d.vert"   "ui2d_vert_spv"   "${SHADER_GEN_DIR}/ui2d_vert_spv.h")
 compile_spv_header("${CMAKE_CURRENT_LIST_DIR}/shaders/ui2d.frag"   "ui2d_frag_spv"   "${SHADER_GEN_DIR}/ui2d_frag_spv.h")
 
 set(SHADER_HEADERS
     "${SHADER_GEN_DIR}/mesh3d_vert_spv.h"
     "${SHADER_GEN_DIR}/mesh3d_frag_spv.h"
+    "${SHADER_GEN_DIR}/shadow_vert_spv.h"
     "${SHADER_GEN_DIR}/ui2d_vert_spv.h"
     "${SHADER_GEN_DIR}/ui2d_frag_spv.h"
 )

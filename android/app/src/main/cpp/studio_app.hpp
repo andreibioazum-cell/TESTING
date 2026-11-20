@@ -33,7 +33,7 @@ class StudioApp {
 public:
     enum class RibbonTab { PROJECTS, HOME, CREATE, VIEW, SCRIPTS };
     enum class ToolMode { SELECT, MOVE, SCALE, ROTATE };
-    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT };
+    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT, NEW_PROJECT, REPARENT };
 
     float width = 1080.0f;
     float height = 2200.0f;
@@ -46,16 +46,19 @@ public:
 
     StudioScene scene;
     std::string selectedId;
+    bool multiSelectMode = false;
+    std::vector<std::string> multiSelectedIds;
     ToolMode toolMode = ToolMode::SELECT;
     RibbonTab activeRibbon = RibbonTab::HOME;
 
-    bool showProjectsTab = false;
+    bool showProjectsTab = true;
     bool showExplorer = true;
     bool showProperties = true;
     bool showOutput = true;
     bool showGrid = true;
     bool showColliders = true;
-    bool useCamera3DInPlay = false;
+    bool showShadows = true;
+    bool useCamera3DInPlay = true;
 
     // Editor / 3D camera state
     float camTargetX = 0, camTargetY = 1.5f, camTargetZ = -3.0f;
@@ -107,9 +110,11 @@ public:
     Rect rTopTabs, rRibbon, rDocTabs, rViewport, rRightDock, rExplorer, rProperties, rBottomDock, rOutLog, rCmdBar;
 
     std::vector<MeshVertex> frame3DMesh;
+    std::vector<MeshVertex> frame3DShadowCasters;
     std::vector<MeshVertex> frame3DLines;
     std::vector<MeshVertex> frame3DOverlayLines;
     float viewProj[16]{};
+    float lightVP[16]{};
     float skyTop[4]{0.12f, 0.43f, 0.77f, 1.0f};
     float skyBot[4]{0.55f, 0.77f, 0.95f, 1.0f};
     float sunDir[4]{0.55f, 0.85f, 0.40f, 0.0f};
