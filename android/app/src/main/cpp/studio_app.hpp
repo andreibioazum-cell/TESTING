@@ -151,8 +151,10 @@ private:
     float focalLen = 600.0f;
 
     void computeLayout();
+    Rect closePlayBtnRect() const;
     void build3DScene();
     void build2DScene(const Rect &area);
+    void renderLuaDrawOverlay(const Rect &area, bool applyClearColor);
     void buildProjectsTab(const Rect &area);
     void buildTopRibbon();
     void buildDocTabs();
@@ -177,7 +179,10 @@ private:
     void pushBatch(bool scissor, Rect sc);
     void emitRect(float x, float y, float w, float h, uint32_t col);
     void emitRectOutline(float x, float y, float w, float h, float t, uint32_t col);
+    void emitRoundRect(float x, float y, float w, float h, float rad, uint32_t col);
+    void emitLine2D(float x0, float y0, float x1, float y1, float thick, uint32_t col);
     void emitCircle(float cx, float cy, float r, uint32_t col);
+    void emitCircleOutline(float cx, float cy, float r, float thick, uint32_t col);
     void emitText(const std::string &txt, float x, float y, float pxSize, uint32_t col, float maxW = 0.0f);
     void emitTextCentered(const std::string &txt, const Rect &r, float pxSize, uint32_t col);
     void addBtn(const Rect &r, const std::string &label, uint32_t bg, uint32_t fg, float pxSize, std::function<void()> cb);

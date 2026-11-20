@@ -256,25 +256,9 @@ final class ProjectStore {
         return project;
     }
 
-    File create3DScratchProject(String requested) throws IOException {
-        String name = safeName(requested, "MyGame3D");
-        File project = unique(root, name);
-        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) {
-            throw new IOException("Cannot create project folders");
-        }
-        write(new File(project, "main.lua"),
-            "-- " + name + " (From Scratch + Player Script)\n" +
-            "json = require('json')\n" +
-            "sdk = require('scripts.studio_sdk')\n" +
-            "scene = sdk.Scene()\n" +
-            "world = scene:GetNode('World3D')\n\n" +
-            "sdk.load_scene('scene.json', world)\n" +
-            "require('scripts.player')\n\n" +
-            "func update(float dt):\n" +
-            "    scene:step(dt)\n");
-        write(new File(project, "scripts/player.lua"),
-            "-- Player Character Controller (written in Lua)\n" +
-            "-- Left half drag = Move | Right half tap = Jump\n" +
+    private static String playerScriptLua() {
+        return "-- Player Character Controller (written in Lua)\n" +
+            "-- Left joystick = Move | Right button = Jump\n" +
             "player = world:FindFirstChild('Player')\n" +
             "cam = world:FindFirstChild('Camera3D')\n" +
             "float vy = 0.0\n" +
@@ -282,26 +266,48 @@ final class ProjectStore {
             "float move_x = 0.0\n" +
             "float move_z = 0.0\n" +
             "int move_tid = -1\n" +
+            "int jump_tid = -1\n" +
             "float joy_ox = 0.0\n" +
             "float joy_oy = 0.0\n\n" +
-            "func on_touch(int id, float x, float y, bool down):\n" +
+            "func _joy_metrics():\n" +
             "    w = screen_width()\n" +
-            "    if id ~= move_tid and x > w * 0.5:\n" +
-            "        if down and grounded:\n" +
-            "            vy = 11.5\n" +
-            "            grounded = false\n" +
+            "    h = screen_height()\n" +
+            "    jr = math.max(54.0, math.min(w, h) * 0.10)\n" +
+            "    jx = math.max(jr + 28.0, w * 0.14)\n" +
+            "    jy = h - math.max(jr + 28.0, h * 0.20)\n" +
+            "    br = math.max(48.0, math.min(w, h) * 0.09)\n" +
+            "    bx = w - math.max(br + 28.0, w * 0.14)\n" +
+            "    by = h - math.max(br + 28.0, h * 0.20)\n" +
+            "    return w, h, jx, jy, jr, bx, by, br\n\n" +
+            "func on_touch(int id, float x, float y, bool down):\n" +
+            "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
+            "    if id ~= move_tid and (x > w * 0.5 or id == jump_tid):\n" +
+            "        if down:\n" +
+            "            if jump_tid == -1:\n" +
+            "                jump_tid = id\n" +
+            "                if grounded:\n" +
+            "                    vy = 11.5\n" +
+            "                    grounded = false\n" +
+            "        else:\n" +
+            "            if jump_tid == id:\n" +
+            "                jump_tid = -1\n" +
             "        return\n" +
             "    if down:\n" +
             "        if move_tid == -1:\n" +
             "            move_tid = id\n" +
-            "            joy_ox = x\n" +
-            "            joy_oy = y\n" +
-            "        elseif move_tid == id:\n" +
+            "            dist_base = math.sqrt((x - jx) * (x - jx) + (y - jy) * (y - jy))\n" +
+            "            if dist_base <= jr * 1.45:\n" +
+            "                joy_ox = jx\n" +
+            "                joy_oy = jy\n" +
+            "            else:\n" +
+            "                joy_ox = x\n" +
+            "                joy_oy = y\n" +
+            "        if move_tid == id:\n" +
             "            dx = x - joy_ox\n" +
             "            dy = y - joy_oy\n" +
             "            len = math.sqrt(dx * dx + dy * dy)\n" +
             "            if len > 6.0:\n" +
-            "                s = math.min(1.0, len / 75.0)\n" +
+            "                s = math.min(1.0, len / jr)\n" +
             "                move_x = (dx / len) * s\n" +
             "                move_z = (dy / len) * s\n" +
             "            else:\n" +
@@ -330,7 +336,42 @@ final class ProjectStore {
             "    if cam:\n" +
             "        cam.Position = Vector3.new(p.X, p.Y + 5.5, p.Z + 12.0)\n" +
             "        cam.Rotation = Vector3.new(-18.0, 0.0, 0.0)\n\n" +
-            "scene.OnUpdate:Connect(on_update)\n");
+            "func draw():\n" +
+            "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
+            "    draw_circle(jx, jy, jr, 0.08, 0.12, 0.18, 0.45)\n" +
+            "    draw_circle_outline(jx, jy, jr, 3.0, 0.78, 0.86, 0.96, 0.72)\n" +
+            "    kx = jx + move_x * jr * 0.62\n" +
+            "    ky = jy + move_z * jr * 0.62\n" +
+            "    draw_circle(kx, ky, jr * 0.40, 0.22, 0.74, 0.97, 0.85)\n" +
+            "    if jump_tid ~= -1:\n" +
+            "        draw_circle(bx, by, br, 0.22, 0.74, 0.97, 0.65)\n" +
+            "    else:\n" +
+            "        draw_circle(bx, by, br, 0.08, 0.12, 0.18, 0.50)\n" +
+            "    draw_circle_outline(bx, by, br, 3.0, 0.22, 0.74, 0.97, 0.85)\n" +
+            "    set_text_align('center')\n" +
+            "    ts = math.max(16.0, br * 0.40)\n" +
+            "    draw_text('JUMP', bx, by - ts * 0.55, ts, 1.0, 1.0, 1.0, 0.95)\n" +
+            "    set_text_align('left')\n\n" +
+            "scene.OnUpdate:Connect(on_update)\n";
+    }
+
+    File create3DScratchProject(String requested) throws IOException {
+        String name = safeName(requested, "MyGame3D");
+        File project = unique(root, name);
+        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) {
+            throw new IOException("Cannot create project folders");
+        }
+        write(new File(project, "main.lua"),
+            "-- " + name + " (From Scratch + Player Script)\n" +
+            "json = require('json')\n" +
+            "sdk = require('scripts.studio_sdk')\n" +
+            "scene = sdk.Scene()\n" +
+            "world = scene:GetNode('World3D')\n\n" +
+            "sdk.load_scene('scene.json', world)\n" +
+            "require('scripts.player')\n\n" +
+            "func update(float dt):\n" +
+            "    scene:step(dt)\n");
+        write(new File(project, "scripts/player.lua"), playerScriptLua());
         write(new File(project, "scripts/studio_sdk.lua"), studioSdkLua());
         write(new File(project, "scene.json"),
             "{\"nextId\":20,\"root\":{\"id\":\"n0\",\"name\":\"SceneTree\",\"className\":\"SceneTree\",\"expanded\":true,\"children\":[" +
@@ -372,13 +413,8 @@ final class ProjectStore {
             if (playerFile.isFile()) {
                 try {
                     String p = read(playerFile);
-                    if (p.contains("func on_touch(int id, float x, float y, int down):")) {
-                        String fixed = p
-                            .replace("func on_touch(int id, float x, float y, int down):", "func on_touch(int id, float x, float y, bool down):")
-                            .replace("if x > w * 0.5:", "if id ~= move_tid and x > w * 0.5:")
-                            .replace("if down == 1 and grounded:", "if down and grounded:")
-                            .replace("if down == 1:", "if down:");
-                        write(playerFile, fixed);
+                    if (p.contains("-- Player Character Controller (written in Lua)") && !p.contains("func draw():")) {
+                        write(playerFile, playerScriptLua());
                     }
                 } catch (IOException ignored) {
                 }

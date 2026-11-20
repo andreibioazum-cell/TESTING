@@ -206,10 +206,12 @@ void StudioApp::startSim() {
         return;
     }
     if (err) luac_free(err);
-    luac_project_set_viewport(g_luacProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
     runningLua = true;
     showProjectsTab = false;
     activeScript.clear();
+    last2DFrameJson.clear();
+    computeLayout();
+    luac_project_set_viewport(g_luacProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
     appendOutput(currentIs3D ? "3D Scene running." : "2D Canvas running.", Col::green());
 }
 
@@ -220,15 +222,19 @@ void StudioApp::stopSim() {
     }
     bool wasRun = runningLua;
     runningLua = false;
-    if (currentIs3D && !prePlaySceneJson.empty()) {
-        JsonVal j = MiniJson::parse(prePlaySceneJson);
-        if (j.type == JsonVal::J_OBJ && j.get("root")) {
-            std::ofstream out(currentProjectDir + "/scene.json", std::ios::binary | std::ios::trunc);
-            if (out) out << prePlaySceneJson;
-            scene = StudioScene::loadOrCreate(currentProjectDir);
+    if (currentIs3D) {
+        last2DFrameJson.clear();
+        if (!prePlaySceneJson.empty()) {
+            JsonVal j = MiniJson::parse(prePlaySceneJson);
+            if (j.type == JsonVal::J_OBJ && j.get("root")) {
+                std::ofstream out(currentProjectDir + "/scene.json", std::ios::binary | std::ios::trunc);
+                if (out) out << prePlaySceneJson;
+                scene = StudioScene::loadOrCreate(currentProjectDir);
+            }
+            prePlaySceneJson.clear();
         }
-        prePlaySceneJson.clear();
     }
+    computeLayout();
     if (wasRun) appendOutput("Stopped.", Col::muted());
 }
 
@@ -242,7 +248,7 @@ void StudioApp::syncFromLua() {
     if (!out.empty()) appendOutput(out, Col::text());
     std::string err = res.s("error");
     if (!err.empty()) appendOutput(err, Col::red());
-    std::string val = res.s("value");
+    std::string val = res.s("result");
     if (val.empty() || val[0] != '[') return;
     JsonVal arr = MiniJson::parse(val);
     if (arr.type != JsonVal::J_ARR) return;
@@ -282,7 +288,7 @@ void StudioApp::execCommand(const std::string &cmd) {
     luac_free(raw);
     std::string out = res.s("output");
     if (!out.empty()) appendOutput(out, Col::text());
-    std::string val = res.s("value");
+    std::string val = res.s("result");
     if (!val.empty() && val != "nil") appendOutput("= " + val, Col::green());
     std::string err = res.s("error");
     if (!err.empty()) appendOutput(err, Col::red());
@@ -294,7 +300,7 @@ void StudioApp::step(float dt) {
         luac_project_set_viewport(g_luacProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
         char *raw = luac_project_step(g_luacProj, dt);
         if (raw) {
-            if (!currentIs3D) last2DFrameJson = raw;
+            last2DFrameJson = raw;
             JsonVal res = MiniJson::parse(raw);
             luac_free(raw);
             std::string out = res.s("output");
@@ -313,7 +319,18 @@ void StudioApp::step(float dt) {
 // =========================================================================
 // Layout (responsive in both Portrait & Landscape!)
 // =========================================================================
+Rect StudioApp::closePlayBtnRect() const {
+    float sz = std::round(30.0f * density);
+    float pad = std::round(10.0f * density);
+    return {std::max(pad, width - sz - pad), pad, sz, sz};
+}
+
 void StudioApp::computeLayout() {
+    if (runningLua && !showProjectsTab && activeScript.empty()) {
+        rTopTabs = rRibbon = rDocTabs = rRightDock = rExplorer = rProperties = rBottomDock = rOutLog = rCmdBar = {0, 0, 0, 0};
+        rViewport = {0, 0, width, height};
+        return;
+    }
     bool landscape = width > height;
     float topTabsH = std::round(22.0f * density);
     float ribbonH  = std::round(32.0f * density);
@@ -385,16 +402,77 @@ void StudioApp::emitRectOutline(float x, float y, float w, float h, float t, uin
     emitRect(x + w - t, y, t, h, col);
 }
 
-void StudioApp::emitCircle(float cx, float cy, float r, uint32_t col) {
+void StudioApp::emitRoundRect(float x, float y, float w, float h, float rad, uint32_t col) {
+    if (w <= 0 || h <= 0) return;
+    float r = std::max(0.0f, std::min(rad, std::min(w, h) * 0.5f));
+    if (r < 1.0f) { emitRect(x, y, w, h, col); return; }
+    emitRect(x + r, y, w - 2.0f * r, h, col);
+    emitRect(x, y + r, r, h - 2.0f * r, col);
+    emitRect(x + w - r, y + r, r, h - 2.0f * r, col);
     if (uiBatches.empty()) pushBatch(false, {});
     auto &v = uiBatches.back().verts;
     float u = 1.5f / StudioFont::kAtlasSize;
-    const int segs = 20;
+    auto corner = [&](float cx, float cy, float aStart) {
+        const int segs = 6;
+        for (int i = 0; i < segs; ++i) {
+            float a0 = aStart + (1.5707963f * i) / segs;
+            float a1 = aStart + (1.5707963f * (i + 1)) / segs;
+            v.push_back({cx, cy, u, u, col});
+            v.push_back({cx + std::cos(a0) * r, cy + std::sin(a0) * r, u, u, col});
+            v.push_back({cx + std::cos(a1) * r, cy + std::sin(a1) * r, u, u, col});
+        }
+    };
+    corner(x + w - r, y + h - r, 0.0f);
+    corner(x + r,     y + h - r, 1.5707963f);
+    corner(x + r,     y + r,     3.14159265f);
+    corner(x + w - r, y + r,     4.71238898f);
+}
+
+void StudioApp::emitLine2D(float x0, float y0, float x1, float y1, float thick, uint32_t col) {
+    float dx = x1 - x0, dy = y1 - y0;
+    float len = std::hypot(dx, dy);
+    if (len < 0.5f) return;
+    float ht = std::max(0.5f, thick * 0.5f);
+    float nx = (-dy / len) * ht, ny = (dx / len) * ht;
+    if (uiBatches.empty()) pushBatch(false, {});
+    auto &v = uiBatches.back().verts;
+    float u = 1.5f / StudioFont::kAtlasSize;
+    UiVertex a{x0 + nx, y0 + ny, u, u, col}, b{x1 + nx, y1 + ny, u, u, col};
+    UiVertex c{x1 - nx, y1 - ny, u, u, col}, d{x0 - nx, y0 - ny, u, u, col};
+    v.push_back(a); v.push_back(b); v.push_back(c);
+    v.push_back(a); v.push_back(c); v.push_back(d);
+}
+
+void StudioApp::emitCircle(float cx, float cy, float r, uint32_t col) {
+    if (r <= 0.0f) return;
+    if (uiBatches.empty()) pushBatch(false, {});
+    auto &v = uiBatches.back().verts;
+    float u = 1.5f / StudioFont::kAtlasSize;
+    const int segs = 24;
     for (int i = 0; i < segs; ++i) {
         float a0 = 6.2831853f * i / segs, a1 = 6.2831853f * (i + 1) / segs;
         v.push_back({cx, cy, u, u, col});
         v.push_back({cx + std::cos(a0) * r, cy + std::sin(a0) * r, u, u, col});
         v.push_back({cx + std::cos(a1) * r, cy + std::sin(a1) * r, u, u, col});
+    }
+}
+
+void StudioApp::emitCircleOutline(float cx, float cy, float r, float thick, uint32_t col) {
+    if (r <= 0.0f) return;
+    float rIn = std::max(0.5f, r - std::max(1.0f, thick));
+    if (uiBatches.empty()) pushBatch(false, {});
+    auto &v = uiBatches.back().verts;
+    float u = 1.5f / StudioFont::kAtlasSize;
+    const int segs = 28;
+    for (int i = 0; i < segs; ++i) {
+        float a0 = 6.2831853f * i / segs, a1 = 6.2831853f * (i + 1) / segs;
+        float c0 = std::cos(a0), s0 = std::sin(a0), c1 = std::cos(a1), s1 = std::sin(a1);
+        UiVertex o0{cx + c0 * r, cy + s0 * r, u, u, col};
+        UiVertex o1{cx + c1 * r, cy + s1 * r, u, u, col};
+        UiVertex i1{cx + c1 * rIn, cy + s1 * rIn, u, u, col};
+        UiVertex i0{cx + c0 * rIn, cy + s0 * rIn, u, u, col};
+        v.push_back(o0); v.push_back(o1); v.push_back(i1);
+        v.push_back(o0); v.push_back(i1); v.push_back(i0);
     }
 }
 
@@ -459,6 +537,8 @@ void StudioApp::buildFrame(float w, float h, float d) {
         emitRect(0, 0, width, height, Col::bg());
     }
 
+    bool isPlayingFull = (runningLua && !showProjectsTab && activeScript.empty());
+
     if (showProjectsTab) {
         buildProjectsTab(rViewport);
     } else if (!activeScript.empty()) {
@@ -474,13 +554,26 @@ void StudioApp::buildFrame(float w, float h, float d) {
                          std::max(10.0f, u->textSize * 0.65f * density), Col::argbToUi(u->argbColor));
             }
         }
-        std::string badge = runningLua ? "PLAY" : "3D";
-        float bw = font.measureWidth(badge, 10.0f * density) + 12.0f * density;
-        Rect rb{rViewport.x + rViewport.w - bw - 6 * density, rViewport.y + 6 * density, bw, 16 * density};
-        emitRect(rb.x, rb.y, rb.w, rb.h, StudioFont::rgba(15, 23, 42, 180));
-        emitTextCentered(badge, rb, 10.0f * density, runningLua ? Col::green() : Col::accent());
+        if (runningLua) renderLuaDrawOverlay(rViewport, false);
+        if (!isPlayingFull) {
+            std::string badge = "3D";
+            float bw = font.measureWidth(badge, 10.0f * density) + 12.0f * density;
+            Rect rb{rViewport.x + rViewport.w - bw - 6 * density, rViewport.y + 6 * density, bw, 16 * density};
+            emitRect(rb.x, rb.y, rb.w, rb.h, StudioFont::rgba(15, 23, 42, 180));
+            emitTextCentered(badge, rb, 10.0f * density, Col::accent());
+        }
     } else {
         build2DScene(rViewport);
+    }
+
+    if (isPlayingFull) {
+        pushBatch(false, {});
+        Rect rClose = closePlayBtnRect();
+        emitRect(rClose.x, rClose.y, rClose.w, rClose.h, StudioFont::rgba(20, 26, 36, 220));
+        emitRectOutline(rClose.x, rClose.y, rClose.w, rClose.h, 1.5f * density, StudioFont::rgba(239, 68, 68, 230));
+        emitTextCentered("X", rClose, 13.0f * density, StudioFont::rgba(255, 255, 255, 255));
+        hitBoxes.push_back({rClose, [this]() { stopSim(); }});
+        return;
     }
 
     buildTopRibbon();
@@ -732,6 +825,71 @@ void StudioApp::build3DScene() {
     }
 }
 
+void StudioApp::renderLuaDrawOverlay(const Rect &area, bool applyClearColor) {
+    if (last2DFrameJson.empty()) return;
+    auto fToU8 = [](double v) -> uint8_t {
+        return (uint8_t)std::clamp((int)std::lround(v * 255.0), 0, 255);
+    };
+    JsonVal j = MiniJson::parse(last2DFrameJson);
+    if (applyClearColor) {
+        if (const JsonVal *cc = j.get("clear_color"); cc && cc->type == JsonVal::J_ARR && cc->arr.size() >= 3) {
+            emitRect(area.x, area.y, area.w, area.h,
+                     StudioFont::rgba(fToU8(cc->arr[0].num), fToU8(cc->arr[1].num), fToU8(cc->arr[2].num)));
+        }
+    }
+    if (const JsonVal *cmds = j.get("draw_cmds"); cmds && cmds->type == JsonVal::J_ARR) {
+        for (const auto &c : cmds->arr) {
+            uint32_t col = StudioFont::rgba(255, 255, 255, 255);
+            if (const JsonVal *ca = c.get("color"); ca && ca->type == JsonVal::J_ARR && ca->arr.size() >= 3) {
+                uint8_t a = (ca->arr.size() >= 4) ? fToU8(ca->arr[3].num) : 255;
+                col = StudioFont::rgba(fToU8(ca->arr[0].num), fToU8(ca->arr[1].num), fToU8(ca->arr[2].num), a);
+            }
+            const JsonVal *kv = c.get("kind");
+            int kind = (kv && kv->type == JsonVal::J_NUM) ? (int)kv->num : -1;
+            std::string ks = (kv && kv->type == JsonVal::J_STR) ? kv->str : "";
+            float x = area.x + (float)c.d("x");
+            float y = area.y + (float)c.d("y");
+            float w = (float)c.d("w", 32.0);
+            float h = (float)c.d("h", 32.0);
+            float extra = (float)c.d("extra", 2.0);
+            if (kind == 1 || ks == "rect") {
+                emitRect(x, y, w, h, col);
+            } else if (kind == 2 || ks == "circle") {
+                float rad = (kv && kv->type == JsonVal::J_NUM) ? (w * 0.5f) : (float)c.d("radius", 6.0);
+                emitCircle(x, y, rad, col);
+            } else if (kind == 3 || ks == "text") {
+                std::string txt = c.s("text");
+                float sz = (kv && kv->type == JsonVal::J_NUM) ? w : (float)c.d("size", 18.0);
+                int align = (int)c.d("align", 0);
+                float tx = x;
+                if (align == 1) tx -= font.measureWidth(txt, sz) * 0.5f;
+                else if (align == 2) tx -= font.measureWidth(txt, sz);
+                emitText(txt, tx, y, sz, col);
+            } else if (kind == 4) {
+                emitLine2D(x, y, area.x + w, area.y + h, extra, col);
+            } else if (kind == 5) {
+                emitRectOutline(x, y, w, h, extra, col);
+            } else if (kind == 6) {
+                emitCircleOutline(x, y, w * 0.5f, extra, col);
+            } else if (kind == 7) {
+                emitRoundRect(x, y, w, h, extra, col);
+            }
+        }
+    }
+    if (const JsonVal *ents = j.get("entities"); ents && ents->type == JsonVal::J_ARR) {
+        for (const auto &e : ents->arr) {
+            uint32_t col = StudioFont::rgba((uint8_t)e.d("r", 100), (uint8_t)e.d("g", 220), (uint8_t)e.d("b", 120));
+            emitRect(area.x + (float)e.d("x"), area.y + (float)e.d("y"), (float)e.d("w", 16), (float)e.d("h", 16), col);
+        }
+    }
+    if (const JsonVal *txts = j.get("texts"); txts && txts->type == JsonVal::J_ARR) {
+        for (const auto &t : txts->arr) {
+            uint32_t col = StudioFont::rgba((uint8_t)t.d("r", 255), (uint8_t)t.d("g", 255), (uint8_t)t.d("b", 255));
+            emitText(t.s("text"), area.x + (float)t.d("x"), area.y + (float)t.d("y"), (float)t.d("size", 18), col);
+        }
+    }
+}
+
 void StudioApp::build2DScene(const Rect &area) {
     pushBatch(true, area);
     emitRect(area.x, area.y, area.w, area.h, StudioFont::rgba(15, 23, 42));
@@ -739,33 +897,7 @@ void StudioApp::build2DScene(const Rect &area) {
         emitTextCentered("2D Canvas — Tap Play to run " + currentProjectName, area, 12.0f * density, Col::muted());
         return;
     }
-    JsonVal j = MiniJson::parse(last2DFrameJson);
-    if (const JsonVal *cc = j.get("clear_color"); cc && cc->type == JsonVal::J_ARR && cc->arr.size() >= 3) {
-        emitRect(area.x, area.y, area.w, area.h,
-                 StudioFont::rgba((uint8_t)cc->arr[0].num, (uint8_t)cc->arr[1].num, (uint8_t)cc->arr[2].num));
-    }
-    if (const JsonVal *cmds = j.get("draw_cmds"); cmds && cmds->type == JsonVal::J_ARR) {
-        for (const auto &c : cmds->arr) {
-            std::string k = c.s("kind");
-            uint32_t col = StudioFont::rgba((uint8_t)c.d("r",255), (uint8_t)c.d("g",255), (uint8_t)c.d("b",255), (uint8_t)c.d("a",255));
-            float x = area.x + (float)c.d("x"), y = area.y + (float)c.d("y");
-            if (k == "rect") emitRect(x, y, (float)c.d("w"), (float)c.d("h"), col);
-            else if (k == "circle") emitCircle(x, y, (float)c.d("radius", 6), col);
-            else if (k == "text") emitText(c.s("text"), x, y, (float)c.d("size", 18), col);
-        }
-    }
-    if (const JsonVal *ents = j.get("entities"); ents && ents->type == JsonVal::J_ARR) {
-        for (const auto &e : ents->arr) {
-            uint32_t col = StudioFont::rgba((uint8_t)e.d("r",100), (uint8_t)e.d("g",220), (uint8_t)e.d("b",120));
-            emitRect(area.x + (float)e.d("x"), area.y + (float)e.d("y"), (float)e.d("w", 16), (float)e.d("h", 16), col);
-        }
-    }
-    if (const JsonVal *txts = j.get("texts"); txts && txts->type == JsonVal::J_ARR) {
-        for (const auto &t : txts->arr) {
-            uint32_t col = StudioFont::rgba((uint8_t)t.d("r",255), (uint8_t)t.d("g",255), (uint8_t)t.d("b",255));
-            emitText(t.s("text"), area.x + (float)t.d("x"), area.y + (float)t.d("y"), (float)t.d("size", 18), col);
-        }
-    }
+    renderLuaDrawOverlay(area, true);
 }
 
 void StudioApp::buildTopRibbon() {
@@ -1657,25 +1789,33 @@ void StudioApp::applyGizmoDrag(float dx, float dy) {
 }
 
 void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const int *ids, const float *xs, const float *ys) {
-    (void)pointerIndex;
     if (pointerCount <= 0) return;
     float x0 = xs[0], y0 = ys[0];
     int baseAct = action & 0xFF;
 
-    // Forward viewport touches to user Lua scripts during Play (2D or 3D)
-    if (runningLua && g_luacProj && !showProjectsTab && modal == ModalKind::NONE && activeScript.empty()) {
-        if (baseAct == 2) {
-            for (int i = 0; i < pointerCount; ++i) {
-                if (rViewport.contains(xs[i], ys[i])) {
-                    luac_project_touch(g_luacProj, ids[i], xs[i] - rViewport.x, ys[i] - rViewport.y, 1);
+    // Intercept top-right Close ('X') button before forwarding touches to running game
+    if (runningLua && !showProjectsTab && modal == ModalKind::NONE && activeScript.empty()) {
+        if (baseAct == 0 && closePlayBtnRect().contains(x0, y0)) {
+            downX = lastX = x0; downY = lastY = y0;
+            moved = false;
+            touchMode = 11;
+            dragAxis = -1;
+            lastPinch = -1;
+            return;
+        }
+        if (touchMode != 11 && g_luacProj) {
+            if (baseAct == 2) {
+                for (int i = 0; i < pointerCount; ++i) {
+                    if (rViewport.contains(xs[i], ys[i])) {
+                        luac_project_touch(g_luacProj, ids[i], xs[i] - rViewport.x, ys[i] - rViewport.y, 1);
+                    }
                 }
-            }
-            if (!currentIs3D) return;
-        } else {
-            int pi = (baseAct == 5 || baseAct == 6) ? std::max(0, std::min(pointerIndex, pointerCount - 1)) : 0;
-            if (rViewport.contains(xs[pi], ys[pi])) {
-                int down = (baseAct == 0 || baseAct == 5) ? 1 : 0;
-                luac_project_touch(g_luacProj, ids[pi], xs[pi] - rViewport.x, ys[pi] - rViewport.y, down);
+            } else {
+                int pi = (baseAct == 5 || baseAct == 6) ? std::max(0, std::min(pointerIndex, pointerCount - 1)) : 0;
+                if (rViewport.contains(xs[pi], ys[pi])) {
+                    int down = (baseAct == 0 || baseAct == 5) ? 1 : 0;
+                    luac_project_touch(g_luacProj, ids[pi], xs[pi] - rViewport.x, ys[pi] - rViewport.y, down);
+                }
             }
         }
     }
@@ -1694,7 +1834,7 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
             else if (showProperties && rProperties.contains(x0, y0)) touchMode = 7;
             else if (showOutput && rOutLog.contains(x0, y0)) touchMode = 9;
             else if (!activeScript.empty() && rViewport.contains(x0, y0)) touchMode = 8;
-            else if (currentIs3D && activeScript.empty() && rViewport.contains(x0, y0)) {
+            else if (currentIs3D && activeScript.empty() && rViewport.contains(x0, y0) && !(runningLua && useCamera3DInPlay)) {
                 for (const auto &gt : gizmoTips) {
                     if (std::hypot(x0 - gt.sx, y0 - gt.sy) <= 22.0f * density) {
                         touchMode = 3; dragAxis = gt.axis; break;
@@ -1706,7 +1846,7 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
         return;
     }
 
-    if (baseAct == 5 && pointerCount >= 2 && rViewport.contains(x0, y0) && currentIs3D && activeScript.empty() && !showProjectsTab) {
+    if (baseAct == 5 && pointerCount >= 2 && rViewport.contains(x0, y0) && currentIs3D && activeScript.empty() && !showProjectsTab && !(runningLua && useCamera3DInPlay)) {
         touchMode = 2;
         lastPinch = std::hypot(xs[1] - xs[0], ys[1] - ys[0]);
         lastX = (xs[0] + xs[1]) * 0.5f;
