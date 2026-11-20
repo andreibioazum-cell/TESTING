@@ -99,8 +99,12 @@ public final class MainActivity extends AppCompatActivity {
                 if (launch3D == null) launch3D = store.createFpsArenaProject("FPS Arena");
             }
         } catch (Exception error) { toast(error); }
-        if (launch3D != null) showStudio(launch3D);
-        else showProjects();
+        if (launch3D != null) {
+            try { showStudio(launch3D); }
+            catch (Throwable error) { toast(error); showProjects(); }
+        } else {
+            showProjects();
+        }
     }
 
     private void toast(Throwable error) { Toast.makeText(this, String.valueOf(error.getMessage() == null ? error : error.getMessage()), Toast.LENGTH_LONG).show(); }

@@ -9,6 +9,7 @@ import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
+import android.util.AttributeSet;
 import android.view.MotionEvent;
 import android.view.View;
 import java.io.File;
@@ -18,7 +19,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 
-final class Viewport3DView extends View {
+public final class Viewport3DView extends View {
     enum ToolMode { SELECT, MOVE, SCALE, ROTATE }
 
     interface Listener {
@@ -101,8 +102,16 @@ final class Viewport3DView extends View {
     private final Path polyPath = new Path();
     private final ArrayList<Face> frameFaces = new ArrayList<>();
 
-    Viewport3DView(Context context) {
-        super(context);
+    public Viewport3DView(Context context) {
+        this(context, null);
+    }
+
+    public Viewport3DView(Context context, AttributeSet attrs) {
+        this(context, attrs, 0);
+    }
+
+    public Viewport3DView(Context context, AttributeSet attrs, int defStyleAttr) {
+        super(context, attrs, defStyleAttr);
         fillPaint.setStyle(Paint.Style.FILL);
         strokePaint.setStyle(Paint.Style.STROKE);
         setFocusable(true);
@@ -359,16 +368,16 @@ final class Viewport3DView extends View {
             fillPaint.setColor(f.fillColor);
             canvas.drawPath(polyPath, fillPaint);
 
+            if (f.strokeWidth > 0f) {
+                strokePaint.setColor(f.strokeColor);
+                strokePaint.setStrokeWidth(f.strokeWidth);
+                canvas.drawPath(polyPath, strokePaint);
+            }
             if (f.isBaseplateTop && showGrid) {
                 drawBaseplateGrid(canvas, f.owner, w, h);
             }
             if (f.isSpawnTop) {
                 drawSpawnDecal(canvas, f.owner, w, h);
-            }
-            if (f.strokeWidth > 0f) {
-                strokePaint.setColor(f.strokeColor);
-                strokePaint.setStrokeWidth(f.strokeWidth);
-                canvas.drawPath(polyPath, strokePaint);
             }
         }
 
@@ -548,6 +557,7 @@ final class Viewport3DView extends View {
             avgDepth += c.z;
         }
         avgDepth /= idx.length;
+        if (Float.isNaN(avgDepth) || Float.isInfinite(avgDepth)) return;
 
         // Sun lighting
         float sunDot = nx * 0.45f + ny * 0.80f - nz * 0.38f;
