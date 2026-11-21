@@ -5,8 +5,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
 #include <fstream>
 #include <sstream>
+#include <sys/stat.h>
 
 extern "C" {
 void lc_editor_init(void);
@@ -132,6 +134,10 @@ void StudioApp::openProject(const std::string &projName, bool is3D) {
     editorScrollY = 0;
     explorerScrollY = 0;
     propsScrollY = 0;
+    animPlaying = false;
+    animTime = 0.0f;
+    activeAnimFile.clear();
+    animTargetNodeId.clear();
 
     if (is3D) {
         scene = StudioScene::loadOrCreate(currentProjectDir);
@@ -325,6 +331,21 @@ void StudioApp::step(float dt) {
                 return;
             }
             if (currentIs3D) syncFromLua();
+        }
+    } else if (!runningLua && animPlaying && !activeAnim.frames.empty()) {
+        animTime += dt;
+        float dur = activeAnim.duration();
+        if (animTime >= dur) {
+            if (activeAnim.loop) {
+                animTime = std::fmod(animTime, dur);
+            } else {
+                animTime = dur;
+                animPlaying = false;
+            }
+        }
+        SceneNode *target = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+        if (target && target->is3DNode()) {
+            activeAnim.sample(animTime, *target);
         }
     }
 }
@@ -631,6 +652,136 @@ void StudioApp::applyWheelColor(bool saveScene) {
     }
 }
 
+static uint32_t lerpArgb(uint32_t a, uint32_t b, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    auto mix = [&](int shift) -> uint32_t {
+        float ca = (float)((a >> shift) & 0xFF);
+        float cb = (float)((b >> shift) & 0xFF);
+        return (uint32_t)std::clamp((int)std::lround(ca + (cb - ca) * t), 0, 255) << shift;
+    };
+    return 0xFF000000u | mix(16) | mix(8) | mix(0);
+}
+
+void StudioApp::applyClockTimeToEnv(SceneNode *env, bool updateSkyColors) {
+    if (!env) return;
+    float ct = std::fmod(std::max(0.0f, env->clockTime), 24.0f);
+    env->clockTime = ct;
+    if (!updateSkyColors) return;
+    if (env->skyPreset == "Space" || env->skyPreset == "Overcast") return;
+
+    const uint32_t nightTop = 0xFF070D1A, nightBot = 0xFF172542;
+    const uint32_t dawnTop  = 0xFF28375E, dawnBot  = 0xFFF59E0B;
+    const uint32_t dayTop   = 0xFF1E6EC4, dayBot   = 0xFF8CC4F2;
+    const uint32_t duskTop  = 0xFF4A2559, duskBot  = 0xFFF97316;
+
+    if (ct < 5.0f || ct >= 20.0f) {
+        env->skyTopColor = nightTop; env->skyBotColor = nightBot;
+        env->skyPreset = "Night";
+    } else if (ct < 6.5f) {
+        float u = (ct - 5.0f) / 1.5f;
+        env->skyTopColor = lerpArgb(nightTop, dawnTop, u);
+        env->skyBotColor = lerpArgb(nightBot, dawnBot, u);
+        env->skyPreset = "Dawn";
+    } else if (ct < 8.0f) {
+        float u = (ct - 6.5f) / 1.5f;
+        env->skyTopColor = lerpArgb(dawnTop, dayTop, u);
+        env->skyBotColor = lerpArgb(dawnBot, dayBot, u);
+        env->skyPreset = "Day";
+    } else if (ct < 17.0f) {
+        env->skyTopColor = dayTop; env->skyBotColor = dayBot;
+        env->skyPreset = "Day";
+    } else if (ct < 18.5f) {
+        float u = (ct - 17.0f) / 1.5f;
+        env->skyTopColor = lerpArgb(dayTop, duskTop, u);
+        env->skyBotColor = lerpArgb(dayBot, duskBot, u);
+        env->skyPreset = "Sunset";
+    } else {
+        float u = (ct - 18.5f) / 1.5f;
+        env->skyTopColor = lerpArgb(duskTop, nightTop, u);
+        env->skyBotColor = lerpArgb(duskBot, nightBot, u);
+        env->skyPreset = "Night";
+    }
+}
+
+std::vector<std::string> StudioApp::listAnimationFiles() const {
+    std::vector<std::string> out;
+    if (currentProjectDir.empty()) return out;
+    std::string dirPath = currentProjectDir + "/animations";
+    DIR *d = opendir(dirPath.c_str());
+    if (!d) return out;
+    while (struct dirent *ent = readdir(d)) {
+        std::string name = ent->d_name;
+        if (name.size() > 10 && name.substr(name.size() - 10) == ".anim.json") {
+            out.push_back("animations/" + name);
+        }
+    }
+    closedir(d);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::string> StudioApp::listScriptFiles() const {
+    std::vector<std::string> out;
+    auto pushUnique = [&](const std::string &p) {
+        if (p.empty()) return;
+        if (std::find(out.begin(), out.end(), p) == out.end()) out.push_back(p);
+    };
+    pushUnique("main.lua");
+    std::function<void(const SceneNode &)> walk = [&](const SceneNode &nd) {
+        if (nd.isScript() && !nd.scriptPath.empty()) pushUnique(nd.scriptPath);
+        for (const auto &c : nd.children) walk(c);
+    };
+    walk(scene.root);
+    if (!currentProjectDir.empty()) {
+        std::string sdir = currentProjectDir + "/scripts";
+        if (DIR *d = opendir(sdir.c_str())) {
+            std::vector<std::string> disk;
+            while (struct dirent *ent = readdir(d)) {
+                std::string fn = ent->d_name;
+                if (fn.size() > 4 && fn.substr(fn.size() - 4) == ".lua" && fn != "studio_sdk.lua") {
+                    disk.push_back("scripts/" + fn);
+                }
+            }
+            closedir(d);
+            std::sort(disk.begin(), disk.end());
+            for (const auto &p : disk) pushUnique(p);
+        }
+    }
+    return out;
+}
+
+void StudioApp::openAnimator(SceneNode *target) {
+    if (target && target->is3DNode()) animTargetNodeId = target->id;
+    else if (auto *s = selectedNode(); s && s->is3DNode()) animTargetNodeId = s->id;
+    else animTargetNodeId.clear();
+
+    if (!currentProjectDir.empty()) {
+        std::string dirPath = currentProjectDir + "/animations";
+        mkdir(dirPath.c_str(), 0755);
+    }
+
+    auto files = listAnimationFiles();
+    SceneNode *tn = animTargetNodeId.empty() ? nullptr : scene.findById(animTargetNodeId);
+    if (tn && !tn->animPath.empty()) {
+        activeAnimFile = tn->animPath;
+    } else if (activeAnimFile.empty() && !files.empty()) {
+        activeAnimFile = files[0];
+    }
+
+    if (!activeAnimFile.empty()) {
+        AnimClip loaded;
+        if (AnimClip::loadFromFile(currentProjectDir + "/" + activeAnimFile, loaded)) {
+            activeAnim = std::move(loaded);
+        } else {
+            activeAnim = AnimClip{};
+            activeAnim.name = activeAnimFile;
+        }
+    }
+    animPlaying = false;
+    animTime = 0.0f;
+    modal = ModalKind::ANIMATOR;
+}
+
 void StudioApp::emitColorWheel(float cx, float cy, float rad, const Rect &valBar) {
     rWheel = {cx - rad, cy - rad, rad * 2.0f, rad * 2.0f};
     rValBar = valBar;
@@ -818,31 +969,36 @@ void StudioApp::build3DScene() {
     argbToF(topCol, skyTop);
     argbToF(botCol, skyBot);
 
-    if (sp == "Night" || sp == "Space") {
-        skyTint[0] = 0.62f; skyTint[1] = 0.72f; skyTint[2] = 0.96f; skyTint[3] = 0.28f;
-    } else if (sp == "Sunset") {
-        skyTint[0] = 1.08f; skyTint[1] = 0.86f; skyTint[2] = 0.74f; skyTint[3] = 0.36f;
+    if (sp == "Space") {
+        skyTint[0] = 0.56f; skyTint[1] = 0.65f; skyTint[2] = 0.90f; skyTint[3] = 0.24f;
     } else if (sp == "Overcast") {
         skyTint[0] = 0.88f; skyTint[1] = 0.91f; skyTint[2] = 0.96f; skyTint[3] = 0.48f;
+    } else if (ct < 5.5f || ct >= 19.5f) {
+        skyTint[0] = 0.60f; skyTint[1] = 0.70f; skyTint[2] = 0.96f; skyTint[3] = 0.26f;
+    } else if ((ct >= 5.5f && ct < 7.5f) || (ct >= 17.0f && ct < 19.5f)) {
+        skyTint[0] = 1.08f; skyTint[1] = 0.86f; skyTint[2] = 0.72f; skyTint[3] = 0.36f;
     } else {
-        bool nightTime = (ct < 6.0f || ct > 18.0f);
-        skyTint[0] = nightTime ? 0.65f : 1.0f;
-        skyTint[1] = nightTime ? 0.74f : 1.0f;
-        skyTint[2] = nightTime ? 0.95f : 1.0f;
-        skyTint[3] = nightTime ? 0.28f : 0.42f;
+        skyTint[0] = 1.0f; skyTint[1] = 1.0f; skyTint[2] = 1.0f; skyTint[3] = 0.42f;
     }
 
-    // Check DirectionalLight3D in scene
-    sunDir[0] = 0.55f; sunDir[1] = 0.85f; sunDir[2] = 0.40f; sunDir[3] = 0.0f;
+    // Sun direction follows ClockTime (modulated by DirectionalLight3D azimuth if present)
     std::vector<const SceneNode *> nodes3D;
     scene.collect3DNodes(nodes3D);
+    float azX = 0.55f, azZ = 0.40f;
     for (const auto *n : nodes3D) {
         if (n->className == "DirectionalLight3D") {
-            Vec3f dir = norm3({n->posX, std::max(1.0f, n->posY), n->posZ});
-            sunDir[0] = dir.x; sunDir[1] = dir.y; sunDir[2] = dir.z;
+            azX = n->posX; azZ = n->posZ;
             break;
         }
     }
+    float azLen = std::max(0.01f, std::hypot(azX, azZ));
+    float sunAngle = (ct - 6.0f) / 12.0f * 3.14159265f;
+    float sunHoriz = std::cos(sunAngle);
+    float sunElev  = std::sin(sunAngle);
+    Vec3f sdir = (sunElev >= 0.08f)
+        ? norm3({(azX / azLen) * sunHoriz, sunElev, (azZ / azLen) * sunHoriz})
+        : norm3({-0.35f, 0.48f, -0.35f}); // Moon light at night
+    sunDir[0] = sdir.x; sunDir[1] = sdir.y; sunDir[2] = sdir.z; sunDir[3] = 0.0f;
 
     // Camera matrices (uses active Camera3D during Play when enabled, else free orbit camera)
     float fovDeg = 53.0f;
@@ -1197,6 +1353,7 @@ void StudioApp::buildTopRibbon() {
             }
         });
         ribBtn("Material", false, 0, [this]() { if (selectedNode()) modal = ModalKind::MATERIAL; });
+        ribBtn("Anim", animPlaying, 0, [this]() { openAnimator(selectedNode()); });
         ribBtn("Delete", false, 0, [this]() {
             if (!selectedId.empty() && scene.removeById(selectedId)) {
                 selectedId.clear();
@@ -1259,7 +1416,12 @@ void StudioApp::buildTopRibbon() {
                 openScript("main.lua");
             }
         });
-        ribBtn("main.lua", activeScript == "main.lua", 0, [this]() { openScript("main.lua"); });
+        for (const auto &sp : listScriptFiles()) {
+            std::string label = sp;
+            auto slash = label.find_last_of('/');
+            if (slash != std::string::npos) label = label.substr(slash + 1);
+            ribBtn(label, activeScript == sp, 0, [this, sp]() { openScript(sp); });
+        }
         ribBtn("Settings & Fonts", false, 0, [this]() { modal = ModalKind::SETTINGS; });
     }
 }
@@ -1441,6 +1603,18 @@ void StudioApp::buildRightDock() {
                 promptTargetKey = "Transparency"; modal = ModalKind::TEXT_PROMPT;
             }});
         }
+        if (n->is3DNode()) {
+            std::string animLbl = n->animPath.empty() ? "None (Pick File)" : n->animPath;
+            auto sl = animLbl.find_last_of('/');
+            if (sl != std::string::npos) animLbl = animLbl.substr(sl + 1);
+            props.push_back({"Animation", animLbl, [this, n]() { openAnimator(n); }});
+            if (!n->animPath.empty()) {
+                props.push_back({"AnimAuto", n->animAutoPlay ? "true" : "false", [this, n]() {
+                    n->animAutoPlay = !n->animAutoPlay;
+                    scene.saveToFile(currentProjectDir + "/scene.json");
+                }});
+            }
+        }
         if (n->isMeshNode() || n->isCollisionNode()) {
             props.push_back({"Collidable", n->collidable ? "true" : "false", [this, n]() {
                 n->collidable = !n->collidable; scene.saveToFile(currentProjectDir + "/scene.json");
@@ -1470,6 +1644,7 @@ void StudioApp::buildRightDock() {
                 promptTargetKey = "Energy"; modal = ModalKind::TEXT_PROMPT;
             }});
         } else if (n->isScript()) {
+            props.push_back({"Open Code", "Edit Script", [this, n]() { openScript(n->scriptPath); }});
             props.push_back({"Path", n->scriptPath, [this, n]() { openScript(n->scriptPath); }});
             props.push_back({"Disabled", n->disabled ? "true" : "false", [this, n]() {
                 n->disabled = !n->disabled; scene.saveToFile(currentProjectDir + "/scene.json");
@@ -1492,7 +1667,7 @@ void StudioApp::buildRightDock() {
             }});
             props.push_back({"ClockTime", fmtNum(n->clockTime), [this, n]() {
                 promptTitle = "ClockTime (0..24)"; promptValue = fmtNum(n->clockTime);
-                promptTargetKey = "ClockTime"; modal = ModalKind::TEXT_PROMPT;
+                promptExtra.clear(); promptTargetKey = "ClockTime"; modal = ModalKind::TEXT_PROMPT;
             }});
         } else if (n->isUi()) {
             props.push_back({"Text", n->text, [this, n]() {
@@ -1690,8 +1865,9 @@ void StudioApp::buildModal() {
         if (modal != ModalKind::TEXT_PROMPT) modal = ModalKind::NONE;
     });
 
-    float mw = std::min(width - 20 * density, (modal == ModalKind::SKY || modal == ModalKind::COLOR) ? 430.0f * density : 350.0f * density);
-    float mh = std::min(height - 20 * density, (modal == ModalKind::SKY || modal == ModalKind::COLOR) ? 325.0f * density : 350.0f * density);
+    bool wideModal = (modal == ModalKind::SKY || modal == ModalKind::COLOR || modal == ModalKind::ANIMATOR);
+    float mw = std::min(width - 20 * density, wideModal ? 440.0f * density : 350.0f * density);
+    float mh = std::min(height - 20 * density, wideModal ? 330.0f * density : 350.0f * density);
     if (modal == ModalKind::TEXT_PROMPT) mh = 132.0f * density;
     Rect box{(width - mw) * 0.5f, (height - mh) * 0.5f, mw, mh};
     emitRect(box.x, box.y, box.w, box.h, Col::panel());
@@ -1886,10 +2062,28 @@ void StudioApp::buildModal() {
                });
         emitRect(box.x + pad + tw * 2 + 4 * density - 14 * density, y + 4 * density, 10 * density, 14 * density, Col::argbToUi(botC));
 
-        addBtn({box.x + pad + (tw + 4 * density) * 2, y, tw, 22 * density},
-               "Time: " + fmtNum(ct) + "h", Col::btn(), Col::text(), 8.0f * density, [this, ct]() {
+        addBtn({box.x + pad + (tw + 4 * density) * 2, y, tw - 44 * density, 22 * density},
+               "Time: " + fmtNum(ct) + "h", Col::btn(), Col::text(), 7.8f * density, [this, ct]() {
                    promptTitle = "ClockTime (0..24)"; promptValue = fmtNum(ct);
-                   promptTargetKey = "ClockTime"; modal = ModalKind::TEXT_PROMPT;
+                   promptExtra = "SKY"; promptTargetKey = "ClockTime"; modal = ModalKind::TEXT_PROMPT;
+               });
+        addBtn({box.x + pad + (tw + 4 * density) * 2 + tw - 42 * density, y, 20 * density, 22 * density},
+               "-", Col::btn(), Col::text(), 8.5f * density, [this]() {
+                   if (auto *e = scene.findEnvironment()) {
+                       e->clockTime = std::fmod(e->clockTime + 23.0f, 24.0f);
+                       applyClockTimeToEnv(e, true);
+                       syncWheelFromArgb(skyEditBot ? e->skyBotColor : e->skyTopColor);
+                       scene.saveToFile(currentProjectDir + "/scene.json");
+                   }
+               });
+        addBtn({box.x + pad + (tw + 4 * density) * 2 + tw - 20 * density, y, 20 * density, 22 * density},
+               "+", Col::btn(), Col::text(), 8.5f * density, [this]() {
+                   if (auto *e = scene.findEnvironment()) {
+                       e->clockTime = std::fmod(e->clockTime + 1.0f, 24.0f);
+                       applyClockTimeToEnv(e, true);
+                       syncWheelFromArgb(skyEditBot ? e->skyBotColor : e->skyTopColor);
+                       scene.saveToFile(currentProjectDir + "/scene.json");
+                   }
                });
         y += 28 * density;
 
@@ -1938,6 +2132,137 @@ void StudioApp::buildModal() {
                    applyWheelColor(true);
                    modal = ModalKind::NONE;
                });
+    } else if (modal == ModalKind::ANIMATOR) {
+        closeBtn("Animations (Select File)");
+        SceneNode *tn = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+        std::string targetName = (tn && tn->is3DNode()) ? tn->name : "None (select 3D node)";
+        float leftW = std::round((mw - pad * 3) * 0.43f);
+        float rightX = box.x + pad * 2 + leftW;
+        float rightW = (box.x + box.w - pad) - rightX;
+        float bodyH = (box.y + box.h - pad) - y;
+
+        // Left column: animation files from project's animations/ folder + New File button
+        addBtn({box.x + pad, y, leftW, 23 * density}, "+ New Anim File", Col::green(), Col::text(), 8.2f * density, [this]() {
+            promptTitle = "New Animation Name";
+            promptValue = "anim_" + std::to_string(scene.nextId);
+            promptTargetKey = "NewAnim";
+            modal = ModalKind::TEXT_PROMPT;
+        });
+        std::vector<std::string> files = listAnimationFiles();
+        float fy = y + 27 * density;
+        float fRowH = 22 * density;
+        for (size_t i = 0; i < files.size(); ++i) {
+            if (fy + fRowH > box.y + box.h - pad) break;
+            std::string fpath = files[i];
+            std::string fname = fpath;
+            auto sl = fname.find_last_of('/');
+            if (sl != std::string::npos) fname = fname.substr(sl + 1);
+            bool isSel = (activeAnimFile == fpath);
+            addBtn({box.x + pad, fy, leftW, 20 * density}, fname, isSel ? Col::btnAct() : Col::btn(), Col::text(), 7.8f * density, [this, fpath]() {
+                activeAnimFile = fpath;
+                AnimClip loaded;
+                if (AnimClip::loadFromFile(currentProjectDir + "/" + fpath, loaded)) {
+                    activeAnim = std::move(loaded);
+                }
+                animTime = 0.0f;
+                animPlaying = false;
+                if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+                    n->animPath = fpath;
+                    n->animAutoPlay = true;
+                    n->animLoop = activeAnim.loop;
+                    scene.saveToFile(currentProjectDir + "/scene.json");
+                }
+            });
+            fy += fRowH;
+        }
+        if (files.empty()) {
+            emitText("No .anim.json files yet", box.x + pad, fy + 4 * density, 7.6f * density, Col::muted(), leftW);
+        }
+
+        // Right column: Target node, keyframe capture, Play/Stop, Loop, Assign, Keyframes list
+        float ry = y;
+        emitText("Node: " + targetName, rightX, ry + 2 * density, 8.2f * density, Col::accent(), rightW);
+        ry += 17 * density;
+        std::string curLbl = activeAnimFile.empty() ? "No file selected" : activeAnimFile;
+        emitText("File: " + curLbl, rightX, ry, 7.5f * density, Col::muted(), rightW);
+        ry += 14 * density;
+
+        float bw = (rightW - 4 * density) * 0.5f;
+        addBtn({rightX, ry, bw, 23 * density}, "+ Keyframe", Col::btnAct(), Col::text(), 8.0f * density, [this]() {
+            SceneNode *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+            if (!n || !n->is3DNode()) {
+                appendOutput("Select a 3D object first to add keyframe.", Col::red());
+                return;
+            }
+            if (activeAnimFile.empty()) {
+                activeAnimFile = "animations/" + n->name + "_anim.anim.json";
+                activeAnim = AnimClip{};
+                activeAnim.name = n->name + "_anim";
+            }
+            float nextT = activeAnim.frames.empty() ? 0.0f : (activeAnim.frames.back().t + 0.6f);
+            activeAnim.frames.push_back({nextT, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ});
+            activeAnim.sortFrames();
+            std::string dirPath = currentProjectDir + "/animations";
+            mkdir(dirPath.c_str(), 0755);
+            activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+            n->animPath = activeAnimFile;
+            n->animAutoPlay = true;
+            n->animLoop = activeAnim.loop;
+            scene.saveToFile(currentProjectDir + "/scene.json");
+        });
+        addBtn({rightX + bw + 4 * density, ry, bw, 23 * density},
+               animPlaying ? "Stop" : "Play", animPlaying ? Col::red() : Col::green(), Col::text(), 8.0f * density, [this]() {
+                   if (animPlaying) {
+                       animPlaying = false;
+                   } else if (!activeAnim.frames.empty()) {
+                       animTime = 0.0f;
+                       animPlaying = true;
+                       modal = ModalKind::NONE; // Close modal so user sees animation play in 3D viewport!
+                   }
+               });
+        ry += 27 * density;
+
+        addBtn({rightX, ry, bw, 22 * density},
+               activeAnim.loop ? "Loop: ON" : "Loop: OFF", Col::btn(), Col::text(), 7.8f * density, [this]() {
+                   activeAnim.loop = !activeAnim.loop;
+                   if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+                   if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+                       n->animLoop = activeAnim.loop;
+                       scene.saveToFile(currentProjectDir + "/scene.json");
+                   }
+               });
+        addBtn({rightX + bw + 4 * density, ry, bw, 22 * density},
+               "Use in Game", Col::btn(), Col::accent(), 7.8f * density, [this]() {
+                   SceneNode *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+                   if (n && n->is3DNode() && !activeAnimFile.empty()) {
+                       n->animPath = activeAnimFile;
+                       n->animAutoPlay = true;
+                       n->animLoop = activeAnim.loop;
+                       scene.saveToFile(currentProjectDir + "/scene.json");
+                       appendOutput("Assigned " + activeAnimFile + " to " + n->name, Col::green());
+                   }
+               });
+        ry += 27 * density;
+
+        // Keyframes list
+        float listH = std::max(24.0f, (box.y + box.h - pad) - ry);
+        emitRect(rightX, ry, rightW, listH, Col::bg());
+        emitRectOutline(rightX, ry, rightW, listH, 1.0f, Col::border());
+        float kfy = ry + 3 * density;
+        for (size_t i = 0; i < activeAnim.frames.size(); ++i) {
+            if (kfy + 18 * density > ry + listH) break;
+            const auto &kf = activeAnim.frames[i];
+            std::string klbl = "t=" + fmtNum(kf.t) + "s  (" + fmtNum(kf.px) + "," + fmtNum(kf.py) + "," + fmtNum(kf.pz) + ")";
+            emitText(klbl, rightX + 4 * density, kfy + 2 * density, 7.5f * density, Col::text(), rightW - 26 * density);
+            addBtn({rightX + rightW - 20 * density, kfy, 17 * density, 16 * density}, "x", Col::btn(), Col::red(), 7.2f * density, [this, i]() {
+                if (i < activeAnim.frames.size()) {
+                    activeAnim.frames.erase(activeAnim.frames.begin() + (ptrdiff_t)i);
+                    if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+                }
+            });
+            kfy += 19 * density;
+        }
+        (void)bodyH;
     } else if (modal == ModalKind::MATERIAL) {
         closeBtn("Material");
         const char *mats[] = {"Plastic", "SmoothPlastic", "Slate", "Metal", "Wood", "Neon", "Glass", "Brick"};
@@ -2049,9 +2374,33 @@ void StudioApp::buildModal() {
             } else if (promptTargetKey == "ClockTime") {
                 if (auto *env = scene.findEnvironment()) {
                     env->clockTime = std::clamp((float)std::atof(promptValue.c_str()), 0.0f, 24.0f);
+                    applyClockTimeToEnv(env, true);
+                    syncWheelFromArgb(skyEditBot ? env->skyBotColor : env->skyTopColor);
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
-                modal = ModalKind::NONE;
+                modal = (promptExtra == "SKY") ? ModalKind::SKY : ModalKind::NONE;
+                promptExtra.clear();
+            } else if (promptTargetKey == "NewAnim") {
+                std::string clean;
+                for (char ch : promptValue) {
+                    if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') clean.push_back(ch);
+                }
+                if (clean.empty()) clean = "anim";
+                std::string dirPath = currentProjectDir + "/animations";
+                mkdir(dirPath.c_str(), 0755);
+                activeAnimFile = "animations/" + clean + ".anim.json";
+                activeAnim = AnimClip{};
+                activeAnim.name = clean;
+                activeAnim.loop = true;
+                if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+                    activeAnim.frames.push_back({0.0f, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ});
+                    n->animPath = activeAnimFile;
+                    n->animAutoPlay = true;
+                    n->animLoop = true;
+                    scene.saveToFile(currentProjectDir + "/scene.json");
+                }
+                activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+                modal = ModalKind::ANIMATOR;
             } else if (promptTargetKey == "HexColor") {
                 uint32_t parsed = 0;
                 if (parseHexColor(promptValue, parsed)) {

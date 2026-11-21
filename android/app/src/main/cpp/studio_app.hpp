@@ -34,7 +34,7 @@ class StudioApp {
 public:
     enum class RibbonTab { PROJECTS, HOME, CREATE, VIEW, SCRIPTS };
     enum class ToolMode { SELECT, MOVE, SCALE, ROTATE };
-    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT, NEW_PROJECT, REPARENT, SKY };
+    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT, NEW_PROJECT, REPARENT, SKY, ANIMATOR };
 
     float width = 1080.0f;
     float height = 2200.0f;
@@ -103,6 +103,14 @@ public:
     bool skyEditBot = false;
     int lastRequestedOrientation = -1; // -1=unset, 0=landscape, 1=portrait
 
+    // Animation editor / player state
+    AnimClip activeAnim;
+    std::string activeAnimFile;
+    std::string animTargetNodeId;
+    bool animPlaying = false;
+    float animTime = 0.0f;
+    float animScrollY = 0.0f;
+
     // Scroll offsets
     float ribbonScrollX = 0;
     float explorerScrollY = 0;
@@ -167,6 +175,10 @@ private:
     uint32_t wheelArgb() const;
     void applyWheelColor(bool saveScene);
     void emitColorWheel(float cx, float cy, float rad, const Rect &valBar);
+    void applyClockTimeToEnv(SceneNode *env, bool updateSkyColors);
+    std::vector<std::string> listAnimationFiles() const;
+    std::vector<std::string> listScriptFiles() const;
+    void openAnimator(SceneNode *target);
     void computeLayout();
     void build3DScene();
     void build2DScene(const Rect &area);

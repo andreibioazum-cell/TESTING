@@ -64,10 +64,15 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         List<File> list = store.projects();
         File initial = null;
         for (File f : list) {
-            if (store.is3DProject(f)) { initial = f; break; }
+            if (store.is3DProject(f) && new File(f, "scripts/player.lua").isFile()) { initial = f; break; }
+        }
+        if (initial == null) {
+            for (File f : list) {
+                if (store.is3DProject(f)) { initial = f; break; }
+            }
         }
         if (initial == null && !list.isEmpty()) initial = list.get(0);
-        String initName = initial != null ? initial.getName() : "3D World";
+        String initName = initial != null ? initial.getName() : "3D Игра";
         boolean is3D = initial != null && store.is3DProject(initial);
 
         float density = getResources().getDisplayMetrics().density;
@@ -81,13 +86,13 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         store.upgradeLegacyStudioSdk();
         store.upgradeLegacySnakeIfUntouched();
         List<File> list = store.projects();
-        boolean has3D = false, hasSnake = false;
+        boolean has3DJoystick = false, hasSnake = false;
         for (File f : list) {
-            if (store.is3DProject(f)) has3D = true;
+            if (store.is3DProject(f) && new File(f, "scripts/player.lua").isFile()) has3DJoystick = true;
             if (f.getName().contains("Змейка")) hasSnake = true;
         }
         try {
-            if (!has3D) store.create3DProject("3D World");
+            if (!has3DJoystick) store.create3DScratchProject("3D Игра");
             if (!hasSnake) store.createSnakeProject("Змейка");
         } catch (Exception ignored) {
         }

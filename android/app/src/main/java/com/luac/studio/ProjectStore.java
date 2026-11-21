@@ -225,10 +225,26 @@ final class ProjectStore {
             "return {SnakeGame = SnakeGame, Cell = Cell}\n";
     }
 
+    private static String defaultFloatAnimJson() {
+        return "{\"name\":\"float\",\"loop\":true,\"duration\":2.0,\"keyframes\":[" +
+            "{\"t\":0.0,\"px\":8.0,\"py\":3.0,\"pz\":-8.0,\"rx\":0.0,\"ry\":0.0,\"rz\":0.0,\"sx\":2.2,\"sy\":2.2,\"sz\":2.2}," +
+            "{\"t\":1.0,\"px\":8.0,\"py\":5.8,\"pz\":-8.0,\"rx\":15.0,\"ry\":180.0,\"rz\":0.0,\"sx\":2.5,\"sy\":2.5,\"sz\":2.5}," +
+            "{\"t\":2.0,\"px\":8.0,\"py\":3.0,\"pz\":-8.0,\"rx\":0.0,\"ry\":360.0,\"rz\":0.0,\"sx\":2.2,\"sy\":2.2,\"sz\":2.2}" +
+            "]}";
+    }
+
+    private static String defaultSpinAnimJson() {
+        return "{\"name\":\"spin\",\"loop\":true,\"duration\":2.4,\"keyframes\":[" +
+            "{\"t\":0.0,\"px\":0.0,\"py\":2.5,\"pz\":-5.0,\"rx\":0.0,\"ry\":0.0,\"rz\":0.0,\"sx\":2.0,\"sy\":2.0,\"sz\":2.0}," +
+            "{\"t\":1.2,\"px\":0.0,\"py\":4.0,\"pz\":-5.0,\"rx\":0.0,\"ry\":180.0,\"rz\":0.0,\"sx\":2.4,\"sy\":2.4,\"sz\":2.4}," +
+            "{\"t\":2.4,\"px\":0.0,\"py\":2.5,\"pz\":-5.0,\"rx\":0.0,\"ry\":360.0,\"rz\":0.0,\"sx\":2.0,\"sy\":2.0,\"sz\":2.0}" +
+            "]}";
+    }
+
     File create3DProject(String requested) throws IOException {
         String name = safeName(requested, "3D World");
         File project = unique(root, name);
-        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) {
+        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs() || !new File(project, "animations").mkdirs()) {
             throw new IOException("Cannot create project folders");
         }
         write(new File(project, "main.lua"),
@@ -252,12 +268,14 @@ final class ProjectStore {
             "        cube.Rotation = Vector3.new(0, elapsed * 40.0, 0)\n\n" +
             "scene.OnUpdate:Connect(on_update)\n");
         write(new File(project, "scripts/studio_sdk.lua"), studioSdkLua());
+        write(new File(project, "animations/spin.anim.json"), defaultSpinAnimJson());
+        write(new File(project, "animations/float.anim.json"), defaultFloatAnimJson());
         write(new File(project, "scene.json"), "{}\n");
         return project;
     }
 
     private static String playerScriptLua() {
-        return "-- Player Character Controller (written in Lua)\n" +
+        return "-- Player Character Controller (written in Lua) _joy_ver2\n" +
             "-- Left joystick = Move | Right button = Jump | Right drag = Rotate Camera\n" +
             "player = world:FindFirstChild('Player')\n" +
             "cam = world:FindFirstChild('Camera3D')\n" +
@@ -278,12 +296,12 @@ final class ProjectStore {
             "func _joy_metrics():\n" +
             "    w = screen_width()\n" +
             "    h = screen_height()\n" +
-            "    jr = math.max(54.0, math.min(w, h) * 0.10)\n" +
-            "    jx = math.max(jr + 28.0, w * 0.14)\n" +
-            "    jy = h - math.max(jr + 28.0, h * 0.20)\n" +
-            "    br = math.max(48.0, math.min(w, h) * 0.09)\n" +
-            "    bx = w - math.max(br + 28.0, w * 0.14)\n" +
-            "    by = h - math.max(br + 28.0, h * 0.20)\n" +
+            "    jr = math.max(58.0, math.min(w, h) * 0.11)\n" +
+            "    jx = math.max(jr + 30.0, w * 0.14)\n" +
+            "    jy = h - math.max(jr + 30.0, h * 0.22)\n" +
+            "    br = math.max(50.0, math.min(w, h) * 0.095)\n" +
+            "    bx = w - math.max(br + 30.0, w * 0.14)\n" +
+            "    by = h - math.max(br + 30.0, h * 0.22)\n" +
             "    return w, h, jx, jy, jr, bx, by, br\n\n" +
             "func on_touch(int id, float x, float y, bool down):\n" +
             "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
@@ -293,7 +311,7 @@ final class ProjectStore {
             "            if jump_tid == -1:\n" +
             "                jump_tid = id\n" +
             "                if grounded:\n" +
-            "                    vy = 11.5\n" +
+            "                    vy = 12.2\n" +
             "                    grounded = false\n" +
             "        else:\n" +
             "            if jump_tid == id:\n" +
@@ -328,7 +346,7 @@ final class ProjectStore {
             "            dx = x - joy_ox\n" +
             "            dy = y - joy_oy\n" +
             "            len = math.sqrt(dx * dx + dy * dy)\n" +
-            "            if len > 6.0:\n" +
+            "            if len > 5.0:\n" +
             "                s = math.min(1.0, len / jr)\n" +
             "                move_x = (dx / len) * s\n" +
             "                move_z = (dy / len) * s\n" +
@@ -340,10 +358,23 @@ final class ProjectStore {
             "            move_tid = -1\n" +
             "            move_x = 0.0\n" +
             "            move_z = 0.0\n\n" +
+            "func _support_height(float px, float pz, float cur_y):\n" +
+            "    best_y = 1.5\n" +
+            "    kids = world:GetChildren()\n" +
+            "    for i = 1, #kids:\n" +
+            "        b = kids[i]\n" +
+            "        if b ~= player and b.Collidable and b.ClassName == 'Box':\n" +
+            "            hx = b.Size.X * 0.5 + 0.7\n" +
+            "            hz = b.Size.Z * 0.5 + 0.7\n" +
+            "            top = b.Position.Y + b.Size.Y * 0.5 + 1.5\n" +
+            "            if math.abs(px - b.Position.X) <= hx and math.abs(pz - b.Position.Z) <= hz:\n" +
+            "                if cur_y >= top - 0.95 and top > best_y:\n" +
+            "                    best_y = top\n" +
+            "    return best_y\n\n" +
             "func on_update(float dt):\n" +
             "    if not player:\n" +
             "        return\n" +
-            "    speed = 11.0\n" +
+            "    speed = 11.5\n" +
             "    cy = math.cos(cam_yaw)\n" +
             "    sy = math.sin(cam_yaw)\n" +
             "    wx = move_x * cy + move_z * sy\n" +
@@ -353,10 +384,13 @@ final class ProjectStore {
             "    p.Z += wz * speed * dt\n" +
             "    vy -= 26.0 * dt\n" +
             "    p.Y += vy * dt\n" +
-            "    if p.Y <= 1.5:\n" +
-            "        p.Y = 1.5\n" +
+            "    floor_y = _support_height(p.X, p.Z, p.Y)\n" +
+            "    if p.Y <= floor_y and vy <= 0.0:\n" +
+            "        p.Y = floor_y\n" +
             "        vy = 0.0\n" +
             "        grounded = true\n" +
+            "    elseif p.Y > floor_y + 0.15:\n" +
+            "        grounded = false\n" +
             "    if math.abs(wx) > 0.05 or math.abs(wz) > 0.05:\n" +
             "        player.Rotation = Vector3.new(0, math.deg(math.atan2(wx, wz)), 0)\n" +
             "    if cam:\n" +
@@ -366,19 +400,25 @@ final class ProjectStore {
             "        cam.Rotation = Vector3.new(-math.deg(cam_pitch), math.deg(cam_yaw), 0.0)\n\n" +
             "func draw():\n" +
             "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
-            "    draw_circle(jx, jy, jr, 0.08, 0.12, 0.18, 0.45)\n" +
-            "    draw_circle_outline(jx, jy, jr, 3.0, 0.78, 0.86, 0.96, 0.72)\n" +
+            "    draw_circle(jx, jy, jr + 4.0, 0.04, 0.07, 0.12, 0.55)\n" +
+            "    draw_circle(jx, jy, jr, 0.10, 0.15, 0.24, 0.65)\n" +
+            "    draw_circle_outline(jx, jy, jr, 3.5, 0.35, 0.78, 0.98, 0.90)\n" +
+            "    draw_line(jx - jr * 0.55, jy, jx + jr * 0.55, jy, 2.0, 0.75, 0.85, 0.98, 0.35)\n" +
+            "    draw_line(jx, jy - jr * 0.55, jx, jy + jr * 0.55, 2.0, 0.75, 0.85, 0.98, 0.35)\n" +
             "    kx = jx + move_x * jr * 0.62\n" +
             "    ky = jy + move_z * jr * 0.62\n" +
-            "    draw_circle(kx, ky, jr * 0.40, 0.22, 0.74, 0.97, 0.85)\n" +
+            "    draw_line(jx, jy, kx, ky, 4.0, 0.22, 0.74, 0.97, 0.70)\n" +
+            "    draw_circle(kx, ky, jr * 0.42, 0.22, 0.74, 0.97, 0.95)\n" +
+            "    draw_circle_outline(kx, ky, jr * 0.42, 2.5, 1.0, 1.0, 1.0, 0.90)\n" +
             "    if jump_tid ~= -1:\n" +
-            "        draw_circle(bx, by, br, 0.22, 0.74, 0.97, 0.65)\n" +
+            "        draw_circle(bx, by, br, 0.22, 0.74, 0.97, 0.85)\n" +
             "    else:\n" +
-            "        draw_circle(bx, by, br, 0.08, 0.12, 0.18, 0.50)\n" +
-            "    draw_circle_outline(bx, by, br, 3.0, 0.22, 0.74, 0.97, 0.85)\n" +
+            "        draw_circle(bx, by, br, 0.10, 0.15, 0.24, 0.68)\n" +
+            "    draw_circle_outline(bx, by, br, 3.5, 0.22, 0.74, 0.97, 0.95)\n" +
             "    set_text_align('center')\n" +
-            "    ts = math.max(16.0, br * 0.40)\n" +
-            "    draw_text('JUMP', bx, by - ts * 0.55, ts, 1.0, 1.0, 1.0, 0.95)\n" +
+            "    ts = math.max(16.0, br * 0.42)\n" +
+            "    draw_text('JUMP', bx, by - ts * 0.55, ts, 1.0, 1.0, 1.0, 0.98)\n" +
+            "    draw_text('Drag right = Camera', w * 0.5, 16.0, 16.0, 0.85, 0.92, 1.0, 0.75)\n" +
             "    set_text_align('left')\n\n" +
             "scene.OnUpdate:Connect(on_update)\n";
     }
@@ -386,11 +426,11 @@ final class ProjectStore {
     File create3DScratchProject(String requested) throws IOException {
         String name = safeName(requested, "MyGame3D");
         File project = unique(root, name);
-        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) {
+        if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs() || !new File(project, "animations").mkdirs()) {
             throw new IOException("Cannot create project folders");
         }
         write(new File(project, "main.lua"),
-            "-- " + name + " (From Scratch + Player Script)\n" +
+            "-- " + name + " (3D Game with Joystick + Animations)\n" +
             "json = require('json')\n" +
             "sdk = require('scripts.studio_sdk')\n" +
             "scene = sdk.Scene()\n" +
@@ -401,16 +441,23 @@ final class ProjectStore {
             "    scene:step(dt)\n");
         write(new File(project, "scripts/player.lua"), playerScriptLua());
         write(new File(project, "scripts/studio_sdk.lua"), studioSdkLua());
+        write(new File(project, "animations/float.anim.json"), defaultFloatAnimJson());
+        write(new File(project, "animations/spin.anim.json"), defaultSpinAnimJson());
         write(new File(project, "scene.json"),
-            "{\"nextId\":20,\"root\":{\"id\":\"n0\",\"name\":\"SceneTree\",\"className\":\"SceneTree\",\"expanded\":true,\"children\":[" +
+            "{\"nextId\":30,\"root\":{\"id\":\"n0\",\"name\":\"SceneTree\",\"className\":\"SceneTree\",\"expanded\":true,\"children\":[" +
             "{\"id\":\"n1\",\"name\":\"World3D\",\"className\":\"World3D\",\"expanded\":true,\"children\":[" +
-            "{\"id\":\"n2\",\"name\":\"Ground\",\"className\":\"Box\",\"posX\":0,\"posY\":-1,\"posZ\":0,\"sizeX\":80,\"sizeY\":2,\"sizeZ\":80,\"color\":-8682592,\"material\":\"SmoothPlastic\",\"staticBody\":true,\"collidable\":true,\"castShadow\":false,\"children\":[]}," +
+            "{\"id\":\"n2\",\"name\":\"Ground\",\"className\":\"Box\",\"posX\":0,\"posY\":-1,\"posZ\":0,\"sizeX\":80,\"sizeY\":2,\"sizeZ\":80,\"color\":-12169648,\"material\":\"SmoothPlastic\",\"staticBody\":true,\"collidable\":true,\"castShadow\":false,\"children\":[]}," +
             "{\"id\":\"n3\",\"name\":\"Player\",\"className\":\"Box\",\"posX\":0,\"posY\":1.5,\"posZ\":0,\"sizeX\":1.8,\"sizeY\":3,\"sizeZ\":1.8,\"color\":-13058052,\"material\":\"Plastic\",\"staticBody\":false,\"collidable\":true,\"castShadow\":true,\"children\":[]}," +
+            "{\"id\":\"n10\",\"name\":\"Step1\",\"className\":\"Box\",\"posX\":-5,\"posY\":0.8,\"posZ\":-7,\"sizeX\":5,\"sizeY\":1.6,\"sizeZ\":5,\"color\":-14513374,\"material\":\"Plastic\",\"staticBody\":true,\"collidable\":true,\"castShadow\":true,\"children\":[]}," +
+            "{\"id\":\"n11\",\"name\":\"Step2\",\"className\":\"Box\",\"posX\":0,\"posY\":2.0,\"posZ\":-13,\"sizeX\":5,\"sizeY\":4.0,\"sizeZ\":5,\"color\":-402759,\"material\":\"Plastic\",\"staticBody\":true,\"collidable\":true,\"castShadow\":true,\"children\":[]}," +
+            "{\"id\":\"n12\",\"name\":\"GoalPlatform\",\"className\":\"Box\",\"posX\":6,\"posY\":3.2,\"posZ\":-18,\"sizeX\":6,\"sizeY\":6.4,\"sizeZ\":6,\"color\":-5738985,\"material\":\"Plastic\",\"staticBody\":true,\"collidable\":true,\"castShadow\":true,\"children\":[]}," +
+            "{\"id\":\"n13\",\"name\":\"AnimCube\",\"className\":\"Box\",\"posX\":8,\"posY\":3.0,\"posZ\":-8,\"sizeX\":2.2,\"sizeY\":2.2,\"sizeZ\":2.2,\"color\":-190707,\"material\":\"Neon\",\"staticBody\":true,\"collidable\":false,\"castShadow\":true,\"animPath\":\"animations/float.anim.json\",\"animAutoPlay\":true,\"animLoop\":true,\"children\":[]}," +
             "{\"id\":\"n4\",\"name\":\"Camera3D\",\"className\":\"Camera3D\",\"posX\":0,\"posY\":7,\"posZ\":12,\"rotX\":-18,\"fov\":60,\"children\":[]}," +
             "{\"id\":\"n5\",\"name\":\"DirectionalLight3D\",\"className\":\"DirectionalLight3D\",\"posX\":10,\"posY\":18,\"posZ\":10,\"energy\":1.2,\"children\":[]}" +
             "]}," +
             "{\"id\":\"n6\",\"name\":\"Scripts\",\"className\":\"Scripts\",\"expanded\":true,\"children\":[" +
-            "{\"id\":\"n7\",\"name\":\"PlayerScript\",\"className\":\"Script\",\"scriptPath\":\"scripts/player.lua\",\"children\":[]}" +
+            "{\"id\":\"n7\",\"name\":\"PlayerScript\",\"className\":\"Script\",\"scriptPath\":\"scripts/player.lua\",\"children\":[]}," +
+            "{\"id\":\"n14\",\"name\":\"MainScript\",\"className\":\"Script\",\"scriptPath\":\"main.lua\",\"children\":[]}" +
             "]}," +
             "{\"id\":\"n8\",\"name\":\"Environment\",\"className\":\"Environment\",\"expanded\":false,\"clockTime\":14,\"children\":[]}," +
             "{\"id\":\"n9\",\"name\":\"HUD\",\"className\":\"HUD\",\"expanded\":false,\"children\":[]}" +
@@ -422,11 +469,12 @@ final class ProjectStore {
         final String legacyName = "rob" + "lox_sdk";
         for (File project : projects()) {
             File oldSdk = new File(project, "scripts/" + legacyName + ".lua");
+            File sdkFile = new File(project, "scripts/studio_sdk.lua");
             File mainFile = new File(project, "main.lua");
             if (oldSdk.exists()) {
                 oldSdk.delete();
                 try {
-                    write(new File(project, "scripts/studio_sdk.lua"), studioSdkLua());
+                    write(sdkFile, studioSdkLua());
                     if (mainFile.isFile()) {
                         String m = read(mainFile);
                         if (m.contains(legacyName)) {
@@ -436,15 +484,33 @@ final class ProjectStore {
                     }
                 } catch (IOException ignored) {
                 }
+            } else if (sdkFile.isFile()) {
+                try {
+                    String s = read(sdkFile);
+                    if (!s.contains("play_animation")) {
+                        write(sdkFile, studioSdkLua());
+                    }
+                } catch (IOException ignored) {
+                }
             }
             File playerFile = new File(project, "scripts/player.lua");
             if (playerFile.isFile()) {
                 try {
                     String p = read(playerFile);
-                    if (p.contains("-- Player Character Controller (written in Lua)") && !p.contains("cam_yaw")) {
+                    if (p.contains("-- Player Character Controller (written in Lua)") && !p.contains("_joy_ver2")) {
                         write(playerFile, playerScriptLua());
                     }
                 } catch (IOException ignored) {
+                }
+            }
+            if (is3DProject(project)) {
+                File animDir = new File(project, "animations");
+                if (!animDir.exists()) {
+                    try {
+                        write(new File(project, "animations/spin.anim.json"), defaultSpinAnimJson());
+                        write(new File(project, "animations/float.anim.json"), defaultFloatAnimJson());
+                    } catch (IOException ignored) {
+                    }
                 }
             }
         }
@@ -536,11 +602,104 @@ final class ProjectStore {
             "    inst.Color = Color3.fromRGB(r, g, b)\n" +
             "    inst.Material = node.material or 'Plastic'\n" +
             "    inst.Transparency = node.transparency or 0.0\n" +
+            "    inst.Collidable = (node.collidable ~= false)\n" +
+            "    inst.Static = (node.staticBody ~= false)\n" +
+            "    inst.AnimPath = node.animPath or ''\n" +
+            "    inst.AnimAutoPlay = (node.animAutoPlay == true)\n" +
+            "    inst.AnimLoop = (node.animLoop ~= false)\n" +
             "    inst.Parent = parent\n" +
             "    table.insert(parent._children, inst)\n" +
+            "    if inst.AnimAutoPlay and inst.AnimPath ~= '':\n" +
+            "        play_animation(inst, inst.AnimPath, inst.AnimLoop)\n" +
             "    if node.children:\n" +
             "        for i = 1, #node.children:\n" +
             "            _import_node(node.children[i], inst)\n\n" +
+            "_active_anims = {}\n" +
+            "_anim_cache = {}\n\n" +
+            "func load_animation(path):\n" +
+            "    if not path or path == '':\n" +
+            "        return nil\n" +
+            "    if _anim_cache[path]:\n" +
+            "        return _anim_cache[path]\n" +
+            "    f = io.open(path, 'r')\n" +
+            "    if not f:\n" +
+            "        return nil\n" +
+            "    raw = f:read('*a')\n" +
+            "    f:close()\n" +
+            "    data = json.decode(raw)\n" +
+            "    if data and data.keyframes:\n" +
+            "        _anim_cache[path] = data\n" +
+            "        return data\n" +
+            "    return nil\n\n" +
+            "func play_animation(node, path, loop_arg):\n" +
+            "    if not node:\n" +
+            "        return false\n" +
+            "    clip = load_animation(path)\n" +
+            "    if not clip or not clip.keyframes or #clip.keyframes == 0:\n" +
+            "        return false\n" +
+            "    lp = clip.loop\n" +
+            "    if loop_arg ~= nil:\n" +
+            "        lp = loop_arg\n" +
+            "    for i = 1, #_active_anims:\n" +
+            "        if _active_anims[i].node == node:\n" +
+            "            _active_anims[i] = {node = node, clip = clip, t = 0.0, loop = lp}\n" +
+            "            return true\n" +
+            "    table.insert(_active_anims, {node = node, clip = clip, t = 0.0, loop = lp})\n" +
+            "    return true\n\n" +
+            "func stop_animation(node):\n" +
+            "    for i = #_active_anims, 1, -1:\n" +
+            "        if _active_anims[i].node == node:\n" +
+            "            table.remove(_active_anims, i)\n\n" +
+            "func _sample_anim(node, clip, float t):\n" +
+            "    frames = clip.keyframes\n" +
+            "    n = #frames\n" +
+            "    if n == 0:\n" +
+            "        return\n" +
+            "    if n == 1 or t <= (frames[1].t or 0.0):\n" +
+            "        kf = frames[1]\n" +
+            "        node.Position = Vector3.new(kf.px or 0, kf.py or 0, kf.pz or 0)\n" +
+            "        node.Rotation = Vector3.new(kf.rx or 0, kf.ry or 0, kf.rz or 0)\n" +
+            "        node.Size = Vector3.new(kf.sx or 2, kf.sy or 2, kf.sz or 2)\n" +
+            "        return\n" +
+            "    if t >= (frames[n].t or 0.0):\n" +
+            "        kf = frames[n]\n" +
+            "        node.Position = Vector3.new(kf.px or 0, kf.py or 0, kf.pz or 0)\n" +
+            "        node.Rotation = Vector3.new(kf.rx or 0, kf.ry or 0, kf.rz or 0)\n" +
+            "        node.Size = Vector3.new(kf.sx or 2, kf.sy or 2, kf.sz or 2)\n" +
+            "        return\n" +
+            "    for i = 1, n - 1:\n" +
+            "        a = frames[i]\n" +
+            "        b = frames[i + 1]\n" +
+            "        ta = a.t or 0.0\n" +
+            "        tb = b.t or 0.0\n" +
+            "        if t >= ta and t <= tb:\n" +
+            "            span = tb - ta\n" +
+            "            if span < 0.0001:\n" +
+            "                span = 0.0001\n" +
+            "            u = (t - ta) / span\n" +
+            "            node.Position = Vector3.new((a.px or 0) + ((b.px or 0) - (a.px or 0)) * u, (a.py or 0) + ((b.py or 0) - (a.py or 0)) * u, (a.pz or 0) + ((b.pz or 0) - (a.pz or 0)) * u)\n" +
+            "            node.Rotation = Vector3.new((a.rx or 0) + ((b.rx or 0) - (a.rx or 0)) * u, (a.ry or 0) + ((b.ry or 0) - (a.ry or 0)) * u, (a.rz or 0) + ((b.rz or 0) - (a.rz or 0)) * u)\n" +
+            "            node.Size = Vector3.new((a.sx or 2) + ((b.sx or 2) - (a.sx or 2)) * u, (a.sy or 2) + ((b.sy or 2) - (a.sy or 2)) * u, (a.sz or 2) + ((b.sz or 2) - (a.sz or 2)) * u)\n" +
+            "            return\n\n" +
+            "func _step_anims(float dt):\n" +
+            "    for i = #_active_anims, 1, -1:\n" +
+            "        st = _active_anims[i]\n" +
+            "        frames = st.clip.keyframes\n" +
+            "        dur = frames[#frames].t or 0.05\n" +
+            "        if dur < 0.05:\n" +
+            "            dur = 0.05\n" +
+            "        st.t += dt\n" +
+            "        if st.t >= dur:\n" +
+            "            if st.loop:\n" +
+            "                while st.t >= dur:\n" +
+            "                    st.t -= dur\n" +
+            "                _sample_anim(st.node, st.clip, st.t)\n" +
+            "            else:\n" +
+            "                st.t = dur\n" +
+            "                _sample_anim(st.node, st.clip, st.t)\n" +
+            "                table.remove(_active_anims, i)\n" +
+            "        else:\n" +
+            "            _sample_anim(st.node, st.clip, st.t)\n\n" +
             "func load_scene(path, dst):\n" +
             "    f = io.open(path, 'r')\n" +
             "    if not f:\n" +
@@ -587,11 +746,12 @@ final class ProjectStore {
             "    func _get_node(self_s, name):\n" +
             "        return nodes[name] or nodes['World3D']\n" +
             "    func _step(self_s, dt):\n" +
+            "        _step_anims(dt)\n" +
             "        self_s.OnUpdate:Fire(dt)\n" +
             "    sc.GetNode = _get_node\n" +
             "    sc.step = _step\n" +
             "    return sc\n\n" +
-            "return {Scene = make_scene, Vector3 = Vector3, Color3 = Color3, Node = Node, load_scene = load_scene, sync = _studio_sync}\n";
+            "return {Scene = make_scene, Vector3 = Vector3, Color3 = Color3, Node = Node, load_scene = load_scene, sync = _studio_sync, load_animation = load_animation, play_animation = play_animation, stop_animation = stop_animation}\n";
     }
 
     boolean is3DProject(File project) {

@@ -59,6 +59,9 @@ struct SceneNode {
     bool disabled = false;
 
     std::string scriptPath;
+    std::string animPath;
+    bool animAutoPlay = false;
+    bool animLoop = true;
     std::string text = "3D Scene";
     int textSize = 18;
     float clockTime = 14.0f;
@@ -243,6 +246,116 @@ inline std::string esc(const std::string &s) {
     return o;
 }
 } // namespace MiniJson
+
+struct AnimKeyframe {
+    float t = 0.0f;
+    float px = 0, py = 0, pz = 0;
+    float rx = 0, ry = 0, rz = 0;
+    float sx = 2, sy = 2, sz = 2;
+};
+
+struct AnimClip {
+    std::string name = "anim";
+    bool loop = true;
+    std::vector<AnimKeyframe> frames;
+
+    float duration() const {
+        if (frames.empty()) return 0.0f;
+        return std::max(0.05f, frames.back().t);
+    }
+
+    void sortFrames() {
+        std::sort(frames.begin(), frames.end(), [](const AnimKeyframe &a, const AnimKeyframe &b) {
+            return a.t < b.t;
+        });
+    }
+
+    void sample(float timeSec, SceneNode &dst) const {
+        if (frames.empty()) return;
+        float dur = duration();
+        float t = loop ? std::fmod(std::max(0.0f, timeSec), dur) : std::clamp(timeSec, 0.0f, dur);
+        if (frames.size() == 1 || t <= frames.front().t) {
+            const auto &f = frames.front();
+            dst.posX = f.px; dst.posY = f.py; dst.posZ = f.pz;
+            dst.rotX = f.rx; dst.rotY = f.ry; dst.rotZ = f.rz;
+            dst.sizeX = std::max(0.1f, f.sx); dst.sizeY = std::max(0.1f, f.sy); dst.sizeZ = std::max(0.1f, f.sz);
+            return;
+        }
+        if (t >= frames.back().t) {
+            const auto &f = frames.back();
+            dst.posX = f.px; dst.posY = f.py; dst.posZ = f.pz;
+            dst.rotX = f.rx; dst.rotY = f.ry; dst.rotZ = f.rz;
+            dst.sizeX = std::max(0.1f, f.sx); dst.sizeY = std::max(0.1f, f.sy); dst.sizeZ = std::max(0.1f, f.sz);
+            return;
+        }
+        for (size_t i = 0; i + 1 < frames.size(); ++i) {
+            const auto &a = frames[i];
+            const auto &b = frames[i + 1];
+            if (t >= a.t && t <= b.t) {
+                float span = std::max(1e-4f, b.t - a.t);
+                float u = (t - a.t) / span;
+                dst.posX = a.px + (b.px - a.px) * u;
+                dst.posY = a.py + (b.py - a.py) * u;
+                dst.posZ = a.pz + (b.pz - a.pz) * u;
+                dst.rotX = a.rx + (b.rx - a.rx) * u;
+                dst.rotY = a.ry + (b.ry - a.ry) * u;
+                dst.rotZ = a.rz + (b.rz - a.rz) * u;
+                dst.sizeX = std::max(0.1f, a.sx + (b.sx - a.sx) * u);
+                dst.sizeY = std::max(0.1f, a.sy + (b.sy - a.sy) * u);
+                dst.sizeZ = std::max(0.1f, a.sz + (b.sz - a.sz) * u);
+                return;
+            }
+        }
+    }
+
+    std::string toJson() const {
+        std::ostringstream os;
+        os << "{\"name\":" << MiniJson::esc(name)
+           << ",\"loop\":" << (loop ? "true" : "false")
+           << ",\"duration\":" << duration()
+           << ",\"keyframes\":[";
+        for (size_t i = 0; i < frames.size(); ++i) {
+            const auto &f = frames[i];
+            if (i) os << ",";
+            os << "{\"t\":" << f.t
+               << ",\"px\":" << f.px << ",\"py\":" << f.py << ",\"pz\":" << f.pz
+               << ",\"rx\":" << f.rx << ",\"ry\":" << f.ry << ",\"rz\":" << f.rz
+               << ",\"sx\":" << f.sx << ",\"sy\":" << f.sy << ",\"sz\":" << f.sz << "}";
+        }
+        os << "]}";
+        return os.str();
+    }
+
+    bool saveToFile(const std::string &path) const {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f << toJson();
+        return f.good();
+    }
+
+    static bool loadFromFile(const std::string &path, AnimClip &out) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return false;
+        std::ostringstream ss; ss << f.rdbuf();
+        JsonVal j = MiniJson::parse(ss.str());
+        if (j.type != JsonVal::J_OBJ) return false;
+        out = AnimClip{};
+        out.name = j.s("name", "anim");
+        out.loop = j.bl("loop", true);
+        if (const JsonVal *kf = j.get("keyframes"); kf && kf->type == JsonVal::J_ARR) {
+            for (const auto &it : kf->arr) {
+                AnimKeyframe k;
+                k.t = (float)it.d("t", 0.0);
+                k.px = (float)it.d("px", 0.0); k.py = (float)it.d("py", 0.0); k.pz = (float)it.d("pz", 0.0);
+                k.rx = (float)it.d("rx", 0.0); k.ry = (float)it.d("ry", 0.0); k.rz = (float)it.d("rz", 0.0);
+                k.sx = (float)it.d("sx", 2.0); k.sy = (float)it.d("sy", 2.0); k.sz = (float)it.d("sz", 2.0);
+                out.frames.push_back(k);
+            }
+        }
+        out.sortFrames();
+        return true;
+    }
+};
 
 class StudioScene {
 public:
@@ -690,6 +803,9 @@ private:
            << ",\"locked\":" << (n.locked ? "true" : "false")
            << ",\"disabled\":" << (n.disabled ? "true" : "false")
            << ",\"scriptPath\":" << MiniJson::esc(n.scriptPath)
+           << ",\"animPath\":" << MiniJson::esc(n.animPath)
+           << ",\"animAutoPlay\":" << (n.animAutoPlay ? "true" : "false")
+           << ",\"animLoop\":" << (n.animLoop ? "true" : "false")
            << ",\"text\":" << MiniJson::esc(n.text)
            << ",\"textSize\":" << n.textSize
            << ",\"clockTime\":" << n.clockTime
@@ -727,6 +843,9 @@ private:
         n.locked = j.bl("locked", false);
         n.disabled = j.bl("disabled", false);
         n.scriptPath = j.s("scriptPath", "");
+        n.animPath = j.s("animPath", "");
+        n.animAutoPlay = j.bl("animAutoPlay", false);
+        n.animLoop = j.bl("animLoop", true);
         n.text = j.s("text", "3D Scene");
         n.textSize = (int)j.d("textSize", 18);
         n.clockTime = (float)j.d("clockTime", 14.0);
