@@ -1,4 +1,4 @@
-package com.luac.studio;
+package com.obsidiancore.studio;
 
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -25,9 +25,9 @@ import java.io.InputStream;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity implements Choreographer.FrameCallback {
-    static { System.loadLibrary("luac_native"); }
+    static { System.loadLibrary("obsidian_native"); }
 
-    private static final String PREFS = "luac_studio_prefs";
+    private static final String PREFS = "obsidian_core_prefs";
     private static final String PREF_FONT_FAMILY = "font_family";
     private static final String PREF_FONT_SIZE = "font_size";
     private static final String PREF_THEME = "theme";
@@ -64,7 +64,10 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         List<File> list = store.projects();
         File initial = null;
         for (File f : list) {
-            if (store.is3DProject(f) && new File(f, "scripts/player.lua").isFile()) { initial = f; break; }
+            if (store.is3DProject(f) && (new File(f, "scripts/player.obs").isFile() || new File(f, "scripts/player.lua").isFile())) {
+                initial = f;
+                break;
+            }
         }
         if (initial == null) {
             for (File f : list) {
@@ -83,12 +86,14 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     }
 
     private void ensureDefaultProjects() {
-        store.upgradeLegacyStudioSdk();
+        store.upgradeLegacySdk();
         store.upgradeLegacySnakeIfUntouched();
         List<File> list = store.projects();
         boolean has3DJoystick = false, hasSnake = false;
         for (File f : list) {
-            if (store.is3DProject(f) && new File(f, "scripts/player.lua").isFile()) has3DJoystick = true;
+            if (store.is3DProject(f) && (new File(f, "scripts/player.obs").isFile() || new File(f, "scripts/player.lua").isFile())) {
+                has3DJoystick = true;
+            }
             if (f.getName().contains("Змейка")) hasSnake = true;
         }
         try {
@@ -153,7 +158,6 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         }
     }
 
-    // Callbacks invoked from C++ StudioApp
     @SuppressWarnings("unused")
     public void nativeCbSetKeyboard(boolean show) {
         runOnUiThread(() -> {

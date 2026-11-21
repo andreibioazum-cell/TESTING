@@ -1,12 +1,12 @@
-#ifndef LUAC_JIT_H
-#define LUAC_JIT_H
+#ifndef OBSIDIAN_JIT_H
+#define OBSIDIAN_JIT_H
 
-/* Native machine-code JIT compiler for LuaC embedded/Android runtimes.
+/* Native machine-code JIT compiler for Obsidian Core embedded/Android runtimes.
    Compiles every module, function, closure, and dynamic load() chunk directly
-   into executable x86-64 (SysV/Win64) or ARM64 (AAPCS64) machine code — no AST
+   into executable x86-64 (SysV/Win64) or ARM64 (AAPCS64) machine code - no AST
    interpreter and no bytecode VM dispatch. */
 
-#include "runtime.h"
+#include "obsidronium_runtime.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -706,7 +706,7 @@ static void jit_patch_jump(JitComp *jc, size_t off, size_t target) {
 }
 
 #else
-#error "Unsupported architecture for LuaC native JIT (requires x86_64 or arm64)"
+#error "Unsupported architecture for Obsidian Core native JIT (requires x86_64 or arm64)"
 #endif
 
 static void jit_add_error_patch(JitComp *jc, size_t off) {
@@ -1676,6 +1676,9 @@ static char *jit_module_path(JitSession *session, const char *name, int main_fil
     const char *start, *end;
     size_t i;
     if (main_file) {
+        sb_init(&path); sb_add(&path, session->root_path); sb_add(&path, "/main.obs");
+        if (access(path.data, R_OK) == 0) return path.data;
+        sb_free(&path);
         sb_init(&path); sb_add(&path, session->root_path); sb_add(&path, "/main.lua");
         return path.data;
     }
@@ -2057,7 +2060,7 @@ static char *jit_project_frame(JitSession *session, double dt) {
     return json.data;
 }
 
-LUAC_API void *luac_project_open(const char *root_path, char **error_message) {
+OBSIDIAN_API void *obsidian_project_open(const char *root_path, char **error_message) {
     JitSession *session;
     JitModule *main_module;
     char cwd[PATH_MAX];
@@ -2093,21 +2096,21 @@ LUAC_API void *luac_project_open(const char *root_path, char **error_message) {
     lc_set_global(session->ctx, "dofile", lc_function_new(session->ctx, jit_builtin_dofile, 0, NULL, "dofile"));
     {
         LcValue package = lc_table_get(session->ctx, session->ctx->globals, lc_string(session->ctx, "package"));
-        lc_set_field(session->ctx, package, "path", lc_string(session->ctx, "./?.lua;./?/init.lua"));
+        lc_set_field(session->ctx, package, "path", lc_string(session->ctx, "./?.obs;./?/init.obs;./?.lua;./?/init.lua"));
     }
     main_module = jit_compile_module(session, "main", 1);
     if (main_module && !session->ctx->error) jit_execute_module(session, main_module);
     return session;
 }
 
-LUAC_API char *luac_project_step(void *handle, double dt) {
+OBSIDIAN_API char *obsidian_project_step(void *handle, double dt) {
     JitSession *session = (JitSession *)handle;
     if (!session) return xstrdup("{\"ok\":false,\"error\":\"project is not running\",\"output\":\"\",\"entities\":[],\"texts\":[]}");
     jit_current = session;
     return jit_project_frame(session, dt);
 }
 
-LUAC_API char *luac_project_exec(void *handle, const char *code) {
+OBSIDIAN_API char *obsidian_project_exec(void *handle, const char *code) {
     JitSession *session = (JitSession *)handle;
     LcContext *ctx;
     LcValue loaded, fn, ret = lc_nil();
@@ -2158,14 +2161,14 @@ LUAC_API char *luac_project_exec(void *handle, const char *code) {
     return json.data;
 }
 
-LUAC_API void luac_project_set_viewport(void *handle, int width, int height) {
+OBSIDIAN_API void obsidian_project_set_viewport(void *handle, int width, int height) {
     JitSession *session = (JitSession *)handle;
     if (!session || !session->ctx) return;
     if (width > 0) session->ctx->screen_w = width;
     if (height > 0) session->ctx->screen_h = height;
 }
 
-LUAC_API void luac_project_touch(void *handle, int id, double x, double y, int down) {
+OBSIDIAN_API void obsidian_project_touch(void *handle, int id, double x, double y, int down) {
     JitSession *session = (JitSession *)handle;
     LcValue world, engine, method, on_touch, args[5];
     if (!session || session->ctx->error) return;
@@ -2193,7 +2196,7 @@ LUAC_API void luac_project_touch(void *handle, int id, double x, double y, int d
     }
 }
 
-LUAC_API void luac_project_close(void *handle) {
+OBSIDIAN_API void obsidian_project_close(void *handle) {
     JitSession *session = (JitSession *)handle;
     JitProto *proto, *next_proto;
     JitModule *module, *next_module;

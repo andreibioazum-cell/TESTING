@@ -1,10 +1,10 @@
-#ifndef LUAC_TLS_H
-#define LUAC_TLS_H
+#ifndef OBSIDIAN_TLS_H
+#define OBSIDIAN_TLS_H
 
 /* mbedTLS transport for the native HTTP client. Enabled explicitly with
-   LUAC_WITH_MBEDTLS. Plain HTTP and all non-network libraries remain usable
+   OBSIDIAN_WITH_MBEDTLS. Plain HTTP and all non-network libraries remain usable
    without this dependency. */
-#ifdef LUAC_WITH_MBEDTLS
+#ifdef OBSIDIAN_WITH_MBEDTLS
 #include <mbedtls/version.h>
 #if MBEDTLS_VERSION_NUMBER >= 0x04000000
 #include <psa/crypto.h>
@@ -121,7 +121,7 @@ static int lc_tls_load_ca(LcContext *ctx, LcTls *tls) {
 }
 static int lc_tls_start(LcContext *ctx, LcTls *tls, LcOsSocket *handle, const char *host) {
     int result;
-    const char *personalization = "LuaC/0.5 HTTPS";
+    const char *personalization = "ObsidianCore/1.0 HTTPS";
     memset(tls, 0, sizeof(*tls));
     tls->handle = handle;
     mbedtls_ssl_init(&tls->ssl);
@@ -195,7 +195,7 @@ static int lc_tls_read(LcTls *tls, char *data, size_t length) {
     return result;
 }
 static int lc_tls_start_server(LcContext *ctx, LcTls *tls, LcOsSocket *handle, const char *certificate, const char *private_key) {
-    int result; const char *personalization = "LuaC/0.5 WSS server";
+    int result; const char *personalization = "ObsidianCore/1.0 WSS server";
     (void)ctx; memset(tls, 0, sizeof(*tls)); tls->handle = handle;
     mbedtls_ssl_init(&tls->ssl); mbedtls_ssl_config_init(&tls->config);
     mbedtls_x509_crt_init(&tls->ca); mbedtls_x509_crt_init(&tls->certificate); mbedtls_pk_init(&tls->private_key);
@@ -233,7 +233,7 @@ failed:
 typedef struct { char error[320]; } LcTls;
 static int lc_tls_start(LcContext *ctx, LcTls *tls, LcOsSocket *handle, const char *host) {
     (void)ctx; (void)handle; (void)host;
-    snprintf(tls->error, sizeof(tls->error), "HTTPS is disabled: rebuild with LUAC_WITH_MBEDTLS and mbedTLS");
+    snprintf(tls->error, sizeof(tls->error), "HTTPS is disabled: rebuild with OBSIDIAN_WITH_MBEDTLS and mbedTLS");
     return -1;
 }
 static int lc_tls_start_server(LcContext *ctx, LcTls *tls, LcOsSocket *handle, const char *certificate, const char *private_key) { (void)ctx; (void)handle; (void)certificate; (void)private_key; (void)tls; snprintf(tls->error, sizeof(tls->error), "WSS server is disabled: rebuild with mbedTLS"); return -1; }

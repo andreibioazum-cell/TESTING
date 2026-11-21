@@ -1,4 +1,4 @@
-package com.luac.studio;
+package com.obsidiancore.studio;
 
 import android.content.Context;
 import java.io.File;
@@ -38,7 +38,7 @@ final class ProjectStore {
     }
 
     private static String snakeMainLua() {
-        return "-- Змейка на LuaC (нативный машинный код + инкрементальный GC)\n" +
+        return "-- Snake in Obsidronium (Obsidian Core)\n" +
             "snake_mod = require('scripts.snake')\n" +
             "math.randomseed(os.time())\n\n" +
             "game = snake_mod.SnakeGame()\n" +
@@ -247,17 +247,17 @@ final class ProjectStore {
         if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs() || !new File(project, "animations").mkdirs()) {
             throw new IOException("Cannot create project folders");
         }
-        write(new File(project, "main.lua"),
-            "-- " + name + " (LuaC 3D Engine)\n" +
+        write(new File(project, "main.obs"),
+            "-- " + name + " (Obsidian Core 3D Engine)\n" +
             "json = require('json')\n" +
-            "sdk = require('scripts.studio_sdk')\n" +
+            "sdk = require('scripts.obsidian_sdk')\n" +
             "scene = sdk.Scene()\n" +
             "world = scene:GetNode('World3D')\n\n" +
             "sdk.load_scene('scene.json', world)\n" +
             "require('scripts.game')\n\n" +
             "func update(float dt):\n" +
             "    scene:step(dt)\n");
-        write(new File(project, "scripts/game.lua"),
+        write(new File(project, "scripts/game.obs"),
             "-- Scene Logic (write your own camera, physics, and touch controls)\n" +
             "print('3D World ready. Nodes: ' .. tostring(#world:GetChildren()))\n" +
             "elapsed = 0.0\n\n" +
@@ -267,15 +267,15 @@ final class ProjectStore {
             "    if cube:\n" +
             "        cube.Rotation = Vector3.new(0, elapsed * 40.0, 0)\n\n" +
             "scene.OnUpdate:Connect(on_update)\n");
-        write(new File(project, "scripts/studio_sdk.lua"), studioSdkLua());
+        write(new File(project, "scripts/obsidian_sdk.obs"), obsidianSdkCode());
         write(new File(project, "animations/spin.anim.json"), defaultSpinAnimJson());
         write(new File(project, "animations/float.anim.json"), defaultFloatAnimJson());
         write(new File(project, "scene.json"), "{}\n");
         return project;
     }
 
-    private static String playerScriptLua() {
-        return "-- Player Character Controller (written in Lua) _joy_ver2\n" +
+    private static String playerScriptObs() {
+        return "-- Player Character Controller (Obsidronium) _joy_ver2\n" +
             "-- Left joystick = Move | Right button = Jump | Right drag = Rotate Camera\n" +
             "player = world:FindFirstChild('Player')\n" +
             "cam = world:FindFirstChild('Camera3D')\n" +
@@ -429,18 +429,18 @@ final class ProjectStore {
         if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs() || !new File(project, "animations").mkdirs()) {
             throw new IOException("Cannot create project folders");
         }
-        write(new File(project, "main.lua"),
+        write(new File(project, "main.obs"),
             "-- " + name + " (3D Game with Joystick + Animations)\n" +
             "json = require('json')\n" +
-            "sdk = require('scripts.studio_sdk')\n" +
+            "sdk = require('scripts.obsidian_sdk')\n" +
             "scene = sdk.Scene()\n" +
             "world = scene:GetNode('World3D')\n\n" +
             "sdk.load_scene('scene.json', world)\n" +
             "require('scripts.player')\n\n" +
             "func update(float dt):\n" +
             "    scene:step(dt)\n");
-        write(new File(project, "scripts/player.lua"), playerScriptLua());
-        write(new File(project, "scripts/studio_sdk.lua"), studioSdkLua());
+        write(new File(project, "scripts/player.obs"), playerScriptObs());
+        write(new File(project, "scripts/obsidian_sdk.obs"), obsidianSdkCode());
         write(new File(project, "animations/float.anim.json"), defaultFloatAnimJson());
         write(new File(project, "animations/spin.anim.json"), defaultSpinAnimJson());
         write(new File(project, "scene.json"),
@@ -456,8 +456,8 @@ final class ProjectStore {
             "{\"id\":\"n5\",\"name\":\"DirectionalLight3D\",\"className\":\"DirectionalLight3D\",\"posX\":10,\"posY\":18,\"posZ\":10,\"energy\":1.2,\"children\":[]}" +
             "]}," +
             "{\"id\":\"n6\",\"name\":\"Scripts\",\"className\":\"Scripts\",\"expanded\":true,\"children\":[" +
-            "{\"id\":\"n7\",\"name\":\"PlayerScript\",\"className\":\"Script\",\"scriptPath\":\"scripts/player.lua\",\"children\":[]}," +
-            "{\"id\":\"n14\",\"name\":\"MainScript\",\"className\":\"Script\",\"scriptPath\":\"main.lua\",\"children\":[]}" +
+            "{\"id\":\"n7\",\"name\":\"PlayerScript\",\"className\":\"Script\",\"scriptPath\":\"scripts/player.obs\",\"children\":[]}," +
+            "{\"id\":\"n14\",\"name\":\"MainScript\",\"className\":\"Script\",\"scriptPath\":\"main.obs\",\"children\":[]}" +
             "]}," +
             "{\"id\":\"n8\",\"name\":\"Environment\",\"className\":\"Environment\",\"expanded\":false,\"clockTime\":14,\"children\":[]}," +
             "{\"id\":\"n9\",\"name\":\"HUD\",\"className\":\"HUD\",\"expanded\":false,\"children\":[]}" +
@@ -465,42 +465,35 @@ final class ProjectStore {
         return project;
     }
 
-    void upgradeLegacyStudioSdk() {
-        final String legacyName = "rob" + "lox_sdk";
+    void upgradeLegacySdk() {
         for (File project : projects()) {
-            File oldSdk = new File(project, "scripts/" + legacyName + ".lua");
-            File sdkFile = new File(project, "scripts/studio_sdk.lua");
-            File mainFile = new File(project, "main.lua");
-            if (oldSdk.exists()) {
-                oldSdk.delete();
+            File legacySdk = new File(project, "scripts/studio_sdk.lua");
+            File sdkFile = new File(project, "scripts/obsidian_sdk.obs");
+            if (legacySdk.isFile()) {
                 try {
-                    write(sdkFile, studioSdkLua());
-                    if (mainFile.isFile()) {
-                        String m = read(mainFile);
-                        if (m.contains(legacyName)) {
-                            write(mainFile, m.replace("scripts." + legacyName, "scripts.studio_sdk")
-                                             .replace(legacyName, "studio_sdk"));
-                        }
-                    }
+                    write(legacySdk, obsidianSdkCode());
                 } catch (IOException ignored) {
                 }
-            } else if (sdkFile.isFile()) {
+            }
+            if (sdkFile.isFile()) {
                 try {
                     String s = read(sdkFile);
                     if (!s.contains("play_animation")) {
-                        write(sdkFile, studioSdkLua());
+                        write(sdkFile, obsidianSdkCode());
                     }
                 } catch (IOException ignored) {
                 }
             }
-            File playerFile = new File(project, "scripts/player.lua");
-            if (playerFile.isFile()) {
-                try {
-                    String p = read(playerFile);
-                    if (p.contains("-- Player Character Controller (written in Lua)") && !p.contains("_joy_ver2")) {
-                        write(playerFile, playerScriptLua());
+            for (String pPath : new String[]{"scripts/player.obs", "scripts/player.lua"}) {
+                File pf = new File(project, pPath);
+                if (pf.isFile()) {
+                    try {
+                        String p = read(pf);
+                        if (p.contains("Player Character Controller") && !p.contains("_joy_ver2")) {
+                            write(pf, playerScriptObs());
+                        }
+                    } catch (IOException ignored) {
                     }
-                } catch (IOException ignored) {
                 }
             }
             if (is3DProject(project)) {
@@ -516,7 +509,7 @@ final class ProjectStore {
         }
     }
 
-    static String studioSdkLua() {
+    static String obsidianSdkCode() {
         return "json = require('json')\n" +
             "Vector3 = {}\n" +
             "func _v3_new(float x, float y, float z):\n" +
@@ -730,7 +723,7 @@ final class ProjectStore {
             "            color = col\n" +
             "        })\n" +
             "        _collect_sync(k, out)\n\n" +
-            "func _studio_sync():\n" +
+            "func _obsidian_sync():\n" +
             "    if not world:\n" +
             "        return '[]'\n" +
             "    out = {}\n" +
@@ -751,7 +744,7 @@ final class ProjectStore {
             "    sc.GetNode = _get_node\n" +
             "    sc.step = _step\n" +
             "    return sc\n\n" +
-            "return {Scene = make_scene, Vector3 = Vector3, Color3 = Color3, Node = Node, load_scene = load_scene, sync = _studio_sync, load_animation = load_animation, play_animation = play_animation, stop_animation = stop_animation}\n";
+            "return {Scene = make_scene, Vector3 = Vector3, Color3 = Color3, Node = Node, load_scene = load_scene, sync = _obsidian_sync, load_animation = load_animation, play_animation = play_animation, stop_animation = stop_animation}\n";
     }
 
     boolean is3DProject(File project) {
@@ -762,15 +755,15 @@ final class ProjectStore {
         String name = safeName(requested, "Змейка");
         File project = unique(root, name);
         if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) throw new IOException("Cannot create project folders");
-        write(new File(project, "main.lua"), snakeMainLua());
-        write(new File(project, "scripts/snake.lua"), snakeScriptLua());
+        write(new File(project, "main.obs"), snakeMainLua());
+        write(new File(project, "scripts/snake.obs"), snakeScriptLua());
         return project;
     }
 
     void upgradeLegacySnakeIfUntouched() {
         File legacy = new File(root, "Змейка");
-        File mainFile = new File(legacy, "main.lua");
-        File snakeFile = new File(legacy, "scripts/snake.lua");
+        File mainFile = new File(legacy, "main.obs");
+        File snakeFile = new File(legacy, "scripts/snake.obs");
         if (!mainFile.isFile() || !snakeFile.isFile()) return;
         try {
             String mainText = read(mainFile);
@@ -789,8 +782,8 @@ final class ProjectStore {
         String name = safeName(requested, "Project");
         File project = unique(root, name);
         if (!new File(project, "scripts").mkdirs() || !new File(project, "assets").mkdirs()) throw new IOException("Cannot create project folders");
-        write(new File(project, "main.lua"),
-            "-- " + name + " (LuaC LÖVE2D-style blank canvas)\n" +
+        write(new File(project, "main.obs"),
+            "-- " + name + " (Obsidronium 2D Canvas (Obsidian Core))\n" +
             "x = 120.0\n" +
             "y = 180.0\n\n" +
             "func update(float dt):\n" +
@@ -812,8 +805,8 @@ final class ProjectStore {
     }
 
     File createFile(File directory, String requested) throws IOException {
-        String name = safeName(requested, "script.lua");
-        if (!name.contains(".")) name += ".lua";
+        String name = safeName(requested, "script.obs");
+        if (!name.contains(".")) name += ".obs";
         File file = checkedChild(directory, name);
         if (file.exists()) throw new IOException("File already exists");
         write(file, "-- " + name + "\n\n");

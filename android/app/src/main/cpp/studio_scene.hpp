@@ -427,12 +427,12 @@ public:
         world.children.push_back(sun);
 
         auto ms = makeNode(m.genId(), "MainScript", "Script");
-        ms.scriptPath = "main.lua";
+        ms.scriptPath = "main.obs";
         world.children.push_back(ms);
         m.root.children.push_back(world);
 
         auto scripts = makeNode(m.genId(), "Scripts", "Scripts"); scripts.expanded = true;
-        auto gs = makeNode(m.genId(), "GameScript", "Script"); gs.scriptPath = "scripts/game.lua";
+        auto gs = makeNode(m.genId(), "GameScript", "Script"); gs.scriptPath = "scripts/game.obs";
         scripts.children.push_back(gs);
         m.root.children.push_back(scripts);
 

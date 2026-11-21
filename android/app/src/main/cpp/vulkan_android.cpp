@@ -18,8 +18,8 @@
 #include "ui2d_vert_spv.h"
 #include "ui2d_frag_spv.h"
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "LuaCVulkan", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "LuaCVulkan", __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ObsidianVulkan", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ObsidianVulkan", __VA_ARGS__)
 
 namespace {
 constexpr uint32_t kFrames = 2;
@@ -163,7 +163,7 @@ void createInstance(ANativeWindow *window) {
         if (fn(&ver) != VK_SUCCESS) ver = VK_API_VERSION_1_0;
     r.apiVersion = ver >= VK_API_VERSION_1_1 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_0;
 
-    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "LuaC Studio", 0, "LuaC", 0, r.apiVersion};
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "Obsidian Core", 0, "Obsidronium", 0, r.apiVersion};
     const char *exts[]{VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
     VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, nullptr, 0, &app, 0, nullptr, 2, exts};
     check(vkCreateInstance(&ci, nullptr, &r.instance), "vkCreateInstance");

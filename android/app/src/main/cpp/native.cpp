@@ -3,7 +3,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
-#include "luac.h"
+#include "obsidian_core.h"
 #include "studio_app.hpp"
 
 extern bool androidVulkanCreate(JNIEnv *env, jobject surface, int width, int height);
@@ -40,7 +40,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeStudioInit(
+Java_com_obsidiancore_studio_MainActivity_nativeStudioInit(
     JNIEnv *env, jobject thiz, jstring projectsRoot, jstring initialProj, jboolean is3D,
     jfloat density, jint fam, jint sz, jint theme, jint tabs, jboolean lineNums, jstring customFont) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
@@ -156,13 +156,13 @@ Java_com_luac_studio_MainActivity_nativeStudioInit(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeStudioStep(JNIEnv *, jclass, jfloat dt) {
+Java_com_obsidiancore_studio_MainActivity_nativeStudioStep(JNIEnv *, jclass, jfloat dt) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
     if (g_studio) g_studio->step(dt);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeStudioTouch(
+Java_com_obsidiancore_studio_MainActivity_nativeStudioTouch(
     JNIEnv *env, jclass, jint action, jint pointerIndex, jintArray jIds, jfloatArray jXs, jfloatArray jYs) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
     if (!g_studio || !jIds || !jXs || !jYs) return;
@@ -177,19 +177,19 @@ Java_com_luac_studio_MainActivity_nativeStudioTouch(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeStudioTextInput(JNIEnv *env, jclass, jstring utf8) {
+Java_com_obsidiancore_studio_MainActivity_nativeStudioTextInput(JNIEnv *env, jclass, jstring utf8) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
     if (g_studio) g_studio->onTextInput(fromJava(env, utf8));
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeStudioKeyCode(JNIEnv *, jclass, jint keyCode) {
+Java_com_obsidiancore_studio_MainActivity_nativeStudioKeyCode(JNIEnv *, jclass, jint keyCode) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
     if (g_studio) g_studio->onKeyCode(keyCode);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeStudioSetCustomFont(JNIEnv *env, jclass, jstring path) {
+Java_com_obsidiancore_studio_MainActivity_nativeStudioSetCustomFont(JNIEnv *env, jclass, jstring path) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
     if (g_studio) {
         std::string p = fromJava(env, path);
@@ -203,7 +203,7 @@ Java_com_luac_studio_MainActivity_nativeStudioSetCustomFont(JNIEnv *env, jclass,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeStudioDestroy(JNIEnv *env, jclass) {
+Java_com_obsidiancore_studio_MainActivity_nativeStudioDestroy(JNIEnv *env, jclass) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
     if (g_studio) {
         g_studio->dispose();
@@ -216,23 +216,23 @@ Java_com_luac_studio_MainActivity_nativeStudioDestroy(JNIEnv *env, jclass) {
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_luac_studio_MainActivity_nativeVulkanCreate(JNIEnv *env, jclass, jobject surface, jint width, jint height) {
+Java_com_obsidiancore_studio_MainActivity_nativeVulkanCreate(JNIEnv *env, jclass, jobject surface, jint width, jint height) {
     return androidVulkanCreate(env, surface, width, height) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeVulkanResize(JNIEnv *, jclass, jint width, jint height) {
+Java_com_obsidiancore_studio_MainActivity_nativeVulkanResize(JNIEnv *, jclass, jint width, jint height) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
     androidVulkanResize(width, height);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeVulkanDraw(JNIEnv *, jclass) {
+Java_com_obsidiancore_studio_MainActivity_nativeVulkanDraw(JNIEnv *, jclass) {
     std::lock_guard<std::mutex> lk(g_studioMutex);
     androidVulkanDrawStudio(g_studio.get(), g_density);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_luac_studio_MainActivity_nativeVulkanDestroy(JNIEnv *, jclass) {
+Java_com_obsidiancore_studio_MainActivity_nativeVulkanDestroy(JNIEnv *, jclass) {
     androidVulkanDestroy();
 }

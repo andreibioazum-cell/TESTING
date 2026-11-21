@@ -1,9 +1,9 @@
-#ifndef LUAC_AUDIO_H
-#define LUAC_AUDIO_H
+#ifndef OBSIDIAN_AUDIO_H
+#define OBSIDIAN_AUDIO_H
 
 /* Native interleaved-float PCM, WAV I/O, synthesis and optional miniaudio
    playback. DSP and WAV support never require an audio device or system SDK. */
-#ifdef LUAC_WITH_MINIAUDIO
+#ifdef OBSIDIAN_WITH_MINIAUDIO
 #define MINIAUDIO_IMPLEMENTATION
 #define MA_NO_DECODING
 #define MA_NO_ENCODING
@@ -13,7 +13,7 @@
 
 static float lc_audio_clamp(float value) { return value < -1.0f ? -1.0f : value > 1.0f ? 1.0f : value; }
 static void lc_audio_dispose(LcAudio *audio) {
-#ifdef LUAC_WITH_MINIAUDIO
+#ifdef OBSIDIAN_WITH_MINIAUDIO
     if (audio->device) {
         ma_device *device = (ma_device *)audio->device;
         ma_device_uninit(device); free(device); audio->device = NULL;
@@ -255,7 +255,7 @@ static LcValue lc_audio_resample(LcContext *ctx, LcFunction *self, int argc, LcV
     for (i = 0; i < frames; ++i) { double position = (double)i * a->sample_rate / rate; size_t left = (size_t)position, right = left + 1 < a->frames ? left + 1 : left; double fraction = position - left; int c; if (left >= a->frames) left = right = a->frames ? a->frames - 1 : 0; for (c = 0; c < a->channels && a->frames; ++c) value.as.audio->samples[i * a->channels + c] = (float)(a->samples[left * a->channels + c] * (1.0 - fraction) + a->samples[right * a->channels + c] * fraction); }
     return value;
 }
-#ifdef LUAC_WITH_MINIAUDIO
+#ifdef OBSIDIAN_WITH_MINIAUDIO
 static void lc_audio_playback_callback(ma_device *device, void *output, const void *input, ma_uint32 frames) {
     LcAudio *audio = (LcAudio *)device->pUserData; float *out = (float *)output; size_t available, count; (void)input;
     available = audio->cursor < audio->frames ? audio->frames - audio->cursor : 0; count = frames < available ? frames : available;
@@ -266,7 +266,7 @@ static void lc_audio_playback_callback(ma_device *device, void *output, const vo
 #endif
 static LcValue lc_audio_play(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     LcAudio *a = lc_audio_arg(ctx, argc, argv, 0); (void)self; if (!a) return lc_nil();
-#ifdef LUAC_WITH_MINIAUDIO
+#ifdef OBSIDIAN_WITH_MINIAUDIO
     ma_device_config config; ma_device *device; ma_result result;
     if (a->device) return lc_bool(1);
     device = (ma_device *)calloc(1, sizeof(*device)); if (!device) return lc_audio_error(ctx, "out of memory");
@@ -277,13 +277,13 @@ static LcValue lc_audio_play(LcContext *ctx, LcFunction *self, int argc, LcValue
     if (result != MA_SUCCESS) { ma_device_uninit(device); free(device); a->device = NULL; return lc_audio_error(ctx, "cannot start playback device"); }
     return lc_bool(1);
 #else
-    (void)ctx; return lc_audio_error(ctx, "playback is disabled: rebuild with LUAC_WITH_MINIAUDIO");
+    (void)ctx; return lc_audio_error(ctx, "playback is disabled: rebuild with OBSIDIAN_WITH_MINIAUDIO");
 #endif
 }
 static LcValue lc_audio_stop(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) { LcAudio *a = lc_audio_arg(ctx, argc, argv, 0); (void)self; if (!a) return lc_nil(); lc_audio_dispose(a); if (a) a->cursor = 0; return lc_bool(1); }
 static LcValue lc_audio_wait(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     LcAudio *a = lc_audio_arg(ctx, argc, argv, 0); (void)self; if (!a) return lc_nil();
-#ifdef LUAC_WITH_MINIAUDIO
+#ifdef OBSIDIAN_WITH_MINIAUDIO
     int remaining_ms = (int)((double)a->frames * 1000.0 / a->sample_rate) + 2000;
     while (a->device && a->cursor < a->frames && remaining_ms > 0) { ma_sleep(10); remaining_ms -= 10; }
     { int completed = a->cursor >= a->frames;
@@ -295,7 +295,7 @@ static LcValue lc_audio_wait(LcContext *ctx, LcFunction *self, int argc, LcValue
 }
 static LcValue lc_audio_playback_available(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     (void)ctx; (void)self; (void)argc; (void)argv;
-#ifdef LUAC_WITH_MINIAUDIO
+#ifdef OBSIDIAN_WITH_MINIAUDIO
     return lc_bool(1);
 #else
     return lc_bool(0);

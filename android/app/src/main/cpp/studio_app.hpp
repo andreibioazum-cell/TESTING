@@ -65,16 +65,19 @@ public:
     float camTargetX = 0, camTargetY = 1.5f, camTargetZ = -3.0f;
     float camYaw = 0.36f, camPitch = 0.34f, camDist = 28.0f;
 
-    // Lua runtime state (zero hardcoded avatar/joystick/jump — pure 3D + user Lua scripts)
+    // Obsidronium runtime state
     bool runningLua = false;
     std::string prePlaySceneJson;
     std::string last2DFrameJson;
 
-    // Script tabs & C++ code editor
+    // Script tabs & Obsidronium code editor
     std::vector<std::string> openScripts;
     std::string activeScript;
     float editorScrollY = 0;
     bool editorFocused = false;
+    bool editorPortrait = true;
+    std::string editorStatus;
+    uint32_t editorStatusCol = 0;
 
     // Output & Command bar
     struct OutLine { std::string text; uint32_t color; };

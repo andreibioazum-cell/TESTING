@@ -1,6 +1,6 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "studio_app.hpp"
-#include "luac.h"
+#include "obsidian_core.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -30,21 +30,21 @@ int lc_editor_redo(void);
 int lc_editor_tokenize_line(int line, int *out_triplets, int max_triplets);
 }
 
-static void *g_luacProj = nullptr;
+static void *g_obsidianProj = nullptr;
 
 namespace Col {
-static inline uint32_t bg()       { return StudioFont::rgba(23, 25, 30); }
-static inline uint32_t panel()    { return StudioFont::rgba(31, 34, 41); }
-static inline uint32_t header()   { return StudioFont::rgba(38, 42, 51); }
-static inline uint32_t btn()      { return StudioFont::rgba(46, 51, 63); }
-static inline uint32_t btnAct()   { return StudioFont::rgba(59, 130, 246); }
-static inline uint32_t green()    { return StudioFont::rgba(34, 197, 94); }
+static inline uint32_t bg()       { return StudioFont::rgba(12, 11, 16); }
+static inline uint32_t panel()    { return StudioFont::rgba(20, 18, 28); }
+static inline uint32_t header()   { return StudioFont::rgba(28, 25, 39); }
+static inline uint32_t btn()      { return StudioFont::rgba(38, 33, 54); }
+static inline uint32_t btnAct()   { return StudioFont::rgba(109, 40, 217); }
+static inline uint32_t green()    { return StudioFont::rgba(16, 185, 129); }
 static inline uint32_t red()      { return StudioFont::rgba(239, 68, 68); }
-static inline uint32_t border()   { return StudioFont::rgba(55, 62, 77); }
-static inline uint32_t text()     { return StudioFont::rgba(232, 236, 243); }
-static inline uint32_t muted()    { return StudioFont::rgba(148, 163, 184); }
-static inline uint32_t accent()   { return StudioFont::rgba(96, 165, 250); }
-static inline uint32_t selRow()   { return StudioFont::rgba(36, 84, 158); }
+static inline uint32_t border()   { return StudioFont::rgba(51, 44, 74); }
+static inline uint32_t text()     { return StudioFont::rgba(241, 240, 247); }
+static inline uint32_t muted()    { return StudioFont::rgba(156, 148, 184); }
+static inline uint32_t accent()   { return StudioFont::rgba(192, 132, 252); }
+static inline uint32_t selRow()   { return StudioFont::rgba(76, 29, 149); }
 static inline uint32_t argbToUi(uint32_t argb) {
     uint8_t a = (argb >> 24) & 0xFF, r = (argb >> 16) & 0xFF, g = (argb >> 8) & 0xFF, b = argb & 0xFF;
     return StudioFont::rgba(r, g, b, a);
@@ -109,7 +109,7 @@ void StudioApp::applyFont(const std::string &customPath, int family) {
 }
 
 void StudioApp::syncOrientation() {
-    bool wantPortrait = (!showProjectsTab && !activeScript.empty());
+    bool wantPortrait = (!showProjectsTab && !activeScript.empty()) ? editorPortrait : false;
     int code = wantPortrait ? 1 : 0;
     if (code != lastRequestedOrientation) {
         lastRequestedOrientation = code;
@@ -149,8 +149,16 @@ void StudioApp::openProject(const std::string &projName, bool is3D) {
         appendOutput("Loaded 3D project: " + projName, Col::muted());
     } else {
         scene = StudioScene();
-        openScript("main.lua");
-        appendOutput("Loaded 2D LuaC project: " + projName, Col::muted());
+        std::string entry = "main.obs";
+        {
+            std::ifstream tf(currentProjectDir + "/main.obs");
+            if (!tf.good()) {
+                std::ifstream lf(currentProjectDir + "/main.lua");
+                if (lf.good()) entry = "main.lua";
+            }
+        }
+        openScript(entry);
+        appendOutput("Loaded 2D Obsidronium project: " + projName, Col::muted());
     }
     syncOrientation();
 }
@@ -196,6 +204,7 @@ void StudioApp::openScript(const std::string &relPath) {
     }
     lc_editor_set_text(content.c_str());
     editorScrollY = 0;
+    editorStatus.clear();
     syncOrientation();
 }
 
@@ -216,27 +225,27 @@ void StudioApp::startSim() {
         prePlaySceneJson = scene.toJson();
     }
     char *err = nullptr;
-    g_luacProj = luac_project_open(currentProjectDir.c_str(), &err);
-    if (!g_luacProj) {
+    g_obsidianProj = obsidian_project_open(currentProjectDir.c_str(), &err);
+    if (!g_obsidianProj) {
         appendOutput(std::string("Runtime error: ") + (err ? err : "failed"), Col::red());
-        if (err) luac_free(err);
+        if (err) obsidian_free(err);
         return;
     }
-    if (err) luac_free(err);
+    if (err) obsidian_free(err);
     runningLua = true;
     showProjectsTab = false;
     activeScript.clear();
     last2DFrameJson.clear();
     syncOrientation();
     computeLayout();
-    luac_project_set_viewport(g_luacProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
-    appendOutput(currentIs3D ? "3D Scene running." : "2D Canvas running.", Col::green());
+    obsidian_project_set_viewport(g_obsidianProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
+    appendOutput(currentIs3D ? "3D Scene running (Obsidian Core)." : "2D Canvas running (Obsidronium).", Col::green());
 }
 
 void StudioApp::stopSim() {
-    if (g_luacProj) {
-        luac_project_close(g_luacProj);
-        g_luacProj = nullptr;
+    if (g_obsidianProj) {
+        obsidian_project_close(g_obsidianProj);
+        g_obsidianProj = nullptr;
     }
     bool wasRun = runningLua;
     runningLua = false;
@@ -258,11 +267,11 @@ void StudioApp::stopSim() {
 }
 
 void StudioApp::syncFromLua() {
-    if (!g_luacProj || !currentIs3D) return;
-    char *raw = luac_project_exec(g_luacProj, "return sdk and sdk.sync() or nil");
+    if (!g_obsidianProj || !currentIs3D) return;
+    char *raw = obsidian_project_exec(g_obsidianProj, "return sdk and sdk.sync() or nil");
     if (!raw) return;
     JsonVal res = MiniJson::parse(raw);
-    luac_free(raw);
+    obsidian_free(raw);
     std::string out = res.s("output");
     if (!out.empty()) appendOutput(out, Col::text());
     std::string err = res.s("error");
@@ -291,20 +300,20 @@ void StudioApp::syncFromLua() {
 void StudioApp::execCommand(const std::string &cmd) {
     if (cmd.empty()) return;
     appendOutput("> " + cmd, Col::accent());
-    if (!g_luacProj) {
+    if (!g_obsidianProj) {
         char *err = nullptr;
-        g_luacProj = luac_project_open(currentProjectDir.c_str(), &err);
-        if (!g_luacProj) {
-            appendOutput(err ? err : "failed to open Lua runtime", Col::red());
-            if (err) luac_free(err);
+        g_obsidianProj = obsidian_project_open(currentProjectDir.c_str(), &err);
+        if (!g_obsidianProj) {
+            appendOutput(err ? err : "failed to open Obsidronium runtime", Col::red());
+            if (err) obsidian_free(err);
             return;
         }
-        if (err) luac_free(err);
+        if (err) obsidian_free(err);
     }
-    char *raw = luac_project_exec(g_luacProj, cmd.c_str());
+    char *raw = obsidian_project_exec(g_obsidianProj, cmd.c_str());
     if (!raw) return;
     JsonVal res = MiniJson::parse(raw);
-    luac_free(raw);
+    obsidian_free(raw);
     std::string out = res.s("output");
     if (!out.empty()) appendOutput(out, Col::text());
     std::string val = res.s("result");
@@ -315,13 +324,13 @@ void StudioApp::execCommand(const std::string &cmd) {
 }
 
 void StudioApp::step(float dt) {
-    if (runningLua && g_luacProj) {
-        luac_project_set_viewport(g_luacProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
-        char *raw = luac_project_step(g_luacProj, dt);
+    if (runningLua && g_obsidianProj) {
+        obsidian_project_set_viewport(g_obsidianProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
+        char *raw = obsidian_project_step(g_obsidianProj, dt);
         if (raw) {
             last2DFrameJson = raw;
             JsonVal res = MiniJson::parse(raw);
-            luac_free(raw);
+            obsidian_free(raw);
             std::string out = res.s("output");
             if (!out.empty()) appendOutput(out, Col::text());
             std::string err = res.s("error");
@@ -360,7 +369,7 @@ Rect StudioApp::closePlayBtnRect() const {
 }
 
 void StudioApp::computeLayout() {
-    if (runningLua && !showProjectsTab && activeScript.empty()) {
+    if ((runningLua && !showProjectsTab && activeScript.empty()) || (!showProjectsTab && !activeScript.empty())) {
         rTopTabs = rRibbon = rDocTabs = rRightDock = rExplorer = rProperties = rBottomDock = rOutLog = rCmdBar = {0, 0, 0, 0};
         rViewport = {0, 0, width, height};
         return;
@@ -726,7 +735,13 @@ std::vector<std::string> StudioApp::listScriptFiles() const {
         if (p.empty()) return;
         if (std::find(out.begin(), out.end(), p) == out.end()) out.push_back(p);
     };
-    pushUnique("main.lua");
+    if (!currentProjectDir.empty()) {
+        std::ifstream fobs(currentProjectDir + "/main.obs");
+        if (fobs.good()) pushUnique("main.obs");
+        std::ifstream flua(currentProjectDir + "/main.lua");
+        if (flua.good()) pushUnique("main.lua");
+    }
+    if (out.empty()) pushUnique("main.obs");
     std::function<void(const SceneNode &)> walk = [&](const SceneNode &nd) {
         if (nd.isScript() && !nd.scriptPath.empty()) pushUnique(nd.scriptPath);
         for (const auto &c : nd.children) walk(c);
@@ -738,7 +753,9 @@ std::vector<std::string> StudioApp::listScriptFiles() const {
             std::vector<std::string> disk;
             while (struct dirent *ent = readdir(d)) {
                 std::string fn = ent->d_name;
-                if (fn.size() > 4 && fn.substr(fn.size() - 4) == ".lua" && fn != "studio_sdk.lua") {
+                bool isObs = fn.size() > 4 && fn.substr(fn.size() - 4) == ".obs";
+                bool isLua = fn.size() > 4 && fn.substr(fn.size() - 4) == ".lua";
+                if ((isObs || isLua) && fn != "obsidian_sdk.obs" && fn != "studio_sdk.lua") {
                     disk.push_back("scripts/" + fn);
                 }
             }
@@ -858,11 +875,14 @@ void StudioApp::buildFrame(float w, float h, float d) {
     }
 
     bool isPlayingFull = (runningLua && !showProjectsTab && activeScript.empty());
+    bool isCodeEditorMode = (!showProjectsTab && !activeScript.empty());
 
     if (showProjectsTab) {
         buildProjectsTab(rViewport);
-    } else if (!activeScript.empty()) {
+    } else if (isCodeEditorMode) {
         buildCodeEditor(rViewport);
+        if (modal != ModalKind::NONE) buildModal();
+        return;
     } else if (currentIs3D) {
         build3DScene();
         pushBatch(true, rViewport);
@@ -1237,7 +1257,7 @@ void StudioApp::build2DScene(const Rect &area) {
     pushBatch(true, area);
     emitRect(area.x, area.y, area.w, area.h, StudioFont::rgba(15, 23, 42));
     if (last2DFrameJson.empty()) {
-        emitTextCentered("2D Canvas — Tap Play to run " + currentProjectName, area, 12.0f * density, Col::muted());
+        emitTextCentered("2D Canvas - Tap Play to run " + currentProjectName, area, 12.0f * density, Col::muted());
         return;
     }
     renderLuaDrawOverlay(area, true);
@@ -1408,12 +1428,12 @@ void StudioApp::buildTopRibbon() {
             if (auto *sss = scene.findService("Scripts")) {
                 auto *s = scene.createNode(sss, "Script", "Script" + std::to_string(scene.nextId));
                 if (s) {
-                    s->scriptPath = "scripts/" + s->name + ".lua";
+                    s->scriptPath = "scripts/" + s->name + ".obs";
                     openScript(s->scriptPath);
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
             } else {
-                openScript("main.lua");
+                openScript("main.obs");
             }
         });
         for (const auto &sp : listScriptFiles()) {
@@ -1751,9 +1771,40 @@ void StudioApp::buildBottomDock() {
 }
 
 void StudioApp::buildCodeEditor(const Rect &area) {
-    float barH = 24.0f * density;
-    Rect codeRect{area.x, area.y, area.w, std::max(40.0f, area.h - barH)};
-    Rect barRect{area.x, area.y + codeRect.h, area.w, barH};
+    float hdrH  = 30.0f * density;
+    float tabsH = 22.0f * density;
+    float barH  = 24.0f * density;
+    float botH  = tabsH + barH;
+    Rect hdrRect {area.x, area.y, area.w, hdrH};
+    Rect codeRect{area.x, area.y + hdrH, area.w, std::max(40.0f, area.h - hdrH - botH)};
+    Rect tabsRect{area.x, area.y + hdrH + codeRect.h, area.w, tabsH};
+    Rect barRect {area.x, area.y + hdrH + codeRect.h + tabsH, area.w, barH};
+
+    // Minimal top bar: Back | file - Obsidronium | Vert/Horiz
+    pushBatch(true, hdrRect);
+    emitRect(hdrRect.x, hdrRect.y, hdrRect.w, hdrRect.h, Col::header());
+    emitRect(hdrRect.x, hdrRect.y + hdrRect.h - 1, hdrRect.w, 1, Col::border());
+    float backW = 58.0f * density;
+    float oriW  = 58.0f * density;
+    addBtn({hdrRect.x + 4 * density, hdrRect.y + 4 * density, backW, hdrH - 8 * density},
+           "< Back", Col::btn(), Col::text(), 8.5f * density, [this]() {
+               saveActiveScript();
+               activeScript.clear();
+               editorFocused = false;
+               if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
+               syncOrientation();
+           });
+    std::string shortName = activeScript;
+    if (auto sl = shortName.find_last_of('/'); sl != std::string::npos) shortName = shortName.substr(sl + 1);
+    Rect titleRect{hdrRect.x + backW + 8 * density, hdrRect.y, std::max(40.0f, hdrRect.w - backW - oriW - 16 * density), hdrH};
+    std::string hdrTitle = editorStatus.empty() ? (shortName + " - Obsidronium") : editorStatus;
+    uint32_t hdrCol = editorStatus.empty() ? Col::accent() : editorStatusCol;
+    emitTextCentered(hdrTitle, titleRect, 8.6f * density, hdrCol);
+    addBtn({hdrRect.x + hdrRect.w - oriW - 4 * density, hdrRect.y + 4 * density, oriW, hdrH - 8 * density},
+           editorPortrait ? "Vert" : "Horiz", Col::btnAct(), Col::text(), 8.5f * density, [this]() {
+               editorPortrait = !editorPortrait;
+               syncOrientation();
+           });
 
     pushBatch(true, codeRect);
     uint32_t edBg = prefTheme == 1 ? StudioFont::rgba(250, 250, 252) : Col::bg();
@@ -1779,7 +1830,7 @@ void StudioApp::buildCodeEditor(const Rect &area) {
         float y = codeRect.y + ln * lh - editorScrollY;
         if (ln == curLine) {
             emitRect(codeRect.x, y, codeRect.w, lh,
-                     prefTheme == 1 ? StudioFont::rgba(226, 232, 240) : StudioFont::rgba(36, 41, 51));
+                     prefTheme == 1 ? StudioFont::rgba(233, 213, 255) : StudioFont::rgba(32, 26, 48));
         }
         if (prefLineNumbers) {
             emitText(std::to_string(ln + 1), codeRect.x + 3 * density, y + 2, fs * 0.85f, Col::muted(), gutterW - 4);
@@ -1832,26 +1883,77 @@ void StudioApp::buildCodeEditor(const Rect &area) {
         }
     }
 
+    // Bottom script tabs bar
+    pushBatch(true, tabsRect);
+    emitRect(tabsRect.x, tabsRect.y, tabsRect.w, tabsRect.h, Col::panel());
+    emitRect(tabsRect.x, tabsRect.y, tabsRect.w, 1, Col::border());
+    float tx = tabsRect.x + 3 * density;
+    float tfs = 8.0f * density;
+    float plusW = 24.0f * density;
+    for (const auto &sp : openScripts) {
+        std::string tabLbl = sp;
+        if (auto sl = tabLbl.find_last_of('/'); sl != std::string::npos) tabLbl = tabLbl.substr(sl + 1);
+        float tw = std::max(54 * density, font.measureWidth(tabLbl, tfs) + 22 * density);
+        if (tx + tw > tabsRect.x + tabsRect.w - plusW - 6 * density) break;
+        bool act = (activeScript == sp);
+        addBtn({tx, tabsRect.y + 2, tw - 15 * density, tabsH - 3}, tabLbl,
+               act ? Col::btnAct() : Col::btn(), act ? Col::text() : Col::muted(), tfs, [this, sp]() {
+                   openScript(sp);
+               });
+        addBtn({tx + tw - 15 * density, tabsRect.y + 2, 15 * density, tabsH - 3}, "x",
+               act ? Col::btnAct() : Col::btn(), Col::muted(), tfs, [this, sp]() {
+                   if (activeScript == sp) saveActiveScript();
+                   openScripts.erase(std::remove(openScripts.begin(), openScripts.end(), sp), openScripts.end());
+                   if (activeScript == sp) {
+                       if (!openScripts.empty()) {
+                           activeScript.clear();
+                           openScript(openScripts.back());
+                       } else {
+                           activeScript.clear();
+                           editorFocused = false;
+                           if (callbacks.setKeyboardVisible) callbacks.setKeyboardVisible(false);
+                           syncOrientation();
+                       }
+                   }
+               });
+        tx += tw + 3 * density;
+    }
+    addBtn({tabsRect.x + tabsRect.w - plusW - 3 * density, tabsRect.y + 2, plusW, tabsH - 3}, "+",
+           Col::btn(), Col::accent(), 9.5f * density, [this]() {
+               if (auto *sss = scene.findService("Scripts")) {
+                   auto *s = scene.createNode(sss, "Script", "Script" + std::to_string(scene.nextId));
+                   if (s) {
+                       s->scriptPath = "scripts/" + s->name + ".obs";
+                       openScript(s->scriptPath);
+                       scene.saveToFile(currentProjectDir + "/scene.json");
+                   }
+               } else {
+                   openScript("scripts/script_" + std::to_string(openScripts.size() + 1) + ".obs");
+               }
+           });
+
+    // Bottom compact action bar (4 essential buttons only)
     pushBatch(true, barRect);
     emitRect(barRect.x, barRect.y, barRect.w, barRect.h, Col::header());
-    const char *keys[] = {"TAB", "( )", "\" \"", "=", "Undo", "Check", "Save"};
+    const char *keys[] = {"Tab", "Undo", "Check", "Save"};
     float kx = barRect.x + 3 * density;
-    float kw = (barRect.w - 6 * density) / 7.0f;
-    for (int i = 0; i < 7; ++i) {
+    float kw = (barRect.w - 6 * density) / 4.0f;
+    for (int i = 0; i < 4; ++i) {
         Rect kr{kx + i * kw, barRect.y + 2, kw - 2, barRect.h - 4};
-        addBtn(kr, keys[i], Col::btn(), Col::text(), 7.8f * density, [this, i]() {
+        addBtn(kr, keys[i], Col::btn(), Col::text(), 8.2f * density, [this, i]() {
             if (i == 0) lc_editor_insert(std::string(prefTabSpaces, ' ').c_str());
-            else if (i == 1) lc_editor_insert("()");
-            else if (i == 2) lc_editor_insert("\"\"");
-            else if (i == 3) lc_editor_insert(" = ");
-            else if (i == 4) lc_editor_undo();
-            else if (i == 5) {
+            else if (i == 1) lc_editor_undo();
+            else if (i == 2) {
                 char *err = nullptr;
-                int ok = luac_check(lc_editor_get_text(), activeScript.c_str(), &err);
-                appendOutput(ok ? (activeScript + ": syntax OK") : (err ? err : "syntax error"), ok ? Col::green() : Col::red());
-                if (err) luac_free(err);
-            } else if (i == 6) {
+                int ok = obsidian_check(lc_editor_get_text(), activeScript.c_str(), &err);
+                editorStatus = ok ? "Syntax OK" : (err ? err : "Syntax error");
+                editorStatusCol = ok ? Col::green() : Col::red();
+                appendOutput(ok ? (activeScript + ": syntax OK") : editorStatus, editorStatusCol);
+                if (err) obsidian_free(err);
+            } else if (i == 3) {
                 saveActiveScript();
+                editorStatus = "Saved";
+                editorStatusCol = Col::green();
                 appendOutput("Saved " + activeScript, Col::green());
             }
         });
@@ -1911,7 +2013,7 @@ void StudioApp::buildModal() {
                 if (auto *created = scene.createNode(parent, cn, cn + std::to_string(scene.nextId))) {
                     selectedId = created->id;
                     if (cn == "Script") {
-                        created->scriptPath = "scripts/" + created->name + ".lua";
+                        created->scriptPath = "scripts/" + created->name + ".obs";
                         openScript(created->scriptPath);
                     }
                     scene.saveToFile(currentProjectDir + "/scene.json");
@@ -1934,7 +2036,7 @@ void StudioApp::buildModal() {
                });
         y += 42 * density;
         addBtn({box.x + pad, y, mw - pad * 2, 34 * density},
-               "2D Canvas (LuaC)", Col::btn(), Col::text(), fs, [this]() {
+               "2D Canvas (Obsidronium)", Col::btn(), Col::text(), fs, [this]() {
                    promptTitle = "New 2D Project Name"; promptValue = "Game2D"; promptTargetKey = "New2D";
                    modal = ModalKind::TEXT_PROMPT;
                });
@@ -2548,18 +2650,18 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
         }
         if (baseAct == 3) closePointerId = -1;
 
-        if (g_luacProj) {
+        if (g_obsidianProj) {
             if (baseAct == 2) {
                 for (int i = 0; i < pointerCount; ++i) {
                     if (ids[i] == closePointerId) continue;
                     if (rViewport.contains(xs[i], ys[i])) {
-                        luac_project_touch(g_luacProj, ids[i], xs[i] - rViewport.x, ys[i] - rViewport.y, 1);
+                        obsidian_project_touch(g_obsidianProj, ids[i], xs[i] - rViewport.x, ys[i] - rViewport.y, 1);
                     }
                 }
             } else if (ids[pi] != closePointerId) {
                 if (rViewport.contains(xs[pi], ys[pi])) {
                     int down = (baseAct == 0 || baseAct == 5) ? 1 : 0;
-                    luac_project_touch(g_luacProj, ids[pi], xs[pi] - rViewport.x, ys[pi] - rViewport.y, down);
+                    obsidian_project_touch(g_obsidianProj, ids[pi], xs[pi] - rViewport.x, ys[pi] - rViewport.y, down);
                 }
             }
         }
@@ -2688,7 +2790,8 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
                     float fs = std::max(9.0f, (float)prefFontSize * 0.72f) * density;
                     float lh = fs * 1.28f;
                     float gutterW = prefLineNumbers ? 26.0f * density : 4.0f * density;
-                    int tapLine = std::max(0, (int)((y0 - rViewport.y + editorScrollY) / lh));
+                    float codeTop = rViewport.y + 30.0f * density;
+                    int tapLine = std::max(0, (int)((y0 - codeTop + editorScrollY) / lh));
                     float adv = std::max(4.0f, font.measureWidth("M", fs));
                     int tapCol = std::max(0, (int)((x0 - rViewport.x - gutterW) / adv));
                     lc_editor_set_cursor_line_col(tapLine, tapCol);
@@ -2709,7 +2812,10 @@ void StudioApp::onTextInput(const std::string &utf8) {
     if (utf8.empty()) return;
     if (modal == ModalKind::TEXT_PROMPT) promptValue += utf8;
     else if (commandFocused) commandText += utf8;
-    else if (!activeScript.empty() && !showProjectsTab) lc_editor_insert(utf8.c_str());
+    else if (!activeScript.empty() && !showProjectsTab) {
+        editorStatus.clear();
+        lc_editor_insert(utf8.c_str());
+    }
 }
 
 void StudioApp::onKeyCode(int keyCode) {

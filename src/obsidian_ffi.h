@@ -1,5 +1,5 @@
-#ifndef LUAC_FFI_H
-#define LUAC_FFI_H
+#ifndef OBSIDIAN_FFI_H
+#define OBSIDIAN_FFI_H
 #include <stddef.h>
 /* Minimal dynamic FFI. libffi is discovered at runtime: generated programs do
    not need libffi headers or a link-time dependency. Target libraries still
