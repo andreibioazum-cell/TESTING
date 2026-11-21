@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(LuaCStudio LANGUAGES C CXX)
-set(LUAC_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../..")
+project(ObsidianCoreStudio LANGUAGES C CXX)
+set(OBSIDIAN_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../..")
 
 # Locate NDK glslc compiler (HINTS expects directories)
 file(GLOB _GLSLC_NDK_DIRS
@@ -41,22 +41,22 @@ set(SHADER_HEADERS
     "${SHADER_GEN_DIR}/ui2d_frag_spv.h"
 )
 
-add_library(luac_compiler STATIC "${LUAC_ROOT}/src/luac.c")
-target_include_directories(luac_compiler PRIVATE "${LUAC_ROOT}/src")
-target_compile_definitions(luac_compiler PRIVATE LUAC_LIBRARY_ONLY LUAC_EMBEDDED_RUNTIME LUAC_RUNTIME_PATH="runtime.h")
-set_target_properties(luac_compiler PROPERTIES C_STANDARD 99 C_EXTENSIONS ON)
+add_library(obsidian_compiler STATIC "${OBSIDIAN_ROOT}/src/obsidian_core.c")
+target_include_directories(obsidian_compiler PRIVATE "${OBSIDIAN_ROOT}/src")
+target_compile_definitions(obsidian_compiler PRIVATE OBSIDIAN_LIBRARY_ONLY OBSIDIAN_EMBEDDED_RUNTIME OBSIDIAN_RUNTIME_PATH="obsidronium_runtime.h")
+set_target_properties(obsidian_compiler PROPERTIES C_STANDARD 99 C_EXTENSIONS ON)
 
-add_library(luac_native SHARED
+add_library(obsidian_native SHARED
     native.cpp
     vulkan_android.cpp
     studio_app.cpp
     editor.c
     ${SHADER_HEADERS}
 )
-target_include_directories(luac_native PRIVATE
-    "${LUAC_ROOT}/src"
+target_include_directories(obsidian_native PRIVATE
+    "${OBSIDIAN_ROOT}/src"
     "${CMAKE_CURRENT_LIST_DIR}"
     "${SHADER_GEN_DIR}"
 )
-target_compile_features(luac_native PRIVATE cxx_std_17)
-target_link_libraries(luac_native PRIVATE luac_compiler android log vulkan m dl)
+target_compile_features(obsidian_native PRIVATE cxx_std_17)
+target_link_libraries(obsidian_native PRIVATE obsidian_compiler android log vulkan m dl)

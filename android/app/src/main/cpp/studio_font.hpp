@@ -111,14 +111,15 @@ public:
         if (lineHeight < 18.0f) lineHeight = basePixelHeight * 1.15f;
 
         int penX = 6, penY = 2, rowH = 0;
-        auto packRange = [&](uint32_t first, uint32_t last) {
+        auto packFrom = [&](stbtt_fontinfo &finfo, float fscale, float fascent, uint32_t first, uint32_t last) {
             for (uint32_t cp = first; cp <= last; ++cp) {
-                int g = stbtt_FindGlyphIndex(&info, (int)cp);
+                if (glyphs.find(cp) != glyphs.end()) continue;
+                int g = stbtt_FindGlyphIndex(&finfo, (int)cp);
                 if (g == 0 && cp != ' ') continue;
                 int adv, lsb;
-                stbtt_GetGlyphHMetrics(&info, g, &adv, &lsb);
+                stbtt_GetGlyphHMetrics(&finfo, g, &adv, &lsb);
                 int ix0, iy0, ix1, iy1;
-                stbtt_GetGlyphBitmapBox(&info, g, scale, scale, &ix0, &iy0, &ix1, &iy1);
+                stbtt_GetGlyphBitmapBox(&finfo, g, fscale, fscale, &ix0, &iy0, &ix1, &iy1);
                 int gw = ix1 - ix0;
                 int gh = iy1 - iy0;
                 if (penX + gw + 2 >= kAtlasSize) {
@@ -129,7 +130,7 @@ public:
                 if (penY + gh + 2 >= kAtlasSize) break;
                 if (gw > 0 && gh > 0) {
                     std::vector<uint8_t> bmp((size_t)(gw * gh));
-                    stbtt_MakeGlyphBitmap(&info, bmp.data(), gw, gh, gw, scale, scale, g);
+                    stbtt_MakeGlyphBitmap(&finfo, bmp.data(), gw, gh, gw, fscale, fscale, g);
                     for (int y = 0; y < gh; ++y) {
                         for (int x = 0; x < gw; ++x) {
                             int idx = ((penY + y) * kAtlasSize + (penX + x)) * 4;
@@ -142,22 +143,55 @@ public:
                 }
                 FontGlyph fg{};
                 fg.x0 = (float)ix0;
-                fg.y0 = (float)iy0 + ascent;
+                fg.y0 = (float)iy0 + fascent;
                 fg.x1 = (float)ix1;
-                fg.y1 = (float)iy1 + ascent;
+                fg.y1 = (float)iy1 + fascent;
                 fg.u0 = (float)penX / (float)kAtlasSize;
                 fg.v0 = (float)penY / (float)kAtlasSize;
                 fg.u1 = (float)(penX + gw) / (float)kAtlasSize;
                 fg.v1 = (float)(penY + gh) / (float)kAtlasSize;
-                fg.advance = adv * scale;
+                fg.advance = adv * fscale;
                 glyphs[cp] = fg;
                 penX += gw + 2;
                 rowH = std::max(rowH, gh);
             }
         };
 
-        packRange(0x0020, 0x00FF); // ASCII + Latin-1
-        packRange(0x0400, 0x045F); // Cyrillic
+        packFrom(info, scale, ascent, 0x0020, 0x00FF); // ASCII + Latin-1
+        packFrom(info, scale, ascent, 0x0400, 0x045F); // Cyrillic
+        packFrom(info, scale, ascent, 0x2022, 0x2022); // Bullet
+
+        // Fallback for Cyrillic/symbols if primary monospace TTF omits them
+        if (glyphs.find(0x0417) == glyphs.end() || glyphs.find(0x2022) == glyphs.end()) {
+            const char *fbPaths[] = {
+                "/system/fonts/Roboto-Regular.ttf",
+                "/system/fonts/NotoSans-Regular.ttf",
+                "/system/fonts/DroidSans.ttf"
+            };
+            for (const char *fbp : fbPaths) {
+                FILE *fbf = std::fopen(fbp, "rb");
+                if (!fbf) continue;
+                std::fseek(fbf, 0, SEEK_END);
+                long fsz = std::ftell(fbf);
+                std::fseek(fbf, 0, SEEK_SET);
+                if (fsz > 0 && fsz <= 16 * 1024 * 1024) {
+                    std::vector<uint8_t> fbttf((size_t)fsz);
+                    if (std::fread(fbttf.data(), 1, (size_t)fsz, fbf) == (size_t)fsz) {
+                        stbtt_fontinfo fbinfo{};
+                        if (stbtt_InitFont(&fbinfo, fbttf.data(), stbtt_GetFontOffsetForIndex(fbttf.data(), 0))) {
+                            float fscale = stbtt_ScaleForPixelHeight(&fbinfo, basePixelHeight);
+                            int fa, fd, flg;
+                            stbtt_GetFontVMetrics(&fbinfo, &fa, &fd, &flg);
+                            float fascent = fa * fscale;
+                            packFrom(fbinfo, fscale, fascent, 0x0400, 0x045F);
+                            packFrom(fbinfo, fscale, fascent, 0x2022, 0x2022);
+                        }
+                    }
+                }
+                std::fclose(fbf);
+                if (glyphs.find(0x0417) != glyphs.end()) break;
+            }
+        }
 
         loadedTtf = true;
         activePath = path;

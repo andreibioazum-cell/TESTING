@@ -1,5 +1,5 @@
-#ifndef LUAC_WEBSOCKET_H
-#define LUAC_WEBSOCKET_H
+#ifndef OBSIDIAN_WEBSOCKET_H
+#define OBSIDIAN_WEBSOCKET_H
 /* RFC 6455 client/server transport over the same native sockets and mbedTLS
    used by HTTP. Fragmented data messages and control frames are handled here. */
 struct LcWebsocket {

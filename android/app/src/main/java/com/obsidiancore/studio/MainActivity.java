@@ -1,7 +1,8 @@
-package com.luac.studio;
+package com.obsidiancore.studio;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
@@ -21,12 +22,13 @@ import androidx.appcompat.app.AppCompatActivity;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity implements Choreographer.FrameCallback {
-    static { System.loadLibrary("luac_native"); }
+    static { System.loadLibrary("obsidian_native"); }
 
-    private static final String PREFS = "luac_studio_prefs";
+    private static final String PREFS = "obsidian_core_prefs";
     private static final String PREF_FONT_FAMILY = "font_family";
     private static final String PREF_FONT_SIZE = "font_size";
     private static final String PREF_THEME = "theme";
@@ -39,15 +41,23 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     private boolean surfaceReady = false;
     private boolean runningLoop = false;
     private long lastFrameNs = 0L;
+    private String pendingTexProj = "";
+    private String pendingTexNode = "";
 
     private final ActivityResultLauncher<String[]> fontPicker =
         registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
             if (uri != null) importCustomFont(uri);
         });
 
+    private final ActivityResultLauncher<String[]> texturePicker =
+        registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
+            if (uri != null) importNodeTexture(uri);
+        });
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         store = new ProjectStore(this);
         ensureDefaultProjects();
 
@@ -62,10 +72,18 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         List<File> list = store.projects();
         File initial = null;
         for (File f : list) {
-            if (store.is3DProject(f)) { initial = f; break; }
+            if (store.is3DProject(f) && (new File(f, "scripts/player.obs").isFile() || new File(f, "scripts/player.lua").isFile())) {
+                initial = f;
+                break;
+            }
+        }
+        if (initial == null) {
+            for (File f : list) {
+                if (store.is3DProject(f)) { initial = f; break; }
+            }
         }
         if (initial == null && !list.isEmpty()) initial = list.get(0);
-        String initName = initial != null ? initial.getName() : "3D World";
+        String initName = initial != null ? initial.getName() : "3D Игра";
         boolean is3D = initial != null && store.is3DProject(initial);
 
         float density = getResources().getDisplayMetrics().density;
@@ -76,16 +94,18 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     }
 
     private void ensureDefaultProjects() {
-        store.upgradeLegacyStudioSdk();
+        store.upgradeLegacySdk();
         store.upgradeLegacySnakeIfUntouched();
         List<File> list = store.projects();
-        boolean has3D = false, hasSnake = false;
+        boolean has3DJoystick = false, hasSnake = false;
         for (File f : list) {
-            if (store.is3DProject(f)) has3D = true;
+            if (store.is3DProject(f) && (new File(f, "scripts/player.obs").isFile() || new File(f, "scripts/player.lua").isFile())) {
+                has3DJoystick = true;
+            }
             if (f.getName().contains("Змейка")) hasSnake = true;
         }
         try {
-            if (!has3D) store.create3DProject("3D World");
+            if (!has3DJoystick) store.create3DScratchProject("3D Игра");
             if (!hasSnake) store.createSnakeProject("Змейка");
         } catch (Exception ignored) {
         }
@@ -146,7 +166,6 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         }
     }
 
-    // Callbacks invoked from C++ StudioApp
     @SuppressWarnings("unused")
     public void nativeCbSetKeyboard(boolean show) {
         runOnUiThread(() -> {
@@ -162,9 +181,45 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         });
     }
 
+    private void importNodeTexture(Uri uri) {
+        if (pendingTexProj.isEmpty() || pendingTexNode.isEmpty()) return;
+        try {
+            File projDir = new File(store.root, pendingTexProj);
+            File dir = new File(projDir, "assets");
+            if (!dir.exists()) dir.mkdirs();
+            String mime = getContentResolver().getType(uri);
+            String ext = (mime != null && (mime.contains("jpeg") || mime.contains("jpg"))) ? ".jpg" : ".png";
+            String relPath = "assets/tex_" + System.currentTimeMillis() + ext;
+            File dst = new File(projDir, relPath);
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                 OutputStream out = new FileOutputStream(dst)) {
+                if (in == null) return;
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            }
+            nativeStudioApplyTexture(pendingTexNode, relPath);
+        } catch (Exception ignored) {
+        }
+    }
+
     @SuppressWarnings("unused")
     public void nativeCbOpenFontPicker() {
         runOnUiThread(() -> fontPicker.launch(new String[]{"*/*"}));
+    }
+
+    @SuppressWarnings("unused")
+    public void nativeCbOpenTexturePicker(String projectName, String nodeId) {
+        pendingTexProj = projectName != null ? projectName : "";
+        pendingTexNode = nodeId != null ? nodeId : "";
+        runOnUiThread(() -> texturePicker.launch(new String[]{"image/*"}));
+    }
+
+    @SuppressWarnings("unused")
+    public void nativeCbSetOrientation(boolean portrait) {
+        runOnUiThread(() -> setRequestedOrientation(
+            portrait ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                     : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE));
     }
 
     @SuppressWarnings("unused")
@@ -340,6 +395,7 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     private static native void nativeStudioTextInput(String utf8);
     private static native void nativeStudioKeyCode(int keyCode);
     private static native void nativeStudioSetCustomFont(String path);
+    private static native void nativeStudioApplyTexture(String nodeId, String relPath);
     private static native void nativeStudioDestroy();
 
     private static native boolean nativeVulkanCreate(Surface surface, int width, int height);

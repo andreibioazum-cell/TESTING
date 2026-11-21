@@ -2,10 +2,12 @@
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec4 in_color;
+layout(location = 3) in vec2 in_uv;
 
 layout(location = 0) out vec3 out_normal;
 layout(location = 1) out vec4 out_color;
 layout(location = 2) out vec4 out_shadow_pos;
+layout(location = 3) out vec2 out_uv;
 
 layout(set = 0, binding = 1) uniform SceneUbo {
     mat4 light_vp;
@@ -23,4 +25,5 @@ void main() {
     out_normal = in_normal;
     out_color = in_color;
     out_shadow_pos = ubo.light_vp * vec4(in_pos, 1.0);
+    out_uv = in_uv;
 }
