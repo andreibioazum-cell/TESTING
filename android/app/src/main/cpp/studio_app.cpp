@@ -1,6 +1,7 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "studio_app.hpp"
 #include "obsidian_core.h"
+#include "third_party/stb_image.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -33,18 +34,18 @@ int lc_editor_tokenize_line(int line, int *out_triplets, int max_triplets);
 static void *g_obsidianProj = nullptr;
 
 namespace Col {
-static inline uint32_t bg()       { return StudioFont::rgba(12, 11, 16); }
-static inline uint32_t panel()    { return StudioFont::rgba(20, 18, 28); }
-static inline uint32_t header()   { return StudioFont::rgba(28, 25, 39); }
-static inline uint32_t btn()      { return StudioFont::rgba(38, 33, 54); }
-static inline uint32_t btnAct()   { return StudioFont::rgba(109, 40, 217); }
-static inline uint32_t green()    { return StudioFont::rgba(16, 185, 129); }
-static inline uint32_t red()      { return StudioFont::rgba(239, 68, 68); }
-static inline uint32_t border()   { return StudioFont::rgba(51, 44, 74); }
-static inline uint32_t text()     { return StudioFont::rgba(241, 240, 247); }
-static inline uint32_t muted()    { return StudioFont::rgba(156, 148, 184); }
-static inline uint32_t accent()   { return StudioFont::rgba(192, 132, 252); }
-static inline uint32_t selRow()   { return StudioFont::rgba(76, 29, 149); }
+static inline uint32_t bg()       { return StudioFont::rgba(14, 14, 14); }
+static inline uint32_t panel()    { return StudioFont::rgba(22, 22, 22); }
+static inline uint32_t header()   { return StudioFont::rgba(30, 30, 30); }
+static inline uint32_t btn()      { return StudioFont::rgba(42, 42, 42); }
+static inline uint32_t btnAct()   { return StudioFont::rgba(82, 82, 82); }
+static inline uint32_t green()    { return StudioFont::rgba(72, 72, 72); }
+static inline uint32_t red()      { return StudioFont::rgba(56, 56, 56); }
+static inline uint32_t border()   { return StudioFont::rgba(66, 66, 66); }
+static inline uint32_t text()     { return StudioFont::rgba(244, 244, 244); }
+static inline uint32_t muted()    { return StudioFont::rgba(164, 164, 164); }
+static inline uint32_t accent()   { return StudioFont::rgba(255, 255, 255); }
+static inline uint32_t selRow()   { return StudioFont::rgba(64, 64, 64); }
 static inline uint32_t argbToUi(uint32_t argb) {
     uint8_t a = (argb >> 24) & 0xFF, r = (argb >> 16) & 0xFF, g = (argb >> 8) & 0xFF, b = argb & 0xFF;
     return StudioFont::rgba(r, g, b, a);
@@ -108,6 +109,65 @@ void StudioApp::applyFont(const std::string &customPath, int family) {
     font.loadBestSystemOrCustom(customPath, family);
 }
 
+void StudioApp::initTexAtlas() {
+    if (!texAtlasRgba.empty()) return;
+    texAtlasRgba.assign((size_t)kTexAtlasSize * kTexAtlasSize * 4, 255);
+    texAtlasPaths.assign(1, "__white__");
+    texAtlasVersion++;
+}
+
+int StudioApp::ensureTextureTile(const std::string &relPath) {
+    initTexAtlas();
+    if (relPath.empty()) return 0;
+    for (size_t i = 1; i < texAtlasPaths.size(); ++i) {
+        if (texAtlasPaths[i] == relPath) return (int)i;
+    }
+    if (texAtlasPaths.size() >= 16 || currentProjectDir.empty()) return 0;
+    std::string full = currentProjectDir + "/" + relPath;
+    int w = 0, h = 0, comp = 0;
+    unsigned char *pix = stbi_load(full.c_str(), &w, &h, &comp, 4);
+    if (!pix || w <= 0 || h <= 0) {
+        if (pix) stbi_image_free(pix);
+        return 0;
+    }
+    int idx = (int)texAtlasPaths.size();
+    texAtlasPaths.push_back(relPath);
+    int tileX = (idx % 4) * 256;
+    int tileY = (idx / 4) * 256;
+    for (int py = 0; py < 256; ++py) {
+        float sy = (float)std::clamp(py - 1, 0, 253) / 253.0f * (float)(h - 1);
+        int y0 = (int)sy, y1 = std::min(h - 1, y0 + 1);
+        float fy = sy - (float)y0;
+        for (int px = 0; px < 256; ++px) {
+            float sx = (float)std::clamp(px - 1, 0, 253) / 253.0f * (float)(w - 1);
+            int x0 = (int)sx, x1 = std::min(w - 1, x0 + 1);
+            float fx = sx - (float)x0;
+            size_t dstOff = ((size_t)(tileY + py) * kTexAtlasSize + (size_t)(tileX + px)) * 4;
+            for (int c = 0; c < 4; ++c) {
+                float c00 = pix[(y0 * w + x0) * 4 + c];
+                float c10 = pix[(y0 * w + x1) * 4 + c];
+                float c01 = pix[(y1 * w + x0) * 4 + c];
+                float c11 = pix[(y1 * w + x1) * 4 + c];
+                float v = (c00 * (1.0f - fx) + c10 * fx) * (1.0f - fy) +
+                          (c01 * (1.0f - fx) + c11 * fx) * fy;
+                texAtlasRgba[dstOff + (size_t)c] = (uint8_t)std::clamp((int)std::lround(v), 0, 255);
+            }
+        }
+    }
+    stbi_image_free(pix);
+    texAtlasVersion++;
+    return idx;
+}
+
+void StudioApp::applyNodeTexture(const std::string &nodeId, const std::string &relPath) {
+    if (auto *n = scene.findById(nodeId)) {
+        n->texturePath = relPath;
+        if (!relPath.empty()) ensureTextureTile(relPath);
+        scene.saveToFile(currentProjectDir + "/scene.json");
+        appendOutput("Texture applied to " + n->name, Col::muted());
+    }
+}
+
 void StudioApp::syncOrientation() {
     bool wantPortrait = (!showProjectsTab && !activeScript.empty()) ? editorPortrait : false;
     int code = wantPortrait ? 1 : 0;
@@ -136,8 +196,12 @@ void StudioApp::openProject(const std::string &projName, bool is3D) {
     propsScrollY = 0;
     animPlaying = false;
     animTime = 0.0f;
+    showAnimator = false;
     activeAnimFile.clear();
     animTargetNodeId.clear();
+    texAtlasRgba.clear();
+    texAtlasPaths.clear();
+    initTexAtlas();
 
     if (is3D) {
         scene = StudioScene::loadOrCreate(currentProjectDir);
@@ -381,9 +445,11 @@ void StudioApp::computeLayout() {
     float rightW   = (!showProjectsTab && (showExplorer || showProperties))
         ? std::min(std::round(146.0f * density), std::round(width * (landscape ? 0.24f : 0.36f)))
         : 0.0f;
-    float botH     = showOutput
-        ? std::min(std::round(64.0f * density), std::round(height * (landscape ? 0.22f : 0.16f)))
-        : std::round(22.0f * density);
+    float botH     = (showAnimator && !showProjectsTab && activeScript.empty())
+        ? std::min(std::round(148.0f * density), std::round(height * (landscape ? 0.38f : 0.28f)))
+        : (showOutput
+            ? std::min(std::round(64.0f * density), std::round(height * (landscape ? 0.22f : 0.16f)))
+            : std::round(22.0f * density));
 
     rTopTabs    = {0, 0, width, topTabsH};
     rRibbon     = {0, topTabsH, width, ribbonH};
@@ -412,7 +478,10 @@ void StudioApp::computeLayout() {
     rBottomDock = {0, height - botH, width, botH};
     float cmdH = std::round(22.0f * density);
     float hdrH = std::round(14.0f * density);
-    if (showOutput) {
+    if (showAnimator && !showProjectsTab && activeScript.empty()) {
+        rOutLog = {0, 0, 0, 0};
+        rCmdBar = {0, 0, 0, 0};
+    } else if (showOutput) {
         rOutLog = {0, rBottomDock.y + hdrH, width, std::max(8.0f, botH - hdrH - cmdH)};
         rCmdBar = {0, height - cmdH, width, cmdH};
     } else {
@@ -505,7 +574,7 @@ void StudioApp::emitCircle(float cx, float cy, float r, uint32_t col) {
     if (uiBatches.empty()) pushBatch(false, {});
     auto &v = uiBatches.back().verts;
     float u = 1.5f / StudioFont::kAtlasSize;
-    const int segs = 24;
+    const int segs = std::clamp(circleSegments, 6, 64);
     for (int i = 0; i < segs; ++i) {
         float a0 = 6.2831853f * i / segs, a1 = 6.2831853f * (i + 1) / segs;
         v.push_back({cx, cy, u, u, col});
@@ -520,7 +589,7 @@ void StudioApp::emitCircleOutline(float cx, float cy, float r, float thick, uint
     if (uiBatches.empty()) pushBatch(false, {});
     auto &v = uiBatches.back().verts;
     float u = 1.5f / StudioFont::kAtlasSize;
-    const int segs = 28;
+    const int segs = std::clamp(circleSegments, 6, 64);
     for (int i = 0; i < segs; ++i) {
         float a0 = 6.2831853f * i / segs, a1 = 6.2831853f * (i + 1) / segs;
         float c0 = std::cos(a0), s0 = std::sin(a0), c1 = std::cos(a1), s1 = std::sin(a1);
@@ -796,7 +865,8 @@ void StudioApp::openAnimator(SceneNode *target) {
     }
     animPlaying = false;
     animTime = 0.0f;
-    modal = ModalKind::ANIMATOR;
+    showAnimator = true;
+    modal = ModalKind::NONE;
 }
 
 void StudioApp::emitColorWheel(float cx, float cy, float rad, const Rect &valBar) {
@@ -848,7 +918,7 @@ void StudioApp::emitColorWheel(float cx, float cy, float rad, const Rect &valBar
     emitRect(valBar.x - 2.0f * density, vy - 2.5f * density, valBar.w + 4.0f * density, 5.0f * density,
              StudioFont::rgba(255, 255, 255, 255));
     emitRectOutline(valBar.x - 2.0f * density, vy - 2.5f * density, valBar.w + 4.0f * density, 5.0f * density,
-                    1.0f, StudioFont::rgba(15, 23, 42, 255));
+                    1.0f, StudioFont::rgba(20, 20, 20, 255));
 }
 
 // =========================================================================
@@ -899,7 +969,7 @@ void StudioApp::buildFrame(float w, float h, float d) {
             std::string badge = "3D";
             float bw = font.measureWidth(badge, 10.0f * density) + 12.0f * density;
             Rect rb{rViewport.x + rViewport.w - bw - 6 * density, rViewport.y + 6 * density, bw, 16 * density};
-            emitRect(rb.x, rb.y, rb.w, rb.h, StudioFont::rgba(15, 23, 42, 180));
+            emitRect(rb.x, rb.y, rb.w, rb.h, StudioFont::rgba(24, 24, 24, 200));
             emitTextCentered(badge, rb, 10.0f * density, Col::accent());
         }
     } else {
@@ -909,8 +979,8 @@ void StudioApp::buildFrame(float w, float h, float d) {
     if (isPlayingFull) {
         pushBatch(false, {});
         Rect rClose = closePlayBtnRect();
-        emitRect(rClose.x, rClose.y, rClose.w, rClose.h, StudioFont::rgba(20, 26, 36, 225));
-        emitRectOutline(rClose.x, rClose.y, rClose.w, rClose.h, 1.5f * density, StudioFont::rgba(239, 68, 68, 235));
+        emitRect(rClose.x, rClose.y, rClose.w, rClose.h, StudioFont::rgba(24, 24, 24, 225));
+        emitRectOutline(rClose.x, rClose.y, rClose.w, rClose.h, 1.5f * density, StudioFont::rgba(220, 220, 220, 235));
         emitTextCentered("X", rClose, 13.5f * density, StudioFont::rgba(255, 255, 255, 255));
         addHitBox(rClose, [this]() { stopSim(); });
         return;
@@ -1046,7 +1116,7 @@ void StudioApp::build3DScene() {
     float fovY = fovDeg * (3.14159265f / 180.0f);
     float f = 1.0f / std::tan(fovY * 0.5f);
     focalLen = (rViewport.h * 0.5f) * f;
-    float zn = 0.4f, zf = 400.0f;
+    float zn = 0.15f, zf = 2000.0f;
 
     float proj[16]{};
     proj[0] = f / aspect;
@@ -1087,19 +1157,25 @@ void StudioApp::build3DScene() {
     mat4Mul(lightVP, lProj, lView);
 
     // 3D solid meshes + shadow casters
+    initTexAtlas();
     std::vector<const SceneNode *> meshes;
     scene.collectMeshes(meshes);
     for (const auto *p : meshes) {
         if (p->transparency >= 0.99f) continue;
-        StudioScene::appendPartMesh(*p, frame3DMesh);
+        int tile = ensureTextureTile(p->texturePath);
+        int tx = tile % 4, ty = tile / 4;
+        float pad = 2.0f / (float)kTexAtlasSize;
+        float u0 = tx * 0.25f + pad, u1 = (tx + 1) * 0.25f - pad;
+        float v0 = ty * 0.25f + pad, v1 = (ty + 1) * 0.25f - pad;
+        StudioScene::appendPartMesh(*p, frame3DMesh, u0, v0, u1, v1);
         if (showShadows && p->castShadow) {
             StudioScene::appendPartMesh(*p, frame3DShadowCasters);
         }
     }
 
     auto addLine = [&](std::vector<MeshVertex> &dst, Vec3f a, Vec3f b, uint32_t col) {
-        dst.push_back({a.x, a.y, a.z, 0, 1, 0, col});
-        dst.push_back({b.x, b.y, b.z, 0, 1, 0, col});
+        dst.push_back({a.x, a.y, a.z, 0, 1, 0, col, 0, 0});
+        dst.push_back({b.x, b.y, b.z, 0, 1, 0, col, 0, 0});
     };
     auto addBoxWire = [&](std::vector<MeshVertex> &dst, const SceneNode &node, float pad, uint32_t col) {
         float hx = node.sizeX * 0.5f + pad, hy = node.sizeY * 0.5f + pad, hz = node.sizeZ * 0.5f + pad;
@@ -1114,7 +1190,7 @@ void StudioApp::build3DScene() {
     };
 
     if (showGrid) {
-        uint32_t gCol = StudioFont::rgba(75, 85, 102, 130);
+        uint32_t gCol = StudioFont::rgba(92, 92, 92, 130);
         for (int i = -40; i <= 40; i += 4) {
             addLine(frame3DLines, {(float)i, 0.02f, -40}, {(float)i, 0.02f, 40}, gCol);
             addLine(frame3DLines, {-40, 0.02f, (float)i}, {40, 0.02f, (float)i}, gCol);
@@ -1255,7 +1331,7 @@ void StudioApp::renderLuaDrawOverlay(const Rect &area, bool applyClearColor) {
 
 void StudioApp::build2DScene(const Rect &area) {
     pushBatch(true, area);
-    emitRect(area.x, area.y, area.w, area.h, StudioFont::rgba(15, 23, 42));
+    emitRect(area.x, area.y, area.w, area.h, StudioFont::rgba(18, 18, 18));
     if (last2DFrameJson.empty()) {
         emitTextCentered("2D Canvas - Tap Play to run " + currentProjectName, area, 12.0f * density, Col::muted());
         return;
@@ -1373,7 +1449,15 @@ void StudioApp::buildTopRibbon() {
             }
         });
         ribBtn("Material", false, 0, [this]() { if (selectedNode()) modal = ModalKind::MATERIAL; });
-        ribBtn("Anim", animPlaying, 0, [this]() { openAnimator(selectedNode()); });
+        ribBtn("Texture", false, 0, [this]() {
+            if (auto *n = selectedNode(); n && n->isMeshNode() && callbacks.openTexturePicker) {
+                callbacks.openTexturePicker(currentProjectName, n->id);
+            }
+        });
+        ribBtn("Anim", showAnimator || animPlaying, 0, [this]() {
+            if (showAnimator) { showAnimator = false; animPlaying = false; }
+            else openAnimator(selectedNode());
+        });
         ribBtn("Delete", false, 0, [this]() {
             if (!selectedId.empty() && scene.removeById(selectedId)) {
                 selectedId.clear();
@@ -1537,14 +1621,14 @@ void StudioApp::buildRightDock() {
                 bool mSel = std::find(multiSelectedIds.begin(), multiSelectedIds.end(), r.n->id) != multiSelectedIds.end();
                 bool sel = (r.n->id == selectedId) || mSel;
                 Rect rr{listArea.x, y, listArea.w, rowH};
-                if (sel) emitRect(rr.x, rr.y, rr.w, rr.h, mSel ? StudioFont::rgba(29, 78, 137) : Col::selRow());
+                if (sel) emitRect(rr.x, rr.y, rr.w, rr.h, mSel ? StudioFont::rgba(74, 74, 74) : Col::selRow());
                 float indent = (4 + r.depth * 8) * density;
                 std::string prefix = r.n->children.empty() ? "  " : (r.n->expanded ? "v " : "> ");
                 std::string lbl = prefix + r.n->name + (r.n->className == "Model" ? " [M]" : (r.n->className == "Folder" ? " [F]" : ""));
                 uint32_t tc = sel ? Col::text() :
                     (r.n->isScript() ? Col::accent() :
-                    (r.n->isGroup() ? StudioFont::rgba(251, 191, 36) :
-                    (r.n->isCollisionNode() ? StudioFont::rgba(34, 211, 238) : Col::text())));
+                    (r.n->isGroup() ? StudioFont::rgba(216, 216, 216) :
+                    (r.n->isCollisionNode() ? StudioFont::rgba(196, 196, 196) : Col::text())));
                 emitText(lbl, rr.x + indent, rr.y + 3 * density, 8.0f * density, tc, rr.w - indent - 2);
                 std::string nid = r.n->id;
                 addHitBox(rr, [this, nid]() {
@@ -1606,12 +1690,33 @@ void StudioApp::buildRightDock() {
         }
         if (n->isMeshNode()) {
             props.push_back({"Mesh", n->shape(), [this]() { modal = ModalKind::SHAPE; }});
+            props.push_back({"Segments", std::to_string(n->segments), [this, n]() {
+                promptTitle = "Polygon Segments (6..64)"; promptValue = std::to_string(n->segments);
+                promptTargetKey = "Segments"; modal = ModalKind::TEXT_PROMPT;
+            }});
+            if (n->shape() == "Box" || n->shape() == "Plane") {
+                props.push_back({"Roundness", fmtNum(n->cornerRadius), [this, n]() {
+                    promptTitle = "Corner Radius (0..0.48)"; promptValue = fmtNum(n->cornerRadius);
+                    promptTargetKey = "CornerRadius"; modal = ModalKind::TEXT_PROMPT;
+                }});
+            }
             props.push_back({"Color", "#", [this, n]() {
                 promptTargetKey.clear();
                 syncWheelFromArgb(n->argbColor);
                 modal = ModalKind::COLOR;
             }});
             props.push_back({"Material", n->material, [this]() { modal = ModalKind::MATERIAL; }});
+            std::string texLbl = n->texturePath.empty() ? "None (Pick)" : n->texturePath;
+            if (auto sl = texLbl.find_last_of('/'); sl != std::string::npos) texLbl = texLbl.substr(sl + 1);
+            props.push_back({"Texture", texLbl, [this, n]() {
+                if (callbacks.openTexturePicker) callbacks.openTexturePicker(currentProjectName, n->id);
+            }});
+            if (!n->texturePath.empty()) {
+                props.push_back({"Clear Tex", "Remove", [this, n]() {
+                    n->texturePath.clear();
+                    scene.saveToFile(currentProjectDir + "/scene.json");
+                }});
+            }
             props.push_back({"Visible", n->visible ? "true" : "false", [this, n]() {
                 n->visible = !n->visible; scene.saveToFile(currentProjectDir + "/scene.json");
             }});
@@ -1722,7 +1827,216 @@ void StudioApp::buildRightDock() {
     }
 }
 
+void StudioApp::buildAnimatorDock(const Rect &area) {
+    pushBatch(true, area);
+    emitRect(area.x, area.y, area.w, area.h, Col::panel());
+    emitRect(area.x, area.y, area.w, 1, Col::border());
+
+    float pad = 4.0f * density;
+    float hdrH = 22.0f * density;
+    float fs = 7.8f * density;
+    emitRect(area.x, area.y, area.w, hdrH, Col::header());
+    emitRect(area.x, area.y + hdrH - 1, area.w, 1, Col::border());
+
+    SceneNode *tn = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+    std::string targetName = (tn && tn->is3DNode()) ? tn->name : "None";
+    std::string fileLbl = activeAnimFile.empty() ? "No clip" : activeAnimFile;
+    if (auto sl = fileLbl.find_last_of('/'); sl != std::string::npos) fileLbl = fileLbl.substr(sl + 1);
+
+    float bx = area.x + pad;
+    float by = area.y + 2 * density;
+    float bh = hdrH - 4 * density;
+    float infoW = std::min(150.0f * density, area.w * 0.28f);
+    emitText("Anim: " + targetName + " [" + fileLbl + "]", bx, area.y + 5 * density, fs, Col::text(), infoW);
+    bx += infoW + pad;
+
+    auto topBtn = [&](const std::string &lbl, bool act, std::function<void()> cb) {
+        float w = std::max(34.0f * density, font.measureWidth(lbl, fs) + 10.0f * density);
+        if (bx + w > area.x + area.w - 44 * density) return;
+        addBtn({bx, by, w, bh}, lbl, act ? Col::btnAct() : Col::btn(), Col::text(), fs, std::move(cb));
+        bx += w + 3 * density;
+    };
+
+    topBtn("+ New", false, [this]() {
+        promptTitle = "New Animation Name";
+        promptValue = "anim_" + std::to_string(scene.nextId);
+        promptTargetKey = "NewAnim";
+        modal = ModalKind::TEXT_PROMPT;
+    });
+    topBtn(animPlaying ? "Pause" : "Play", animPlaying, [this]() {
+        if (animPlaying) {
+            animPlaying = false;
+        } else if (!activeAnim.frames.empty()) {
+            if (animTime >= activeAnim.duration()) animTime = 0.0f;
+            animPlaying = true;
+        }
+    });
+    topBtn(activeAnim.loop ? "Loop:ON" : "Loop:OFF", activeAnim.loop, [this]() {
+        activeAnim.loop = !activeAnim.loop;
+        if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+        if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+            n->animLoop = activeAnim.loop;
+            scene.saveToFile(currentProjectDir + "/scene.json");
+        }
+    });
+    topBtn("+ Key", false, [this]() {
+        SceneNode *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+        if (!n || !n->is3DNode()) {
+            appendOutput("Select a 3D object first.", Col::muted());
+            return;
+        }
+        if (activeAnimFile.empty()) {
+            activeAnimFile = "animations/" + n->name + "_anim.anim.json";
+            activeAnim = AnimClip{};
+            activeAnim.name = n->name + "_anim";
+        }
+        float tPos = animPlaying ? animTime : (activeAnim.frames.empty() ? 0.0f : animTime);
+        bool replaced = false;
+        for (auto &kf : activeAnim.frames) {
+            if (std::fabs(kf.t - tPos) < 0.05f) {
+                kf = {tPos, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ};
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            activeAnim.frames.push_back({tPos, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ});
+        }
+        activeAnim.sortFrames();
+        std::string dirPath = currentProjectDir + "/animations";
+        mkdir(dirPath.c_str(), 0755);
+        activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+        n->animPath = activeAnimFile;
+        n->animAutoPlay = true;
+        n->animLoop = activeAnim.loop;
+        scene.saveToFile(currentProjectDir + "/scene.json");
+        animTime = tPos + 0.5f;
+    });
+    topBtn("Del Key", false, [this]() {
+        if (activeAnim.frames.empty()) return;
+        size_t bestIdx = 0;
+        float bestDist = 1e9f;
+        for (size_t i = 0; i < activeAnim.frames.size(); ++i) {
+            float d = std::fabs(activeAnim.frames[i].t - animTime);
+            if (d < bestDist) { bestDist = d; bestIdx = i; }
+        }
+        if (bestDist <= 0.35f || activeAnim.frames.size() == 1) {
+            activeAnim.frames.erase(activeAnim.frames.begin() + (ptrdiff_t)bestIdx);
+        } else {
+            activeAnim.frames.pop_back();
+        }
+        if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+    });
+    topBtn("t-", false, [this]() {
+        animPlaying = false;
+        animTime = std::max(0.0f, animTime - 0.25f);
+        if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode() && !activeAnim.frames.empty()) {
+            activeAnim.sample(animTime, *n);
+        }
+    });
+    topBtn("t+", false, [this]() {
+        animPlaying = false;
+        animTime = std::min(std::max(4.0f, activeAnim.duration() + 1.0f), animTime + 0.25f);
+        if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode() && !activeAnim.frames.empty()) {
+            activeAnim.sample(animTime, *n);
+        }
+    });
+    addBtn({area.x + area.w - 40 * density, by, 36 * density, bh}, "Close", Col::btn(), Col::muted(), fs, [this]() {
+        showAnimator = false;
+        animPlaying = false;
+    });
+
+    // Body: left = clip files list, right = visual timeline + keyframe strip
+    Rect body{area.x, area.y + hdrH, area.w, std::max(24.0f, area.h - hdrH)};
+    float listW = std::min(130.0f * density, body.w * 0.28f);
+    Rect fileRect{body.x, body.y, listW, body.h};
+    Rect tlRect{body.x + listW, body.y, body.w - listW, body.h};
+
+    pushBatch(true, fileRect);
+    emitRect(fileRect.x + fileRect.w - 1, fileRect.y, 1, fileRect.h, Col::border());
+    auto files = listAnimationFiles();
+    float fy = fileRect.y + 3 * density;
+    for (const auto &fp : files) {
+        if (fy + 18 * density > fileRect.y + fileRect.h) break;
+        std::string fn = fp;
+        if (auto sl = fn.find_last_of('/'); sl != std::string::npos) fn = fn.substr(sl + 1);
+        bool sel = (fp == activeAnimFile);
+        addBtn({fileRect.x + 3 * density, fy, fileRect.w - 6 * density, 16 * density}, fn,
+               sel ? Col::btnAct() : Col::btn(), Col::text(), 7.3f * density, [this, fp]() {
+                   activeAnimFile = fp;
+                   AnimClip loaded;
+                   if (AnimClip::loadFromFile(currentProjectDir + "/" + fp, loaded)) {
+                       activeAnim = std::move(loaded);
+                   }
+                   animTime = 0.0f;
+                   animPlaying = false;
+                   if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+                       n->animPath = fp;
+                       n->animAutoPlay = true;
+                       n->animLoop = activeAnim.loop;
+                       activeAnim.sample(0.0f, *n);
+                       scene.saveToFile(currentProjectDir + "/scene.json");
+                   }
+               });
+        fy += 18 * density;
+    }
+
+    pushBatch(true, tlRect);
+    float maxT = std::max(2.5f, activeAnim.duration());
+    emitText("t=" + fmtNum(animTime) + "s / " + fmtNum(maxT) + "s   Keys: " + std::to_string(activeAnim.frames.size()),
+             tlRect.x + pad, tlRect.y + 3 * density, 7.6f * density, Col::muted(), tlRect.w - pad * 2);
+
+    Rect track{tlRect.x + pad, tlRect.y + 20 * density, std::max(40.0f, tlRect.w - pad * 2), 26 * density};
+    emitRect(track.x, track.y, track.w, track.h, Col::bg());
+    emitRectOutline(track.x, track.y, track.w, track.h, 1.0f, Col::border());
+    float prog = std::clamp(animTime / maxT, 0.0f, 1.0f);
+    emitRect(track.x, track.y, track.w * prog, track.h, StudioFont::rgba(52, 52, 52, 180));
+    emitRect(track.x + track.w * prog - 1.5f * density, track.y, 3.0f * density, track.h, Col::accent());
+
+    // Step scrub buttons along track (8 segments)
+    for (int s = 0; s < 8; ++s) {
+        float sw = track.w / 8.0f;
+        Rect seg{track.x + s * sw, track.y, sw, track.h};
+        addHitBox(seg, [this, s, maxT]() {
+            animPlaying = false;
+            animTime = ((float)s + 0.5f) / 8.0f * maxT;
+            if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode() && !activeAnim.frames.empty()) {
+                activeAnim.sample(animTime, *n);
+            }
+        });
+    }
+
+    // Draw keyframe diamonds/bars and quick-select chips below track
+    float ky = track.y + track.h + 4 * density;
+    float kx = track.x;
+    for (size_t i = 0; i < activeAnim.frames.size(); ++i) {
+        const auto &kf = activeAnim.frames[i];
+        float u = std::clamp(kf.t / maxT, 0.0f, 1.0f);
+        float mx = track.x + u * track.w;
+        emitRect(mx - 2.0f * density, track.y + 3 * density, 4.0f * density, track.h - 6 * density, Col::text());
+        if (ky + 16 * density <= tlRect.y + tlRect.h - 2) {
+            std::string kl = fmtNum(kf.t) + "s";
+            float kw = std::max(28.0f * density, font.measureWidth(kl, 7.2f * density) + 8 * density);
+            if (kx + kw <= tlRect.x + tlRect.w - pad) {
+                bool nearT = std::fabs(kf.t - animTime) < 0.08f;
+                addBtn({kx, ky, kw, 16 * density}, kl, nearT ? Col::btnAct() : Col::btn(), Col::text(), 7.2f * density, [this, i]() {
+                    animPlaying = false;
+                    animTime = activeAnim.frames[i].t;
+                    if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+                        activeAnim.sample(animTime, *n);
+                    }
+                });
+                kx += kw + 3 * density;
+            }
+        }
+    }
+}
+
 void StudioApp::buildBottomDock() {
+    if (showAnimator && !showProjectsTab && activeScript.empty()) {
+        buildAnimatorDock(rBottomDock);
+        return;
+    }
     pushBatch(true, rBottomDock);
     emitRect(rBottomDock.x, rBottomDock.y, rBottomDock.w, rBottomDock.h, Col::panel());
     emitRect(rBottomDock.x, rBottomDock.y, rBottomDock.w, 1, Col::border());
@@ -1807,8 +2121,8 @@ void StudioApp::buildCodeEditor(const Rect &area) {
            });
 
     pushBatch(true, codeRect);
-    uint32_t edBg = prefTheme == 1 ? StudioFont::rgba(250, 250, 252) : Col::bg();
-    uint32_t edFg = prefTheme == 1 ? StudioFont::rgba(24, 24, 27) : Col::text();
+    uint32_t edBg = prefTheme == 1 ? StudioFont::rgba(248, 248, 248) : Col::bg();
+    uint32_t edFg = prefTheme == 1 ? StudioFont::rgba(24, 24, 24) : Col::text();
     emitRect(codeRect.x, codeRect.y, codeRect.w, codeRect.h, edBg);
 
     float fs = std::max(9.0f, (float)prefFontSize * 0.72f) * density;
@@ -1830,7 +2144,7 @@ void StudioApp::buildCodeEditor(const Rect &area) {
         float y = codeRect.y + ln * lh - editorScrollY;
         if (ln == curLine) {
             emitRect(codeRect.x, y, codeRect.w, lh,
-                     prefTheme == 1 ? StudioFont::rgba(233, 213, 255) : StudioFont::rgba(32, 26, 48));
+                     prefTheme == 1 ? StudioFont::rgba(224, 224, 224) : StudioFont::rgba(32, 32, 32));
         }
         if (prefLineNumbers) {
             emitText(std::to_string(ln + 1), codeRect.x + 3 * density, y + 2, fs * 0.85f, Col::muted(), gutterW - 4);
@@ -1843,13 +2157,23 @@ void StudioApp::buildCodeEditor(const Rect &area) {
         for (int ti = 0; ti < ntok; ++ti) {
             int c0 = toks[ti * 3 + 0], len = toks[ti * 3 + 1], k = toks[ti * 3 + 2];
             uint32_t tc = edFg;
-            if (k == 1) tc = StudioFont::rgba(198, 120, 221);
-            else if (k == 2) tc = StudioFont::rgba(229, 192, 123);
-            else if (k == 3) tc = StudioFont::rgba(97, 175, 239);
-            else if (k == 4) tc = StudioFont::rgba(152, 195, 121);
-            else if (k == 5) tc = StudioFont::rgba(209, 154, 102);
-            else if (k == 6) tc = StudioFont::rgba(108, 118, 134);
-            else if (k == 7) tc = StudioFont::rgba(86, 182, 194);
+            if (prefTheme == 1) {
+                if (k == 1) tc = StudioFont::rgba(10, 10, 10);
+                else if (k == 2) tc = StudioFont::rgba(56, 56, 56);
+                else if (k == 3) tc = StudioFont::rgba(36, 36, 36);
+                else if (k == 4) tc = StudioFont::rgba(72, 72, 72);
+                else if (k == 5) tc = StudioFont::rgba(64, 64, 64);
+                else if (k == 6) tc = StudioFont::rgba(130, 130, 130);
+                else if (k == 7) tc = StudioFont::rgba(48, 48, 48);
+            } else {
+                if (k == 1) tc = StudioFont::rgba(255, 255, 255);
+                else if (k == 2) tc = StudioFont::rgba(220, 220, 220);
+                else if (k == 3) tc = StudioFont::rgba(235, 235, 235);
+                else if (k == 4) tc = StudioFont::rgba(202, 202, 202);
+                else if (k == 5) tc = StudioFont::rgba(212, 212, 212);
+                else if (k == 6) tc = StudioFont::rgba(128, 128, 128);
+                else if (k == 7) tc = StudioFont::rgba(228, 228, 228);
+            }
             for (int c = c0; c < c0 + len && c < (int)colAt.size(); ++c) colAt[(size_t)c] = tc;
         }
         float px = codeRect.x + gutterW + 3 * density;
@@ -1947,14 +2271,14 @@ void StudioApp::buildCodeEditor(const Rect &area) {
                 char *err = nullptr;
                 int ok = obsidian_check(lc_editor_get_text(), activeScript.c_str(), &err);
                 editorStatus = ok ? "Syntax OK" : (err ? err : "Syntax error");
-                editorStatusCol = ok ? Col::green() : Col::red();
+                editorStatusCol = ok ? Col::text() : Col::muted();
                 appendOutput(ok ? (activeScript + ": syntax OK") : editorStatus, editorStatusCol);
                 if (err) obsidian_free(err);
             } else if (i == 3) {
                 saveActiveScript();
                 editorStatus = "Saved";
-                editorStatusCol = Col::green();
-                appendOutput("Saved " + activeScript, Col::green());
+                editorStatusCol = Col::text();
+                appendOutput("Saved " + activeScript, Col::text());
             }
         });
     }
@@ -1967,7 +2291,7 @@ void StudioApp::buildModal() {
         if (modal != ModalKind::TEXT_PROMPT) modal = ModalKind::NONE;
     });
 
-    bool wideModal = (modal == ModalKind::SKY || modal == ModalKind::COLOR || modal == ModalKind::ANIMATOR);
+    bool wideModal = (modal == ModalKind::SKY || modal == ModalKind::COLOR);
     float mw = std::min(width - 20 * density, wideModal ? 440.0f * density : 350.0f * density);
     float mh = std::min(height - 20 * density, wideModal ? 330.0f * density : 350.0f * density);
     if (modal == ModalKind::TEXT_PROMPT) mh = 132.0f * density;
@@ -2234,137 +2558,6 @@ void StudioApp::buildModal() {
                    applyWheelColor(true);
                    modal = ModalKind::NONE;
                });
-    } else if (modal == ModalKind::ANIMATOR) {
-        closeBtn("Animations (Select File)");
-        SceneNode *tn = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
-        std::string targetName = (tn && tn->is3DNode()) ? tn->name : "None (select 3D node)";
-        float leftW = std::round((mw - pad * 3) * 0.43f);
-        float rightX = box.x + pad * 2 + leftW;
-        float rightW = (box.x + box.w - pad) - rightX;
-        float bodyH = (box.y + box.h - pad) - y;
-
-        // Left column: animation files from project's animations/ folder + New File button
-        addBtn({box.x + pad, y, leftW, 23 * density}, "+ New Anim File", Col::green(), Col::text(), 8.2f * density, [this]() {
-            promptTitle = "New Animation Name";
-            promptValue = "anim_" + std::to_string(scene.nextId);
-            promptTargetKey = "NewAnim";
-            modal = ModalKind::TEXT_PROMPT;
-        });
-        std::vector<std::string> files = listAnimationFiles();
-        float fy = y + 27 * density;
-        float fRowH = 22 * density;
-        for (size_t i = 0; i < files.size(); ++i) {
-            if (fy + fRowH > box.y + box.h - pad) break;
-            std::string fpath = files[i];
-            std::string fname = fpath;
-            auto sl = fname.find_last_of('/');
-            if (sl != std::string::npos) fname = fname.substr(sl + 1);
-            bool isSel = (activeAnimFile == fpath);
-            addBtn({box.x + pad, fy, leftW, 20 * density}, fname, isSel ? Col::btnAct() : Col::btn(), Col::text(), 7.8f * density, [this, fpath]() {
-                activeAnimFile = fpath;
-                AnimClip loaded;
-                if (AnimClip::loadFromFile(currentProjectDir + "/" + fpath, loaded)) {
-                    activeAnim = std::move(loaded);
-                }
-                animTime = 0.0f;
-                animPlaying = false;
-                if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
-                    n->animPath = fpath;
-                    n->animAutoPlay = true;
-                    n->animLoop = activeAnim.loop;
-                    scene.saveToFile(currentProjectDir + "/scene.json");
-                }
-            });
-            fy += fRowH;
-        }
-        if (files.empty()) {
-            emitText("No .anim.json files yet", box.x + pad, fy + 4 * density, 7.6f * density, Col::muted(), leftW);
-        }
-
-        // Right column: Target node, keyframe capture, Play/Stop, Loop, Assign, Keyframes list
-        float ry = y;
-        emitText("Node: " + targetName, rightX, ry + 2 * density, 8.2f * density, Col::accent(), rightW);
-        ry += 17 * density;
-        std::string curLbl = activeAnimFile.empty() ? "No file selected" : activeAnimFile;
-        emitText("File: " + curLbl, rightX, ry, 7.5f * density, Col::muted(), rightW);
-        ry += 14 * density;
-
-        float bw = (rightW - 4 * density) * 0.5f;
-        addBtn({rightX, ry, bw, 23 * density}, "+ Keyframe", Col::btnAct(), Col::text(), 8.0f * density, [this]() {
-            SceneNode *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
-            if (!n || !n->is3DNode()) {
-                appendOutput("Select a 3D object first to add keyframe.", Col::red());
-                return;
-            }
-            if (activeAnimFile.empty()) {
-                activeAnimFile = "animations/" + n->name + "_anim.anim.json";
-                activeAnim = AnimClip{};
-                activeAnim.name = n->name + "_anim";
-            }
-            float nextT = activeAnim.frames.empty() ? 0.0f : (activeAnim.frames.back().t + 0.6f);
-            activeAnim.frames.push_back({nextT, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ});
-            activeAnim.sortFrames();
-            std::string dirPath = currentProjectDir + "/animations";
-            mkdir(dirPath.c_str(), 0755);
-            activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
-            n->animPath = activeAnimFile;
-            n->animAutoPlay = true;
-            n->animLoop = activeAnim.loop;
-            scene.saveToFile(currentProjectDir + "/scene.json");
-        });
-        addBtn({rightX + bw + 4 * density, ry, bw, 23 * density},
-               animPlaying ? "Stop" : "Play", animPlaying ? Col::red() : Col::green(), Col::text(), 8.0f * density, [this]() {
-                   if (animPlaying) {
-                       animPlaying = false;
-                   } else if (!activeAnim.frames.empty()) {
-                       animTime = 0.0f;
-                       animPlaying = true;
-                       modal = ModalKind::NONE; // Close modal so user sees animation play in 3D viewport!
-                   }
-               });
-        ry += 27 * density;
-
-        addBtn({rightX, ry, bw, 22 * density},
-               activeAnim.loop ? "Loop: ON" : "Loop: OFF", Col::btn(), Col::text(), 7.8f * density, [this]() {
-                   activeAnim.loop = !activeAnim.loop;
-                   if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
-                   if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
-                       n->animLoop = activeAnim.loop;
-                       scene.saveToFile(currentProjectDir + "/scene.json");
-                   }
-               });
-        addBtn({rightX + bw + 4 * density, ry, bw, 22 * density},
-               "Use in Game", Col::btn(), Col::accent(), 7.8f * density, [this]() {
-                   SceneNode *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
-                   if (n && n->is3DNode() && !activeAnimFile.empty()) {
-                       n->animPath = activeAnimFile;
-                       n->animAutoPlay = true;
-                       n->animLoop = activeAnim.loop;
-                       scene.saveToFile(currentProjectDir + "/scene.json");
-                       appendOutput("Assigned " + activeAnimFile + " to " + n->name, Col::green());
-                   }
-               });
-        ry += 27 * density;
-
-        // Keyframes list
-        float listH = std::max(24.0f, (box.y + box.h - pad) - ry);
-        emitRect(rightX, ry, rightW, listH, Col::bg());
-        emitRectOutline(rightX, ry, rightW, listH, 1.0f, Col::border());
-        float kfy = ry + 3 * density;
-        for (size_t i = 0; i < activeAnim.frames.size(); ++i) {
-            if (kfy + 18 * density > ry + listH) break;
-            const auto &kf = activeAnim.frames[i];
-            std::string klbl = "t=" + fmtNum(kf.t) + "s  (" + fmtNum(kf.px) + "," + fmtNum(kf.py) + "," + fmtNum(kf.pz) + ")";
-            emitText(klbl, rightX + 4 * density, kfy + 2 * density, 7.5f * density, Col::text(), rightW - 26 * density);
-            addBtn({rightX + rightW - 20 * density, kfy, 17 * density, 16 * density}, "x", Col::btn(), Col::red(), 7.2f * density, [this, i]() {
-                if (i < activeAnim.frames.size()) {
-                    activeAnim.frames.erase(activeAnim.frames.begin() + (ptrdiff_t)i);
-                    if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
-                }
-            });
-            kfy += 19 * density;
-        }
-        (void)bodyH;
     } else if (modal == ModalKind::MATERIAL) {
         closeBtn("Material");
         const char *mats[] = {"Plastic", "SmoothPlastic", "Slate", "Metal", "Wood", "Neon", "Glass", "Brick"};
@@ -2382,17 +2575,52 @@ void StudioApp::buildModal() {
             });
         }
     } else if (modal == ModalKind::SHAPE) {
-        closeBtn("Mesh Shape");
+        closeBtn("Mesh Shape & Geometry");
         const char *sh[] = {"Box", "Wedge", "Sphere", "Cylinder", "Plane"};
+        float sw = (mw - pad * 4) / 3.0f;
         for (int i = 0; i < 5; ++i) {
             std::string sname = sh[i];
-            addBtn({box.x + pad, y + i * 28 * density, mw - pad * 2, 23 * density}, sname, Col::btn(), Col::text(), fs, [this, sname]() {
+            float rx = box.x + pad + (i % 3) * (sw + pad);
+            float ry = y + (i / 3) * 26 * density;
+            bool cur = selectedNode() && selectedNode()->shape() == sname;
+            addBtn({rx, ry, sw, 22 * density}, sname, cur ? Col::btnAct() : Col::btn(), Col::text(), fs, [this, sname]() {
                 if (auto *n = selectedNode()) {
                     n->setShape(sname);
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
-                modal = ModalKind::NONE;
             });
+        }
+        y += 58 * density;
+        emitText("Smoothness / Polygons (Circle / Sphere / Cylinder)", box.x + pad, y, 7.8f * density, Col::muted(), mw - pad * 2);
+        y += 14 * density;
+        static const int segOpts[] = {8, 12, 16, 24, 32, 48};
+        float pw = (mw - pad * 2 - 5 * 3 * density) / 6.0f;
+        for (int i = 0; i < 6; ++i) {
+            int sv = segOpts[i];
+            bool cur = selectedNode() && selectedNode()->segments == sv;
+            addBtn({box.x + pad + i * (pw + 3 * density), y, pw, 22 * density}, std::to_string(sv),
+                   cur ? Col::btnAct() : Col::btn(), Col::text(), 8.0f * density, [this, sv]() {
+                       if (auto *n = selectedNode()) {
+                           n->segments = sv;
+                           scene.saveToFile(currentProjectDir + "/scene.json");
+                       }
+                   });
+        }
+        y += 30 * density;
+        emitText("Corner Roundness (Box / Square)", box.x + pad, y, 7.8f * density, Col::muted(), mw - pad * 2);
+        y += 14 * density;
+        static const float radOpts[] = {0.0f, 0.1f, 0.2f, 0.35f, 0.48f};
+        float rw = (mw - pad * 2 - 4 * 3 * density) / 5.0f;
+        for (int i = 0; i < 5; ++i) {
+            float rv = radOpts[i];
+            bool cur = selectedNode() && std::fabs(selectedNode()->cornerRadius - rv) < 0.03f;
+            addBtn({box.x + pad + i * (rw + 3 * density), y, rw, 22 * density}, fmtNum(rv),
+                   cur ? Col::btnAct() : Col::btn(), Col::text(), 8.0f * density, [this, rv]() {
+                       if (auto *n = selectedNode()) {
+                           n->cornerRadius = rv;
+                           scene.saveToFile(currentProjectDir + "/scene.json");
+                       }
+                   });
         }
     } else if (modal == ModalKind::SETTINGS) {
         closeBtn("Studio & Font Settings");
@@ -2441,6 +2669,16 @@ void StudioApp::buildModal() {
                "Tab: " + std::to_string(prefTabSpaces) + " sp", Col::btn(), Col::text(), fs, [this, save]() {
                    prefTabSpaces = (prefTabSpaces == 2) ? 4 : 2;
                    save();
+               });
+        y += 28 * density;
+        addBtn({box.x + pad, y, mw - pad * 2, 24 * density},
+               "2D Circle Polys: " + std::to_string(circleSegments), Col::btn(), Col::text(), fs, [this]() {
+                   static const int cOpts[] = {8, 12, 16, 24, 32, 48, 64};
+                   int next = 32;
+                   for (int i = 0; i < 7; ++i) {
+                       if (cOpts[i] == circleSegments) { next = cOpts[(i + 1) % 7]; break; }
+                   }
+                   circleSegments = next;
                });
     } else if (modal == ModalKind::TEXT_PROMPT) {
         closeBtn(promptTitle);
@@ -2502,7 +2740,8 @@ void StudioApp::buildModal() {
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
                 activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
-                modal = ModalKind::ANIMATOR;
+                showAnimator = true;
+                modal = ModalKind::NONE;
             } else if (promptTargetKey == "HexColor") {
                 uint32_t parsed = 0;
                 if (parseHexColor(promptValue, parsed)) {
@@ -2524,6 +2763,8 @@ void StudioApp::buildModal() {
                 else if (promptTargetKey == "Size" && parseVec3(promptValue, a, b, c)) {
                     n->sizeX = std::max(0.2f, a); n->sizeY = std::max(0.2f, b); n->sizeZ = std::max(0.2f, c);
                 } else if (promptTargetKey == "Rotation" && parseVec3(promptValue, a, b, c)) { n->rotX = a; n->rotY = b; n->rotZ = c; }
+                else if (promptTargetKey == "Segments") n->segments = std::clamp(std::atoi(promptValue.c_str()), 6, 64);
+                else if (promptTargetKey == "CornerRadius") n->cornerRadius = std::clamp((float)std::atof(promptValue.c_str()), 0.0f, 0.48f);
                 else if (promptTargetKey == "Transparency") n->transparency = std::clamp((float)std::atof(promptValue.c_str()), 0.0f, 0.95f);
                 else if (promptTargetKey == "Mass") n->mass = std::max(0.01f, (float)std::atof(promptValue.c_str()));
                 else if (promptTargetKey == "Gravity") n->gravityScale = (float)std::atof(promptValue.c_str());
@@ -2753,7 +2994,19 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
         else if (touchMode == 3) applyGizmoDrag(dx, dy);
         else if (touchMode == 2 && pointerCount >= 2) {
             float pinch = std::hypot(xs[1] - xs[0], ys[1] - ys[0]);
-            if (lastPinch > 0) camDist = std::clamp(camDist * (lastPinch / std::max(20.0f, pinch)), 4.0f, 160.0f);
+            if (lastPinch > 0) {
+                float scale = lastPinch / std::max(20.0f, pinch);
+                float nextDist = camDist * scale;
+                if (nextDist < 1.5f) {
+                    float push = 1.5f - nextDist;
+                    camTargetX += fwd.x * push;
+                    camTargetY += fwd.y * push;
+                    camTargetZ += fwd.z * push;
+                    camDist = 1.5f;
+                } else {
+                    camDist = std::min(nextDist, 800.0f);
+                }
+            }
             lastPinch = pinch;
             float cx = (xs[0] + xs[1]) * 0.5f, cy = (ys[0] + ys[1]) * 0.5f;
             float pdx = cx - lastX, pdy = cy - lastY;

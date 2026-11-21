@@ -65,6 +65,20 @@ Java_com_obsidiancore_studio_MainActivity_nativeStudioInit(
         if (mid) e->CallVoidMethod(g_activity, mid);
         e->DeleteLocalRef(cls);
     };
+    g_studio->callbacks.openTexturePicker = [](const std::string &projName, const std::string &nodeId) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbOpenTexturePicker", "(Ljava/lang/String;Ljava/lang/String;)V");
+        if (mid) {
+            jstring jp = e->NewStringUTF(projName.c_str());
+            jstring jn = e->NewStringUTF(nodeId.c_str());
+            e->CallVoidMethod(g_activity, mid, jp, jn);
+            e->DeleteLocalRef(jp);
+            e->DeleteLocalRef(jn);
+        }
+        e->DeleteLocalRef(cls);
+    };
     g_studio->callbacks.setOrientationPortrait = [](bool portrait) {
         JNIEnv *e = getEnv();
         if (!e || !g_activity) return;
@@ -199,6 +213,14 @@ Java_com_obsidiancore_studio_MainActivity_nativeStudioSetCustomFont(JNIEnv *env,
                                           g_studio->prefTheme, g_studio->prefTabSpaces,
                                           g_studio->prefLineNumbers, p);
         }
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_MainActivity_nativeStudioApplyTexture(JNIEnv *env, jclass, jstring jNodeId, jstring jRelPath) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) {
+        g_studio->applyNodeTexture(fromJava(env, jNodeId), fromJava(env, jRelPath));
     }
 }
 

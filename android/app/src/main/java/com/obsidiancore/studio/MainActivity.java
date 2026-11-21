@@ -40,10 +40,17 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     private boolean surfaceReady = false;
     private boolean runningLoop = false;
     private long lastFrameNs = 0L;
+    private String pendingTexProj = "";
+    private String pendingTexNode = "";
 
     private final ActivityResultLauncher<String[]> fontPicker =
         registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
             if (uri != null) importCustomFont(uri);
+        });
+
+    private final ActivityResultLauncher<String[]> texturePicker =
+        registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
+            if (uri != null) importNodeTexture(uri);
         });
 
     @Override
@@ -173,9 +180,38 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         });
     }
 
+    private void importNodeTexture(Uri uri) {
+        if (pendingTexProj.isEmpty() || pendingTexNode.isEmpty()) return;
+        try {
+            File projDir = new File(store.root, pendingTexProj);
+            File dir = new File(projDir, "assets");
+            if (!dir.exists()) dir.mkdirs();
+            String mime = getContentResolver().getType(uri);
+            String ext = (mime != null && (mime.contains("jpeg") || mime.contains("jpg"))) ? ".jpg" : ".png";
+            String relPath = "assets/tex_" + System.currentTimeMillis() + ext;
+            File dst = new File(projDir, relPath);
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                 OutputStream out = new FileOutputStream(dst)) {
+                if (in == null) return;
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            }
+            nativeStudioApplyTexture(pendingTexNode, relPath);
+        } catch (Exception ignored) {
+        }
+    }
+
     @SuppressWarnings("unused")
     public void nativeCbOpenFontPicker() {
         runOnUiThread(() -> fontPicker.launch(new String[]{"*/*"}));
+    }
+
+    @SuppressWarnings("unused")
+    public void nativeCbOpenTexturePicker(String projectName, String nodeId) {
+        pendingTexProj = projectName != null ? projectName : "";
+        pendingTexNode = nodeId != null ? nodeId : "";
+        runOnUiThread(() -> texturePicker.launch(new String[]{"image/*"}));
     }
 
     @SuppressWarnings("unused")
@@ -358,6 +394,7 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     private static native void nativeStudioTextInput(String utf8);
     private static native void nativeStudioKeyCode(int keyCode);
     private static native void nativeStudioSetCustomFont(String path);
+    private static native void nativeStudioApplyTexture(String nodeId, String relPath);
     private static native void nativeStudioDestroy();
 
     private static native boolean nativeVulkanCreate(Surface surface, int width, int height);

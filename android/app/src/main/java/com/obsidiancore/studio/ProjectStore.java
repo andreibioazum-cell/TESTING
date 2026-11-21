@@ -275,7 +275,7 @@ final class ProjectStore {
     }
 
     private static String playerScriptObs() {
-        return "-- Player Character Controller (Obsidronium) _joy_ver2\n" +
+        return "-- Player Character Controller (Obsidronium) _joy_ver3\n" +
             "-- Left joystick = Move | Right button = Jump | Right drag = Rotate Camera\n" +
             "player = world:FindFirstChild('Player')\n" +
             "cam = world:FindFirstChild('Camera3D')\n" +
@@ -303,6 +303,11 @@ final class ProjectStore {
             "    bx = w - math.max(br + 30.0, w * 0.14)\n" +
             "    by = h - math.max(br + 30.0, h * 0.22)\n" +
             "    return w, h, jx, jy, jr, bx, by, br\n\n" +
+            "func _is_solid(b):\n" +
+            "    if not b or b == player or not b.Collidable:\n" +
+            "        return false\n" +
+            "    c = b.ClassName\n" +
+            "    return c == 'Box' or c == 'Wedge' or c == 'Sphere' or c == 'Cylinder' or c == 'Plane' or c == 'Part'\n\n" +
             "func on_touch(int id, float x, float y, bool down):\n" +
             "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
             "    d_jump = math.sqrt((x - bx) * (x - bx) + (y - by) * (y - by))\n" +
@@ -358,19 +363,6 @@ final class ProjectStore {
             "            move_tid = -1\n" +
             "            move_x = 0.0\n" +
             "            move_z = 0.0\n\n" +
-            "func _support_height(float px, float pz, float cur_y):\n" +
-            "    best_y = 1.5\n" +
-            "    kids = world:GetChildren()\n" +
-            "    for i = 1, #kids:\n" +
-            "        b = kids[i]\n" +
-            "        if b ~= player and b.Collidable and b.ClassName == 'Box':\n" +
-            "            hx = b.Size.X * 0.5 + 0.7\n" +
-            "            hz = b.Size.Z * 0.5 + 0.7\n" +
-            "            top = b.Position.Y + b.Size.Y * 0.5 + 1.5\n" +
-            "            if math.abs(px - b.Position.X) <= hx and math.abs(pz - b.Position.Z) <= hz:\n" +
-            "                if cur_y >= top - 0.95 and top > best_y:\n" +
-            "                    best_y = top\n" +
-            "    return best_y\n\n" +
             "func on_update(float dt):\n" +
             "    if not player:\n" +
             "        return\n" +
@@ -380,17 +372,65 @@ final class ProjectStore {
             "    wx = move_x * cy + move_z * sy\n" +
             "    wz = -move_x * sy + move_z * cy\n" +
             "    p = player.Position\n" +
-            "    p.X += wx * speed * dt\n" +
-            "    p.Z += wz * speed * dt\n" +
+            "    phx = player.Size.X * 0.5\n" +
+            "    phy = player.Size.Y * 0.5\n" +
+            "    phz = player.Size.Z * 0.5\n" +
+            "    kids = world:GetChildren()\n" +
+            "    nx = p.X + wx * speed * dt\n" +
+            "    for i = 1, #kids:\n" +
+            "        b = kids[i]\n" +
+            "        if _is_solid(b):\n" +
+            "            bhx = b.Size.X * 0.5\n" +
+            "            bhy = b.Size.Y * 0.5\n" +
+            "            bhz = b.Size.Z * 0.5\n" +
+            "            if p.Y + phy - 0.05 > b.Position.Y - bhy and p.Y - phy + 0.12 < b.Position.Y + bhy:\n" +
+            "                if math.abs(p.Z - b.Position.Z) < bhz + phz - 0.04:\n" +
+            "                    if math.abs(nx - b.Position.X) < bhx + phx:\n" +
+            "                        if p.X <= b.Position.X:\n" +
+            "                            nx = b.Position.X - (bhx + phx)\n" +
+            "                        else:\n" +
+            "                            nx = b.Position.X + (bhx + phx)\n" +
+            "    p.X = nx\n" +
+            "    nz = p.Z + wz * speed * dt\n" +
+            "    for i = 1, #kids:\n" +
+            "        b = kids[i]\n" +
+            "        if _is_solid(b):\n" +
+            "            bhx = b.Size.X * 0.5\n" +
+            "            bhy = b.Size.Y * 0.5\n" +
+            "            bhz = b.Size.Z * 0.5\n" +
+            "            if p.Y + phy - 0.05 > b.Position.Y - bhy and p.Y - phy + 0.12 < b.Position.Y + bhy:\n" +
+            "                if math.abs(p.X - b.Position.X) < bhx + phx - 0.04:\n" +
+            "                    if math.abs(nz - b.Position.Z) < bhz + phz:\n" +
+            "                        if p.Z <= b.Position.Z:\n" +
+            "                            nz = b.Position.Z - (bhz + phz)\n" +
+            "                        else:\n" +
+            "                            nz = b.Position.Z + (bhz + phz)\n" +
+            "    p.Z = nz\n" +
+            "    old_y = p.Y\n" +
             "    vy -= 26.0 * dt\n" +
-            "    p.Y += vy * dt\n" +
-            "    floor_y = _support_height(p.X, p.Z, p.Y)\n" +
-            "    if p.Y <= floor_y and vy <= 0.0:\n" +
-            "        p.Y = floor_y\n" +
+            "    ny = old_y + vy * dt\n" +
+            "    grounded = false\n" +
+            "    for i = 1, #kids:\n" +
+            "        b = kids[i]\n" +
+            "        if _is_solid(b):\n" +
+            "            bhx = b.Size.X * 0.5\n" +
+            "            bhy = b.Size.Y * 0.5\n" +
+            "            bhz = b.Size.Z * 0.5\n" +
+            "            if math.abs(p.X - b.Position.X) < bhx + phx - 0.03 and math.abs(p.Z - b.Position.Z) < bhz + phz - 0.03:\n" +
+            "                b_top = b.Position.Y + bhy\n" +
+            "                b_bot = b.Position.Y - bhy\n" +
+            "                if vy <= 0.0 and old_y - phy >= b_top - 0.45 and ny - phy <= b_top:\n" +
+            "                    ny = b_top + phy\n" +
+            "                    vy = 0.0\n" +
+            "                    grounded = true\n" +
+            "                elseif vy > 0.0 and old_y + phy <= b_bot + 0.45 and ny + phy >= b_bot:\n" +
+            "                    ny = b_bot - phy\n" +
+            "                    vy = 0.0\n" +
+            "    if ny < phy:\n" +
+            "        ny = phy\n" +
             "        vy = 0.0\n" +
             "        grounded = true\n" +
-            "    elseif p.Y > floor_y + 0.15:\n" +
-            "        grounded = false\n" +
+            "    p.Y = ny\n" +
             "    if math.abs(wx) > 0.05 or math.abs(wz) > 0.05:\n" +
             "        player.Rotation = Vector3.new(0, math.deg(math.atan2(wx, wz)), 0)\n" +
             "    if cam:\n" +
@@ -400,25 +440,15 @@ final class ProjectStore {
             "        cam.Rotation = Vector3.new(-math.deg(cam_pitch), math.deg(cam_yaw), 0.0)\n\n" +
             "func draw():\n" +
             "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
-            "    draw_circle(jx, jy, jr + 4.0, 0.04, 0.07, 0.12, 0.55)\n" +
-            "    draw_circle(jx, jy, jr, 0.10, 0.15, 0.24, 0.65)\n" +
-            "    draw_circle_outline(jx, jy, jr, 3.5, 0.35, 0.78, 0.98, 0.90)\n" +
-            "    draw_line(jx - jr * 0.55, jy, jx + jr * 0.55, jy, 2.0, 0.75, 0.85, 0.98, 0.35)\n" +
-            "    draw_line(jx, jy - jr * 0.55, jx, jy + jr * 0.55, 2.0, 0.75, 0.85, 0.98, 0.35)\n" +
+            "    draw_circle_outline(jx, jy, jr, 3.5, 0.0, 0.0, 0.0, 1.0)\n" +
             "    kx = jx + move_x * jr * 0.62\n" +
             "    ky = jy + move_z * jr * 0.62\n" +
-            "    draw_line(jx, jy, kx, ky, 4.0, 0.22, 0.74, 0.97, 0.70)\n" +
-            "    draw_circle(kx, ky, jr * 0.42, 0.22, 0.74, 0.97, 0.95)\n" +
-            "    draw_circle_outline(kx, ky, jr * 0.42, 2.5, 1.0, 1.0, 1.0, 0.90)\n" +
-            "    if jump_tid ~= -1:\n" +
-            "        draw_circle(bx, by, br, 0.22, 0.74, 0.97, 0.85)\n" +
-            "    else:\n" +
-            "        draw_circle(bx, by, br, 0.10, 0.15, 0.24, 0.68)\n" +
-            "    draw_circle_outline(bx, by, br, 3.5, 0.22, 0.74, 0.97, 0.95)\n" +
+            "    draw_circle(kx, ky, jr * 0.40, 0.0, 0.0, 0.0, 1.0)\n" +
+            "    draw_circle_outline(bx, by, br, 3.5, 0.0, 0.0, 0.0, 1.0)\n" +
             "    set_text_align('center')\n" +
             "    ts = math.max(16.0, br * 0.42)\n" +
-            "    draw_text('JUMP', bx, by - ts * 0.55, ts, 1.0, 1.0, 1.0, 0.98)\n" +
-            "    draw_text('Drag right = Camera', w * 0.5, 16.0, 16.0, 0.85, 0.92, 1.0, 0.75)\n" +
+            "    draw_text('JUMP', bx, by - ts * 0.55, ts, 0.0, 0.0, 0.0, 1.0)\n" +
+            "    draw_text('Drag right = Camera', w * 0.5, 16.0, 16.0, 0.0, 0.0, 0.0, 0.75)\n" +
             "    set_text_align('left')\n\n" +
             "scene.OnUpdate:Connect(on_update)\n";
     }
@@ -489,7 +519,7 @@ final class ProjectStore {
                 if (pf.isFile()) {
                     try {
                         String p = read(pf);
-                        if (p.contains("Player Character Controller") && !p.contains("_joy_ver2")) {
+                        if (p.contains("Player Character Controller") && !p.contains("_joy_ver3")) {
                             write(pf, playerScriptObs());
                         }
                     } catch (IOException ignored) {

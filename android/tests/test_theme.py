@@ -24,6 +24,8 @@ for name in ('colorPrimary', 'colorPrimaryContainer', 'colorSecondary',
              'android:colorBackground', 'colorSurface', 'colorSurfaceVariant',
              'colorSurfaceContainer', 'colorSurfaceContainerHigh', 'colorError',
              'colorErrorContainer'):
-    ratio = 1.05 / (luminance(colors[name]) + .05)
+    c = colors[name].upper()
+    assert len(c) == 7 and c[1:3] == c[3:5] == c[5:7], f'{name}: not neutral gray ({c})'
+    ratio = 1.05 / (luminance(c) + .05)
     assert ratio >= 4.5, f'{name}: contrast {ratio:.2f} < 4.5'
-print('Obsidian Core theme white-text contrast: OK')
+print('Obsidian Core theme monochrome & white-text contrast: OK')

@@ -111,6 +111,14 @@ struct Renderer {
     VkSampler atlasSampler = VK_NULL_HANDLE;
     DynBuffer atlasStage;
     uint64_t uploadedAtlasVersion = 0;
+
+    // 3D texture atlas
+    VkImage texAtlasImg = VK_NULL_HANDLE;
+    VkDeviceMemory texAtlasMem = VK_NULL_HANDLE;
+    VkImageView texAtlasView = VK_NULL_HANDLE;
+    VkSampler texAtlasSampler = VK_NULL_HANDLE;
+    DynBuffer texAtlasStage;
+    uint64_t uploadedTexAtlasVersion = 0;
 } r;
 
 void check(VkResult res, const char *msg) { if (res != VK_SUCCESS) throw std::runtime_error(msg); }
@@ -426,6 +434,29 @@ void createAtlasTexture() {
     sc.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     check(vkCreateSampler(r.device, &sc, nullptr, &r.atlasSampler), "vkCreateSampler");
+
+    uint32_t tsz = StudioApp::kTexAtlasSize;
+    VkImageCreateInfo tii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    tii.imageType = VK_IMAGE_TYPE_2D;
+    tii.format = VK_FORMAT_R8G8B8A8_UNORM;
+    tii.extent = {tsz, tsz, 1};
+    tii.mipLevels = 1; tii.arrayLayers = 1;
+    tii.samples = VK_SAMPLE_COUNT_1_BIT;
+    tii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    tii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    check(vkCreateImage(r.device, &tii, nullptr, &r.texAtlasImg), "vkCreateImage(texAtlas)");
+    VkMemoryRequirements tmr{};
+    vkGetImageMemoryRequirements(r.device, r.texAtlasImg, &tmr);
+    VkMemoryAllocateInfo tai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, tmr.size,
+                             findMemType(tmr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+    check(vkAllocateMemory(r.device, &tai, nullptr, &r.texAtlasMem), "vkAllocateMemory(texAtlas)");
+    check(vkBindImageMemory(r.device, r.texAtlasImg, r.texAtlasMem, 0), "vkBindImageMemory(texAtlas)");
+
+    VkImageViewCreateInfo tiv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    tiv.image = r.texAtlasImg; tiv.viewType = VK_IMAGE_VIEW_TYPE_2D; tiv.format = VK_FORMAT_R8G8B8A8_UNORM;
+    tiv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    check(vkCreateImageView(r.device, &tiv, nullptr, &r.texAtlasView), "vkCreateImageView(texAtlas)");
+    check(vkCreateSampler(r.device, &sc, nullptr, &r.texAtlasSampler), "vkCreateSampler(texAtlas)");
 }
 
 void createPipelines() {
@@ -434,16 +465,17 @@ void createPipelines() {
     VkDescriptorSetLayoutCreateInfo dsl2{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b2};
     check(vkCreateDescriptorSetLayout(r.device, &dsl2, nullptr, &r.descLayout), "vkCreateDescriptorSetLayout(2D)");
 
-    // 3D descriptor layout (shadow map + scene UBO)
-    VkDescriptorSetLayoutBinding b3[2]{
+    // 3D descriptor layout (shadow map + scene UBO + texture atlas)
+    VkDescriptorSetLayoutBinding b3[3]{
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
+        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
     };
-    VkDescriptorSetLayoutCreateInfo dsl3{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, b3};
+    VkDescriptorSetLayoutCreateInfo dsl3{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, b3};
     check(vkCreateDescriptorSetLayout(r.device, &dsl3, nullptr, &r.descLayout3D), "vkCreateDescriptorSetLayout(3D)");
 
     VkDescriptorPoolSize ps[2]{
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 + kFrames},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 + kFrames * 2},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFrames}
     };
     VkDescriptorPoolCreateInfo dpc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1 + kFrames, 2, ps};
@@ -462,13 +494,16 @@ void createPipelines() {
         check(vkAllocateDescriptorSets(r.device, &dsa3, &f.descSet3D), "vkAllocateDescriptorSets(3D)");
         VkDescriptorImageInfo shInfo{r.shadowSampler, r.shadowView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorBufferInfo uboInfo{f.ubo3d.buf, 0, sizeof(SceneUbo)};
-        VkWriteDescriptorSet wds3[2]{
+        VkDescriptorImageInfo txInfo{r.texAtlasSampler, r.texAtlasView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet wds3[3]{
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, f.descSet3D, 0, 0, 1,
              VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shInfo, nullptr, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, f.descSet3D, 1, 0, 1,
-             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &uboInfo, nullptr}
+             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &uboInfo, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, f.descSet3D, 2, 0, 1,
+             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &txInfo, nullptr, nullptr}
         };
-        vkUpdateDescriptorSets(r.device, 2, wds3, 0, nullptr);
+        vkUpdateDescriptorSets(r.device, 3, wds3, 0, nullptr);
     }
 
     VkPushConstantRange pc3{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push3D)};
@@ -506,12 +541,13 @@ void createPipelines() {
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, m3f, "main"}
     };
     VkVertexInputBindingDescription bind3{0, sizeof(MeshVertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attr3[3]{
+    VkVertexInputAttributeDescription attr3[4]{
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(MeshVertex, x)},
         {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(MeshVertex, nx)},
-        {2, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(MeshVertex, color)}
+        {2, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(MeshVertex, color)},
+        {3, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(MeshVertex, u)}
     };
-    VkPipelineVertexInputStateCreateInfo vi3{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, nullptr, 0, 1, &bind3, 3, attr3};
+    VkPipelineVertexInputStateCreateInfo vi3{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, nullptr, 0, 1, &bind3, 4, attr3};
     VkPipelineInputAssemblyStateCreateInfo iaTri{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, nullptr, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
     VkPipelineInputAssemblyStateCreateInfo iaLine{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, nullptr, 0, VK_PRIMITIVE_TOPOLOGY_LINE_LIST};
 
@@ -613,6 +649,7 @@ void destroy() {
         if (f.pool) vkDestroyCommandPool(r.device, f.pool, nullptr);
     }
     destroyDynBuffer(r.atlasStage);
+    destroyDynBuffer(r.texAtlasStage);
     if (r.pipeShadow) vkDestroyPipeline(r.device, r.pipeShadow, nullptr);
     if (r.pipe3DMesh) vkDestroyPipeline(r.device, r.pipe3DMesh, nullptr);
     if (r.pipe3DLines) vkDestroyPipeline(r.device, r.pipe3DLines, nullptr);
@@ -623,6 +660,10 @@ void destroy() {
     if (r.descPool) vkDestroyDescriptorPool(r.device, r.descPool, nullptr);
     if (r.descLayout3D) vkDestroyDescriptorSetLayout(r.device, r.descLayout3D, nullptr);
     if (r.descLayout) vkDestroyDescriptorSetLayout(r.device, r.descLayout, nullptr);
+    if (r.texAtlasSampler) vkDestroySampler(r.device, r.texAtlasSampler, nullptr);
+    if (r.texAtlasView) vkDestroyImageView(r.device, r.texAtlasView, nullptr);
+    if (r.texAtlasImg) vkDestroyImage(r.device, r.texAtlasImg, nullptr);
+    if (r.texAtlasMem) vkFreeMemory(r.device, r.texAtlasMem, nullptr);
     if (r.atlasSampler) vkDestroySampler(r.device, r.atlasSampler, nullptr);
     if (r.atlasView) vkDestroyImageView(r.device, r.atlasView, nullptr);
     if (r.atlasImg) vkDestroyImage(r.device, r.atlasImg, nullptr);
@@ -690,6 +731,32 @@ void drawStudio(StudioApp *app, float density) {
         vkCmdPipelineBarrier(f.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &toRead);
         r.uploadedAtlasVersion = app->font.atlasVersion;
+    }
+
+    // Upload 3D texture atlas if updated
+    if (app && !app->texAtlasRgba.empty() && app->texAtlasVersion != r.uploadedTexAtlasVersion) {
+        VkDeviceSize bytes = app->texAtlasRgba.size();
+        ensureDynBuffer(r.texAtlasStage, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        std::memcpy(r.texAtlasStage.mapped, app->texAtlasRgba.data(), bytes);
+
+        VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr,
+            0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, r.texAtlasImg, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        vkCmdPipelineBarrier(f.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &toDst);
+
+        VkBufferImageCopy reg{};
+        reg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        reg.imageExtent = {StudioApp::kTexAtlasSize, StudioApp::kTexAtlasSize, 1};
+        vkCmdCopyBufferToImage(f.cmd, r.texAtlasStage.buf, r.texAtlasImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &reg);
+
+        VkImageMemoryBarrier toRead{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, r.texAtlasImg, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        vkCmdPipelineBarrier(f.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &toRead);
+        r.uploadedTexAtlasVersion = app->texAtlasVersion;
     }
 
     // Pack dynamic vertex buffers + UBO for 3D + 2D
@@ -780,7 +847,7 @@ void drawStudio(StudioApp *app, float density) {
     }
 
     VkClearValue clears[2]{};
-    clears[0].color = {{0.09f, 0.10f, 0.12f, 1.0f}};
+    clears[0].color = {{0.08f, 0.08f, 0.08f, 1.0f}};
     clears[1].depthStencil = {1.0f, 0};
 
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, nullptr, r.renderPass,

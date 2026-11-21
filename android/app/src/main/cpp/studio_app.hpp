@@ -22,6 +22,7 @@ struct DrawBatch {
 struct StudioCallbacks {
     std::function<void(bool)> setKeyboardVisible;
     std::function<void()> openFontPicker;
+    std::function<void(const std::string &projName, const std::string &nodeId)> openTexturePicker;
     std::function<void(bool)> setOrientationPortrait;
     std::function<void(const std::string &kind, const std::string &name)> createProject;
     std::function<void(const std::string &oldName, const std::string &newName)> renameProject;
@@ -34,7 +35,7 @@ class StudioApp {
 public:
     enum class RibbonTab { PROJECTS, HOME, CREATE, VIEW, SCRIPTS };
     enum class ToolMode { SELECT, MOVE, SCALE, ROTATE };
-    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT, NEW_PROJECT, REPARENT, SKY, ANIMATOR };
+    enum class ModalKind { NONE, INSERT, COLOR, MATERIAL, SHAPE, SETTINGS, TEXT_PROMPT, NEW_PROJECT, REPARENT, SKY };
 
     float width = 1080.0f;
     float height = 2200.0f;
@@ -75,7 +76,7 @@ public:
     std::string activeScript;
     float editorScrollY = 0;
     bool editorFocused = false;
-    bool editorPortrait = true;
+    bool editorPortrait = false;
     std::string editorStatus;
     uint32_t editorStatusCol = 0;
 
@@ -91,6 +92,7 @@ public:
     int prefTheme = 0;
     int prefTabSpaces = 4;
     bool prefLineNumbers = true;
+    int circleSegments = 32;
     std::string prefCustomFontPath;
 
     // Modals & prompts
@@ -107,12 +109,19 @@ public:
     int lastRequestedOrientation = -1; // -1=unset, 0=landscape, 1=portrait
 
     // Animation editor / player state
+    bool showAnimator = false;
     AnimClip activeAnim;
     std::string activeAnimFile;
     std::string animTargetNodeId;
     bool animPlaying = false;
     float animTime = 0.0f;
     float animScrollY = 0.0f;
+
+    // 3D texture atlas (1024x1024, 4x4 tiles of 256x256)
+    static constexpr uint32_t kTexAtlasSize = 1024;
+    std::vector<uint8_t> texAtlasRgba;
+    std::vector<std::string> texAtlasPaths;
+    uint64_t texAtlasVersion = 0;
 
     // Scroll offsets
     float ribbonScrollX = 0;
@@ -144,6 +153,7 @@ public:
               int fontFamily, int fontSize, int theme, int tabSpaces, bool lineNums, const std::string &customFont);
     void openProject(const std::string &projName, bool is3D);
     void applyFont(const std::string &customPath, int family);
+    void applyNodeTexture(const std::string &nodeId, const std::string &relPath);
     void step(float dt);
     void buildFrame(float w, float h, float d);
     void onTouch(int action, int pointerIndex, int pointerCount, const int *ids, const float *xs, const float *ys);
@@ -174,6 +184,8 @@ private:
     float focalLen = 600.0f;
 
     void syncOrientation();
+    void initTexAtlas();
+    int ensureTextureTile(const std::string &relPath);
     void syncWheelFromArgb(uint32_t argb);
     uint32_t wheelArgb() const;
     void applyWheelColor(bool saveScene);
@@ -182,6 +194,7 @@ private:
     std::vector<std::string> listAnimationFiles() const;
     std::vector<std::string> listScriptFiles() const;
     void openAnimator(SceneNode *target);
+    void buildAnimatorDock(const Rect &area);
     void computeLayout();
     void build3DScene();
     void build2DScene(const Rect &area);

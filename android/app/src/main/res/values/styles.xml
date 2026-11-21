@@ -1,28 +1,28 @@
 <resources>
     <style name="Theme.ObsidianCore" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="colorPrimary">#5B21B6</item>
+        <item name="colorPrimary">#4A4A4A</item>
         <item name="colorOnPrimary">#FFFFFF</item>
-        <item name="colorPrimaryContainer">#4C1D95</item>
+        <item name="colorPrimaryContainer">#363636</item>
         <item name="colorOnPrimaryContainer">#FFFFFF</item>
-        <item name="colorSecondary">#0F4C5C</item>
+        <item name="colorSecondary">#424242</item>
         <item name="colorOnSecondary">#FFFFFF</item>
-        <item name="colorSecondaryContainer">#1B2A4A</item>
+        <item name="colorSecondaryContainer">#2E2E2E</item>
         <item name="colorOnSecondaryContainer">#FFFFFF</item>
-        <item name="colorTertiary">#3730A3</item>
+        <item name="colorTertiary">#444444</item>
         <item name="colorOnTertiary">#FFFFFF</item>
-        <item name="colorTertiaryContainer">#312E81</item>
+        <item name="colorTertiaryContainer">#303030</item>
         <item name="colorOnTertiaryContainer">#FFFFFF</item>
-        <item name="android:colorBackground">#09080D</item>
+        <item name="android:colorBackground">#101010</item>
         <item name="colorOnBackground">#FFFFFF</item>
-        <item name="colorSurface">#110F18</item>
+        <item name="colorSurface">#181818</item>
         <item name="colorOnSurface">#FFFFFF</item>
-        <item name="colorSurfaceVariant">#1B1726</item>
+        <item name="colorSurfaceVariant">#242424</item>
         <item name="colorOnSurfaceVariant">#FFFFFF</item>
-        <item name="colorSurfaceContainer">#15121F</item>
-        <item name="colorSurfaceContainerHigh">#201B2E</item>
-        <item name="colorError">#991B1B</item>
+        <item name="colorSurfaceContainer">#1C1C1C</item>
+        <item name="colorSurfaceContainerHigh">#282828</item>
+        <item name="colorError">#3C3C3C</item>
         <item name="colorOnError">#FFFFFF</item>
-        <item name="colorErrorContainer">#7F1D1D</item>
+        <item name="colorErrorContainer">#2A2A2A</item>
         <item name="colorOnErrorContainer">#FFFFFF</item>
         <item name="buttonBarPositiveButtonStyle">@style/Widget.ObsidianCore.DialogButton</item>
         <item name="buttonBarNegativeButtonStyle">@style/Widget.ObsidianCore.DialogButton</item>
@@ -33,10 +33,10 @@
         <item name="android:textColorHint">#FFFFFF</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
-        <item name="colorOutline">#3B3354</item>
-        <item name="android:windowBackground">#09080D</item>
-        <item name="android:navigationBarColor">#09080D</item>
-        <item name="android:statusBarColor">#09080D</item>
+        <item name="colorOutline">#4C4C4C</item>
+        <item name="android:windowBackground">#101010</item>
+        <item name="android:navigationBarColor">#101010</item>
+        <item name="android:statusBarColor">#101010</item>
     </style>
     <style name="Widget.ObsidianCore.DialogButton" parent="Widget.Material3.Button.TextButton">
         <item name="android:textColor">#FFFFFF</item>

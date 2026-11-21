@@ -30,6 +30,7 @@ struct MeshVertex {
     float x, y, z;
     float nx, ny, nz;
     uint32_t color;
+    float u, v;
 };
 
 struct SceneNode {
@@ -68,6 +69,9 @@ struct SceneNode {
     std::string skyPreset = "Day";
     uint32_t skyTopColor = 0xFF1E6EC4;
     uint32_t skyBotColor = 0xFF8CC4F2;
+    std::string texturePath;
+    int segments = 24;
+    float cornerRadius = 0.0f;
 
     std::vector<SceneNode> children;
 
@@ -633,7 +637,8 @@ public:
         return {part.posX + lx, part.posY + ly, part.posZ + lz};
     }
 
-    static void appendPartMesh(const SceneNode &part, std::vector<MeshVertex> &out) {
+    static void appendPartMesh(const SceneNode &part, std::vector<MeshVertex> &out,
+                               float uvU0 = 0.0f, float uvV0 = 0.0f, float uvU1 = 1.0f, float uvV1 = 1.0f) {
         float hx = part.sizeX * 0.5f, hy = part.sizeY * 0.5f, hz = part.sizeZ * 0.5f;
         if (part.className == "Plane") hy = std::max(0.05f, hy);
         uint8_t r = (part.argbColor >> 16) & 0xFF;
@@ -642,24 +647,35 @@ public:
         uint8_t a = (uint8_t)std::max(25, std::min(255, (int)std::lround((1.0f - part.transparency) * 255.0f)));
         uint32_t col = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
         Vec3f center{part.posX, part.posY, part.posZ};
+        auto mapU = [&](float lu) { return uvU0 + (uvU1 - uvU0) * std::clamp(lu, 0.0f, 1.0f); };
+        auto mapV = [&](float lv) { return uvV0 + (uvV1 - uvV0) * std::clamp(lv, 0.0f, 1.0f); };
 
-        auto emitTri = [&](Vec3f p0, Vec3f p1, Vec3f p2) {
+        auto emitTriUV = [&](Vec3f p0, float u0, float v0, Vec3f p1, float u1, float v1, Vec3f p2, float u2, float v2) {
             Vec3f n = cross3(p1 - p0, p2 - p0);
             Vec3f triCenter = (p0 + p1 + p2) * (1.0f / 3.0f);
             if (dot3(n, triCenter - center) < 0.0f) {
                 std::swap(p1, p2);
+                std::swap(u1, u2);
+                std::swap(v1, v2);
                 n = cross3(p1 - p0, p2 - p0);
             }
             n = norm3(n);
-            out.push_back({p0.x, p0.y, p0.z, n.x, n.y, n.z, col});
-            out.push_back({p1.x, p1.y, p1.z, n.x, n.y, n.z, col});
-            out.push_back({p2.x, p2.y, p2.z, n.x, n.y, n.z, col});
+            out.push_back({p0.x, p0.y, p0.z, n.x, n.y, n.z, col, mapU(u0), mapV(v0)});
+            out.push_back({p1.x, p1.y, p1.z, n.x, n.y, n.z, col, mapU(u1), mapV(v1)});
+            out.push_back({p2.x, p2.y, p2.z, n.x, n.y, n.z, col, mapU(u2), mapV(v2)});
+        };
+
+        auto emitQuadUV = [&](Vec3f a0, float u0, float v0, Vec3f a1, float u1, float v1,
+                              Vec3f a2, float u2, float v2, Vec3f a3, float u3, float v3) {
+            emitTriUV(a0, u0, v0, a1, u1, v1, a2, u2, v2);
+            emitTriUV(a0, u0, v0, a2, u2, v2, a3, u3, v3);
         };
 
         auto emitQuad = [&](Vec3f a0, Vec3f a1, Vec3f a2, Vec3f a3) {
-            emitTri(a0, a1, a2);
-            emitTri(a0, a2, a3);
+            emitQuadUV(a0, 0.0f, 1.0f, a1, 1.0f, 1.0f, a2, 1.0f, 0.0f, a3, 0.0f, 0.0f);
         };
+
+        int segs = std::clamp(part.segments, 6, 64);
 
         if (part.className == "Wedge" || part.className == "WedgePart") {
             Vec3f v[6] = {
@@ -670,13 +686,14 @@ public:
             emitQuad(v[0], v[1], v[2], v[3]);
             emitQuad(v[3], v[2], v[5], v[4]);
             emitQuad(v[0], v[4], v[5], v[1]);
-            emitTri(v[0], v[3], v[4]);
-            emitTri(v[1], v[5], v[2]);
+            emitTriUV(v[0], 0.0f, 1.0f, v[3], 1.0f, 1.0f, v[4], 1.0f, 0.0f);
+            emitTriUV(v[1], 1.0f, 1.0f, v[5], 0.0f, 0.0f, v[2], 0.0f, 1.0f);
             return;
         }
 
         if (part.className == "Sphere") {
-            const int stacks = 10, slices = 16;
+            int stacks = std::max(4, segs / 2);
+            int slices = segs;
             constexpr float kPi = 3.14159265f;
             auto pt = [&](float phi, float theta) {
                 return transformVert(part,
@@ -685,32 +702,95 @@ public:
                     std::cos(phi) * std::sin(theta) * hz);
             };
             for (int i = 0; i < stacks; ++i) {
-                float p0 = kPi * (-0.5f + (float)i / stacks);
-                float p1 = kPi * (-0.5f + (float)(i + 1) / stacks);
+                float fi0 = (float)i / stacks, fi1 = (float)(i + 1) / stacks;
+                float p0 = kPi * (-0.5f + fi0);
+                float p1 = kPi * (-0.5f + fi1);
                 for (int j = 0; j < slices; ++j) {
-                    float t0 = 2.0f * kPi * j / slices;
-                    float t1 = 2.0f * kPi * (j + 1) / slices;
-                    emitQuad(pt(p0, t0), pt(p0, t1), pt(p1, t1), pt(p1, t0));
+                    float fj0 = (float)j / slices, fj1 = (float)(j + 1) / slices;
+                    float t0 = 2.0f * kPi * fj0;
+                    float t1 = 2.0f * kPi * fj1;
+                    emitQuadUV(pt(p0, t0), fj0, 1.0f - fi0, pt(p0, t1), fj1, 1.0f - fi0,
+                               pt(p1, t1), fj1, 1.0f - fi1, pt(p1, t0), fj0, 1.0f - fi1);
                 }
             }
             return;
         }
 
         if (part.className == "Cylinder") {
-            const int segs = 16;
             constexpr float kTwoPi = 6.28318530f;
             Vec3f topC = transformVert(part, 0, hy, 0);
             Vec3f botC = transformVert(part, 0, -hy, 0);
             for (int i = 0; i < segs; ++i) {
-                float a0 = kTwoPi * i / segs, a1 = kTwoPi * (i + 1) / segs;
+                float f0 = (float)i / segs, f1 = (float)(i + 1) / segs;
+                float a0 = kTwoPi * f0, a1 = kTwoPi * f1;
                 Vec3f b0 = transformVert(part, std::cos(a0) * hx, -hy, std::sin(a0) * hz);
                 Vec3f b1 = transformVert(part, std::cos(a1) * hx, -hy, std::sin(a1) * hz);
                 Vec3f t0 = transformVert(part, std::cos(a0) * hx,  hy, std::sin(a0) * hz);
                 Vec3f t1 = transformVert(part, std::cos(a1) * hx,  hy, std::sin(a1) * hz);
-                emitQuad(b0, b1, t1, t0);
-                emitTri(topC, t1, t0);
-                emitTri(botC, b0, b1);
+                emitQuadUV(b0, f0, 1.0f, b1, f1, 1.0f, t1, f1, 0.0f, t0, f0, 0.0f);
+                emitTriUV(topC, 0.5f, 0.5f, t1, 0.5f + 0.5f * std::cos(a1), 0.5f + 0.5f * std::sin(a1),
+                          t0, 0.5f + 0.5f * std::cos(a0), 0.5f + 0.5f * std::sin(a0));
+                emitTriUV(botC, 0.5f, 0.5f, b0, 0.5f + 0.5f * std::cos(a0), 0.5f + 0.5f * std::sin(a0),
+                          b1, 0.5f + 0.5f * std::cos(a1), 0.5f + 0.5f * std::sin(a1));
             }
+            return;
+        }
+
+        float rad = std::clamp(part.cornerRadius, 0.0f, 0.48f) * std::min({hx, hy, hz});
+        if (rad > 0.005f) {
+            float ix = std::max(0.0f, hx - rad);
+            float iy = std::max(0.0f, hy - rad);
+            float iz = std::max(0.0f, hz - rad);
+            int sub = std::clamp(segs / 4, 2, 10);
+            auto buildAxis = [&](float h, float inH) {
+                std::vector<float> vals;
+                for (int i = 0; i <= sub; ++i) vals.push_back(-h + (h - inH) * (float)i / sub);
+                if (inH > 1e-4f) {
+                    for (int i = 1; i < sub; ++i) vals.push_back(inH + (h - inH) * (float)i / sub);
+                    vals.push_back(h);
+                } else {
+                    for (int i = 1; i <= sub; ++i) vals.push_back((h - inH) * (float)i / sub);
+                }
+                return vals;
+            };
+            std::vector<float> xs = buildAxis(hx, ix);
+            std::vector<float> ys = buildAxis(hy, iy);
+            std::vector<float> zs = buildAxis(hz, iz);
+            auto roundPt = [&](float lx, float ly, float lz) {
+                float qx = std::clamp(lx, -ix, ix);
+                float qy = std::clamp(ly, -iy, iy);
+                float qz = std::clamp(lz, -iz, iz);
+                Vec3f d{lx - qx, ly - qy, lz - qz};
+                float dl = std::sqrt(dot3(d, d));
+                if (dl > 1e-6f) {
+                    Vec3f p = Vec3f{qx, qy, qz} + d * (rad / dl);
+                    return transformVert(part, p.x, p.y, p.z);
+                }
+                return transformVert(part, lx, ly, lz);
+            };
+            auto emitGridFace = [&](int axis, float sign) {
+                const auto &us = (axis == 0) ? zs : xs;
+                const auto &vs = (axis == 1) ? zs : ys;
+                float uh = (axis == 0) ? hz : hx;
+                float vh = (axis == 1) ? hz : hy;
+                auto eval = [&](size_t i, size_t j) {
+                    float u = us[i], v = vs[j];
+                    if (axis == 0) return roundPt(sign * hx, v, u);
+                    if (axis == 1) return roundPt(u, sign * hy, v);
+                    return roundPt(u, v, sign * hz);
+                };
+                for (size_t i = 0; i + 1 < us.size(); ++i) {
+                    for (size_t j = 0; j + 1 < vs.size(); ++j) {
+                        float u0 = (us[i] + uh) / (2.0f * uh), u1 = (us[i + 1] + uh) / (2.0f * uh);
+                        float v0 = 1.0f - (vs[j] + vh) / (2.0f * vh), v1 = 1.0f - (vs[j + 1] + vh) / (2.0f * vh);
+                        emitQuadUV(eval(i, j), u0, v0, eval(i + 1, j), u1, v0,
+                                   eval(i + 1, j + 1), u1, v1, eval(i, j + 1), u0, v1);
+                    }
+                }
+            };
+            emitGridFace(0,  1.0f); emitGridFace(0, -1.0f);
+            emitGridFace(1,  1.0f); emitGridFace(1, -1.0f);
+            emitGridFace(2,  1.0f); emitGridFace(2, -1.0f);
             return;
         }
 
@@ -812,6 +892,9 @@ private:
            << ",\"skyPreset\":" << MiniJson::esc(n.skyPreset)
            << ",\"skyTopColor\":" << (int32_t)n.skyTopColor
            << ",\"skyBotColor\":" << (int32_t)n.skyBotColor
+           << ",\"texturePath\":" << MiniJson::esc(n.texturePath)
+           << ",\"segments\":" << n.segments
+           << ",\"cornerRadius\":" << n.cornerRadius
            << ",\"children\":[";
         for (size_t i = 0; i < n.children.size(); ++i) {
             if (i) os << ",";
@@ -852,6 +935,9 @@ private:
         n.skyPreset = j.s("skyPreset", "Day");
         n.skyTopColor = (uint32_t)(int64_t)j.d("skyTopColor", (double)(int32_t)0xFF1E6EC4);
         n.skyBotColor = (uint32_t)(int64_t)j.d("skyBotColor", (double)(int32_t)0xFF8CC4F2);
+        n.texturePath = j.s("texturePath", "");
+        n.segments = std::clamp((int)j.d("segments", 24), 6, 64);
+        n.cornerRadius = std::clamp((float)j.d("cornerRadius", 0.0), 0.0f, 0.48f);
         if (const JsonVal *kids = j.get("children")) {
             if (kids->type == JsonVal::J_ARR) {
                 for (const auto &kc : kids->arr) n.children.push_back(nodeFromJson(kc));
