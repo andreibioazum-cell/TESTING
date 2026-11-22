@@ -32,8 +32,6 @@ import java.util.zip.CRC32;
 import java.util.zip.Deflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 final class ApkBuilder {
     static final class BuildResult {
@@ -91,7 +89,7 @@ final class ApkBuilder {
         List<File> projFiles = new ArrayList<>();
         collectFiles(projectDir, projFiles);
         int scriptCount = 0;
-        JSONArray scriptNames = new JSONArray();
+        List<String> scriptNames = new ArrayList<>();
         for (File f : projFiles) {
             String rel = relativePath(projectDir, f);
             if (rel.equals(".build_id") || rel.startsWith(".git")) continue;
@@ -104,7 +102,7 @@ final class ApkBuilder {
                     }
                 }
                 scriptCount++;
-                scriptNames.put(rel);
+                scriptNames.add(rel);
             }
         }
 
@@ -141,14 +139,20 @@ final class ApkBuilder {
 
         // 3. Embed game_meta.json and game_project/* files
         String buildId = Long.toString(System.currentTimeMillis());
-        JSONObject meta = new JSONObject();
-        meta.put("projectName", projectName);
-        meta.put("appName", safeAppName);
-        meta.put("packageId", pkgId);
-        meta.put("is3D", is3D);
-        meta.put("buildId", buildId);
-        meta.put("scripts", scriptNames);
-        byte[] metaBytes = meta.toString(2).getBytes(StandardCharsets.UTF_8);
+        StringBuilder meta = new StringBuilder();
+        meta.append("{\n");
+        meta.append("  \"projectName\": ").append(jsonEscape(projectName)).append(",\n");
+        meta.append("  \"appName\": ").append(jsonEscape(safeAppName)).append(",\n");
+        meta.append("  \"packageId\": ").append(jsonEscape(pkgId)).append(",\n");
+        meta.append("  \"is3D\": ").append(is3D).append(",\n");
+        meta.append("  \"buildId\": ").append(jsonEscape(buildId)).append(",\n");
+        meta.append("  \"scripts\": [");
+        for (int i = 0; i < scriptNames.size(); i++) {
+            if (i > 0) meta.append(", ");
+            meta.append(jsonEscape(scriptNames.get(i)));
+        }
+        meta.append("]\n}\n");
+        byte[] metaBytes = meta.toString().getBytes(StandardCharsets.UTF_8);
         items.put("assets/game_meta.json", new ZipItem("assets/game_meta.json", metaBytes, false, 0));
 
         int totalCount = 0;
@@ -809,6 +813,27 @@ final class ApkBuilder {
             }
         }
         return derTag(0x06, bos.toByteArray());
+    }
+
+    private static String jsonEscape(String s) {
+        if (s == null) return "null";
+        StringBuilder sb = new StringBuilder(s.length() + 4);
+        sb.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) sb.append(String.format(Locale.US, "\\u%04x", (int) c));
+                    else sb.append(c);
+            }
+        }
+        sb.append('"');
+        return sb.toString();
     }
 
     // -------------------------------------------------------------------------
