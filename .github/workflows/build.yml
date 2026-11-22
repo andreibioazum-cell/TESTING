@@ -50,6 +50,28 @@ jobs:
             exit 1
           fi
           tail -20 android-build.log
+      - name: Verify On-Device Standalone APK Builder
+        shell: bash
+        run: |
+          mkdir -p /tmp/apk_verify_classes /tmp/apk_verify_out
+          javac -cp "$ANDROID_HOME/platforms/android-35/android.jar" \
+            -d /tmp/apk_verify_classes \
+            android/app/src/main/java/com/obsidiancore/studio/ApkBuilder.java \
+            android/tests/VerifyApkBuilder.java
+          java -cp "/tmp/apk_verify_classes:$ANDROID_HOME/platforms/android-35/android.jar" \
+            com.obsidiancore.studio.VerifyApkBuilder \
+            android/app/build/outputs/apk/debug/app-debug.apk \
+            /tmp/apk_verify_out/SpaceDemo-standalone.apk
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          "$BT/zipalign" -c -v 4 /tmp/apk_verify_out/SpaceDemo-standalone.apk | tail -10
+          "$BT/apksigner" verify --verbose /tmp/apk_verify_out/SpaceDemo-standalone.apk
+          BADGING=$("$BT/aapt2" dump badging /tmp/apk_verify_out/SpaceDemo-standalone.apk)
+          echo "$BADGING" | head -10
+          echo "$BADGING" | grep -q "package: name='com.obsidiancore.game.space_demo'"
+          echo "$BADGING" | grep -q "application-label:'Space Demo'"
+          echo "$BADGING" | grep -q "launchable-activity: name='com.obsidiancore.studio.GamePlayerActivity'"
+          unzip -l /tmp/apk_verify_out/SpaceDemo-standalone.apk | grep -q "assets/game_project/main.obs"
+          unzip -l /tmp/apk_verify_out/SpaceDemo-standalone.apk | grep -q "assets/game_meta.json"
       - name: Package APK
         run: mkdir -p dist && cp android/app/build/outputs/apk/debug/app-debug.apk dist/ObsidianCore-Studio-debug.apk
       - uses: actions/upload-artifact@v4

@@ -93,6 +93,20 @@ Java_com_obsidiancore_studio_MainActivity_nativeStudioInit(
         }
         e->DeleteLocalRef(cls);
     };
+    g_studio->callbacks.buildApk = [](const std::string &projName, const std::string &appName, bool is3D) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbBuildApk", "(Ljava/lang/String;Ljava/lang/String;Z)V");
+        if (mid) {
+            jstring jp = e->NewStringUTF(projName.c_str());
+            jstring ja = e->NewStringUTF(appName.c_str());
+            e->CallVoidMethod(g_activity, mid, jp, ja, is3D ? JNI_TRUE : JNI_FALSE);
+            e->DeleteLocalRef(jp);
+            e->DeleteLocalRef(ja);
+        }
+        e->DeleteLocalRef(cls);
+    };
     g_studio->callbacks.setOrientationPortrait = [](bool portrait) {
         JNIEnv *e = getEnv();
         if (!e || !g_activity) return;
@@ -278,5 +292,103 @@ Java_com_obsidiancore_studio_MainActivity_nativeVulkanDraw(JNIEnv *, jclass) {
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_obsidiancore_studio_MainActivity_nativeVulkanDestroy(JNIEnv *, jclass) {
+    androidVulkanDestroy();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_MainActivity_nativeStudioApkResult(JNIEnv *env, jclass, jboolean ok, jstring jMsg) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) g_studio->onApkBuildResult(ok == JNI_TRUE, fromJava(env, jMsg));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_obsidiancore_studio_ApkBuilder_nativeCompileCheckObs(JNIEnv *env, jclass, jstring jSource, jstring jFilename) {
+    std::string src = fromJava(env, jSource);
+    std::string fn = fromJava(env, jFilename);
+    char *err = nullptr;
+    char *cCode = obsidian_compile_c(src.c_str(), fn.c_str(), &err);
+    if (!cCode) {
+        std::string msg = err ? err : "Obsidronium compile error";
+        if (err) obsidian_free(err);
+        return env->NewStringUTF(msg.c_str());
+    }
+    obsidian_free(cCode);
+    if (err) obsidian_free(err);
+    return env->NewStringUTF("");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_GamePlayerActivity_nativePlayerInit(
+    JNIEnv *env, jobject thiz, jstring projectsRoot, jstring projName, jboolean is3D, jfloat density) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_activity) env->DeleteGlobalRef(g_activity);
+    g_activity = env->NewGlobalRef(thiz);
+    g_density = density > 0.5f ? density : 3.0f;
+
+    g_studio = std::make_unique<StudioApp>();
+    g_studio->callbacks.setOrientationPortrait = [](bool portrait) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbSetOrientation", "(Z)V");
+        if (mid) e->CallVoidMethod(g_activity, mid, portrait ? JNI_TRUE : JNI_FALSE);
+        e->DeleteLocalRef(cls);
+    };
+    g_studio->initPlayer(fromJava(env, projectsRoot), fromJava(env, projName), is3D == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_GamePlayerActivity_nativePlayerStep(JNIEnv *, jclass, jfloat dt) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) g_studio->step(dt);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_GamePlayerActivity_nativePlayerTouch(
+    JNIEnv *env, jclass, jint action, jint pointerIndex, jintArray jIds, jfloatArray jXs, jfloatArray jYs) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (!g_studio || !jIds || !jXs || !jYs) return;
+    jsize n = env->GetArrayLength(jIds);
+    jint *ids = env->GetIntArrayElements(jIds, nullptr);
+    jfloat *xs = env->GetFloatArrayElements(jXs, nullptr);
+    jfloat *ys = env->GetFloatArrayElements(jYs, nullptr);
+    g_studio->onTouch(action, pointerIndex, (int)n, ids, xs, ys);
+    env->ReleaseIntArrayElements(jIds, ids, JNI_ABORT);
+    env->ReleaseFloatArrayElements(jXs, xs, JNI_ABORT);
+    env->ReleaseFloatArrayElements(jYs, ys, JNI_ABORT);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_GamePlayerActivity_nativePlayerDestroy(JNIEnv *env, jclass) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) {
+        g_studio->dispose();
+        g_studio.reset();
+    }
+    if (g_activity) {
+        env->DeleteGlobalRef(g_activity);
+        g_activity = nullptr;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_obsidiancore_studio_GamePlayerActivity_nativeVulkanCreate(JNIEnv *env, jclass, jobject surface, jint width, jint height) {
+    return androidVulkanCreate(env, surface, width, height) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_GamePlayerActivity_nativeVulkanResize(JNIEnv *, jclass, jint width, jint height) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    androidVulkanResize(width, height);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_GamePlayerActivity_nativeVulkanDraw(JNIEnv *, jclass) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    androidVulkanDrawStudio(g_studio.get(), g_density);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_GamePlayerActivity_nativeVulkanDestroy(JNIEnv *, jclass) {
     androidVulkanDestroy();
 }

@@ -26,6 +26,7 @@ struct StudioCallbacks {
     std::function<void()> openFontPicker;
     std::function<void(const std::string &projName, const std::string &nodeId)> openTexturePicker;
     std::function<void(const std::string &projName, const std::string &nodeId)> openModelPicker;
+    std::function<void(const std::string &projName, const std::string &appName, bool is3D)> buildApk;
     std::function<void(bool)> setOrientationPortrait;
     std::function<void(const std::string &kind, const std::string &name)> createProject;
     std::function<void(const std::string &oldName, const std::string &newName)> renameProject;
@@ -57,6 +58,7 @@ public:
     RibbonTab activeRibbon = RibbonTab::HOME;
 
     bool showProjectsTab = true;
+    bool playerOnly = false;
     bool showExplorer = true;
     bool showProperties = true;
     bool showOutput = true;
@@ -157,6 +159,8 @@ public:
 
     void init(const std::string &rootDir, const std::string &initialProjName, bool is3D,
               int fontFamily, int fontSize, int theme, int tabSpaces, bool lineNums, const std::string &customFont);
+    void initPlayer(const std::string &rootDir, const std::string &projName, bool is3D);
+    void onApkBuildResult(bool ok, const std::string &msg);
     void openProject(const std::string &projName, bool is3D);
     void applyFont(const std::string &customPath, int family);
     void applyNodeTexture(const std::string &nodeId, const std::string &relPath);

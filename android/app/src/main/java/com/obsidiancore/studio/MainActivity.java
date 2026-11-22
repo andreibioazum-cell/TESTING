@@ -1,6 +1,7 @@
 package com.obsidiancore.studio;
 
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.database.Cursor;
@@ -8,6 +9,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Choreographer;
 import android.view.KeyEvent;
@@ -23,7 +25,9 @@ import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.FileProvider;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -32,6 +36,7 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.List;
+import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity implements Choreographer.FrameCallback {
     static { System.loadLibrary("obsidian_native"); }
@@ -313,6 +318,70 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     }
 
     @SuppressWarnings("unused")
+    public void nativeCbBuildApk(String projectName, String appName, boolean is3D) {
+        new Thread(() -> {
+            try {
+                File projDir = new File(store.root, projectName);
+                String safeName = (appName != null && !appName.trim().isEmpty() ? appName.trim() : projectName)
+                    .replaceAll("[^a-zA-Z0-9._-]", "_");
+                if (safeName.isEmpty()) safeName = "ObsidianGame";
+                File outApk = new File(new File(getFilesDir(), "exports"), safeName + ".apk");
+                ApkBuilder.BuildResult res = ApkBuilder.buildFromApp(
+                    MainActivity.this, projDir, projectName, appName, is3D, outApk);
+                double mb = res.apkFile.length() / (1024.0 * 1024.0);
+                String msg = String.format(Locale.US,
+                    "APK ready: %s (%.2f MB, %d scripts compiled, %d files)",
+                    res.apkFile.getName(), mb, res.compiledScripts, res.totalFiles);
+                nativeStudioApkResult(true, msg);
+                runOnUiThread(() -> showApkBuiltDialog(res, appName));
+            } catch (Exception e) {
+                String err = "APK build failed: " + (e.getMessage() != null ? e.getMessage() : e.toString());
+                nativeStudioApkResult(false, err);
+                runOnUiThread(() -> new AlertDialog.Builder(MainActivity.this)
+                    .setTitle("APK Build Failed")
+                    .setMessage(err)
+                    .setPositiveButton("OK", (d, w) -> hideSystemBars())
+                    .setOnDismissListener(d -> hideSystemBars())
+                    .show());
+            }
+        }, "ObsidianApkBuilder").start();
+    }
+
+    private void showApkBuiltDialog(ApkBuilder.BuildResult res, String appName) {
+        double mb = res.apkFile.length() / (1024.0 * 1024.0);
+        String summary = String.format(Locale.US,
+            "App: %s\nPackage: %s\nScripts compiled: %d\nAssets & files: %d\nSize: %.2f MB\nPath: %s",
+            appName, res.packageId, res.compiledScripts, res.totalFiles, mb, res.apkFile.getAbsolutePath());
+        Uri apkUri = FileProvider.getUriForFile(this, "com.obsidiancore.studio.fileprovider", res.apkFile);
+
+        new AlertDialog.Builder(this)
+            .setTitle("APK Built Successfully")
+            .setMessage(summary)
+            .setPositiveButton("Install APK", (d, w) -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
+                    Intent perm = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName()));
+                    startActivity(perm);
+                    return;
+                }
+                Intent install = new Intent(Intent.ACTION_VIEW);
+                install.setDataAndType(apkUri, "application/vnd.android.package-archive");
+                install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(install);
+            })
+            .setNeutralButton("Share / Save", (d, w) -> {
+                Intent share = new Intent(Intent.ACTION_SEND);
+                share.setType("application/vnd.android.package-archive");
+                share.putExtra(Intent.EXTRA_STREAM, apkUri);
+                share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivity(Intent.createChooser(share, "Export " + res.apkFile.getName()));
+            })
+            .setNegativeButton("Close", (d, w) -> hideSystemBars())
+            .setOnDismissListener(d -> hideSystemBars())
+            .show();
+    }
+
+    @SuppressWarnings("unused")
     public void nativeCbSetOrientation(boolean portrait) {
         runOnUiThread(() -> setRequestedOrientation(
             portrait ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -494,6 +563,7 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     private static native void nativeStudioSetCustomFont(String path);
     private static native void nativeStudioApplyTexture(String nodeId, String relPath);
     private static native void nativeStudioApplyModel(String nodeId, String relPath);
+    private static native void nativeStudioApkResult(boolean ok, String msg);
     private static native void nativeStudioDestroy();
 
     private static native boolean nativeVulkanCreate(Surface surface, int width, int height);

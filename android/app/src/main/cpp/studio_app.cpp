@@ -89,6 +89,7 @@ static void mat4Mul(float *out, const float *a, const float *b) {
 
 void StudioApp::init(const std::string &rootDir, const std::string &initialProjName, bool is3D,
                      int fontFamily, int fontSize, int theme, int tabSpaces, bool lineNums, const std::string &customFont) {
+    playerOnly = false;
     lc_editor_init();
     projectsRoot = rootDir;
     prefFontFamily = fontFamily;
@@ -101,6 +102,27 @@ void StudioApp::init(const std::string &rootDir, const std::string &initialProjN
     applyFont(customFont, fontFamily);
     openProject(initialProjName, is3D);
     showProjectsTab = true;
+}
+
+void StudioApp::initPlayer(const std::string &rootDir, const std::string &projName, bool is3D) {
+    playerOnly = true;
+    lc_editor_init();
+    projectsRoot = rootDir;
+    prefFontFamily = 0;
+    prefFontSize = 14;
+    prefTheme = 0;
+    prefTabSpaces = 4;
+    prefLineNumbers = false;
+    prefCustomFontPath.clear();
+    applyFont("", 0);
+    openProject(projName, is3D);
+    showProjectsTab = false;
+    activeScript.clear();
+    startSim();
+}
+
+void StudioApp::onApkBuildResult(bool ok, const std::string &msg) {
+    appendOutput(msg, ok ? Col::green() : Col::red());
 }
 
 void StudioApp::applyFont(const std::string &customPath, int family) {
@@ -217,6 +239,13 @@ void StudioApp::applyNodeModel(const std::string &nodeId, const std::string &rel
 }
 
 void StudioApp::syncOrientation() {
+    if (playerOnly) {
+        if (lastRequestedOrientation != 0) {
+            lastRequestedOrientation = 0;
+            if (callbacks.setOrientationPortrait) callbacks.setOrientationPortrait(false);
+        }
+        return;
+    }
     bool wantPortrait = (!showProjectsTab && !activeScript.empty()) ? editorPortrait : false;
     int code = wantPortrait ? 1 : 0;
     if (code != lastRequestedOrientation) {
@@ -489,13 +518,14 @@ void StudioApp::step(float dt) {
 // Layout (responsive in both Portrait & Landscape!)
 // =========================================================================
 Rect StudioApp::closePlayBtnRect() const {
+    if (playerOnly) return {0, 0, 0, 0};
     float sz = std::round(32.0f * density);
     float pad = std::round(10.0f * density);
     return {std::max(pad, width - sz - pad), pad, sz, sz};
 }
 
 void StudioApp::computeLayout() {
-    if ((runningLua && !showProjectsTab && activeScript.empty()) || (!showProjectsTab && !activeScript.empty())) {
+    if (playerOnly || (runningLua && !showProjectsTab && activeScript.empty()) || (!showProjectsTab && !activeScript.empty())) {
         rTopTabs = rRibbon = rDocTabs = rRightDock = rExplorer = rProperties = rBottomDock = rOutLog = rCmdBar = {0, 0, 0, 0};
         rViewport = {0, 0, width, height};
         return;
@@ -1038,13 +1068,15 @@ void StudioApp::buildFrame(float w, float h, float d) {
         build2DScene(rViewport);
     }
 
-    if (isPlayingFull) {
-        pushBatch(false, {});
-        Rect rClose = closePlayBtnRect();
-        emitRect(rClose.x, rClose.y, rClose.w, rClose.h, StudioFont::rgba(24, 24, 24, 225));
-        emitRectOutline(rClose.x, rClose.y, rClose.w, rClose.h, 1.5f * density, StudioFont::rgba(220, 220, 220, 235));
-        emitTextCentered("X", rClose, 13.5f * density, StudioFont::rgba(255, 255, 255, 255));
-        addHitBox(rClose, [this]() { stopSim(); });
+    if (isPlayingFull || playerOnly) {
+        if (!playerOnly) {
+            pushBatch(false, {});
+            Rect rClose = closePlayBtnRect();
+            emitRect(rClose.x, rClose.y, rClose.w, rClose.h, StudioFont::rgba(24, 24, 24, 225));
+            emitRectOutline(rClose.x, rClose.y, rClose.w, rClose.h, 1.5f * density, StudioFont::rgba(220, 220, 220, 235));
+            emitTextCentered("X", rClose, 13.5f * density, StudioFont::rgba(255, 255, 255, 255));
+            addHitBox(rClose, [this]() { stopSim(); });
+        }
         return;
     }
 
@@ -1491,6 +1523,14 @@ void StudioApp::buildTopRibbon() {
         } else {
             ribBtn("Play", false, Col::green(), [this]() { startSim(); });
         }
+        ribBtn("Build APK", false, Col::btnAct(), [this]() {
+            saveActiveScript();
+            if (currentIs3D) scene.saveToFile(currentProjectDir + "/scene.json");
+            promptTitle = "Build APK - App Name";
+            promptValue = currentProjectName.empty() ? "MyGame" : currentProjectName;
+            promptTargetKey = "BuildApkAppName";
+            modal = ModalKind::TEXT_PROMPT;
+        });
         ribBtn("Select", toolMode == ToolMode::SELECT, 0, [this]() { toolMode = ToolMode::SELECT; });
         ribBtn("Move", toolMode == ToolMode::MOVE, 0, [this]() { toolMode = ToolMode::MOVE; });
         ribBtn("Scale", toolMode == ToolMode::SCALE, 0, [this]() { toolMode = ToolMode::SCALE; });
@@ -3035,6 +3075,13 @@ void StudioApp::buildModal() {
                 }
                 showAnimator = true;
                 modal = ModalKind::NONE;
+            } else if (promptTargetKey == "BuildApkAppName") {
+                std::string appName = promptValue.empty() ? currentProjectName : promptValue;
+                modal = ModalKind::NONE;
+                appendOutput("Compiling & building APK for '" + appName + "'...", Col::muted());
+                if (callbacks.buildApk) {
+                    callbacks.buildApk(currentProjectName, appName, currentIs3D);
+                }
             } else if (promptTargetKey == "HexColor") {
                 uint32_t parsed = 0;
                 if (parseHexColor(promptValue, parsed)) {
@@ -3160,29 +3207,33 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
 
     // Intercept top-right Close ('X') button (single-touch or multi-touch) before forwarding to game
     if (runningLua && !showProjectsTab && modal == ModalKind::NONE && activeScript.empty()) {
-        Rect rcHit = closePlayBtnRect();
-        float pad = 10.0f * density;
-        rcHit.x -= pad; rcHit.y -= pad; rcHit.w += pad * 2.0f; rcHit.h += pad * 2.0f;
-
         int pi = (baseAct == 5 || baseAct == 6) ? std::max(0, std::min(pointerIndex, pointerCount - 1)) : 0;
-        if ((baseAct == 0 || baseAct == 5) && rcHit.contains(xs[pi], ys[pi])) {
-            closePointerId = ids[pi];
-            if (baseAct == 0) {
-                downX = lastX = x0; downY = lastY = y0;
-                moved = false;
-                touchMode = 11;
-                dragAxis = -1;
-                lastPinch = -1;
+        if (!playerOnly) {
+            Rect rcHit = closePlayBtnRect();
+            float pad = 10.0f * density;
+            rcHit.x -= pad; rcHit.y -= pad; rcHit.w += pad * 2.0f; rcHit.h += pad * 2.0f;
+
+            if ((baseAct == 0 || baseAct == 5) && rcHit.contains(xs[pi], ys[pi])) {
+                closePointerId = ids[pi];
+                if (baseAct == 0) {
+                    downX = lastX = x0; downY = lastY = y0;
+                    moved = false;
+                    touchMode = 11;
+                    dragAxis = -1;
+                    lastPinch = -1;
+                }
+                return;
             }
-            return;
-        }
-        if ((baseAct == 1 || baseAct == 6) && closePointerId != -1 && ids[pi] == closePointerId) {
-            bool inside = rcHit.contains(xs[pi], ys[pi]);
+            if ((baseAct == 1 || baseAct == 6) && closePointerId != -1 && ids[pi] == closePointerId) {
+                bool inside = rcHit.contains(xs[pi], ys[pi]);
+                closePointerId = -1;
+                if (baseAct == 1) touchMode = 0;
+                if (inside) { stopSim(); return; }
+            }
+            if (baseAct == 3) closePointerId = -1;
+        } else {
             closePointerId = -1;
-            if (baseAct == 1) touchMode = 0;
-            if (inside) { stopSim(); return; }
         }
-        if (baseAct == 3) closePointerId = -1;
 
         if (g_obsidianProj) {
             if (baseAct == 2) {
@@ -3199,6 +3250,7 @@ void StudioApp::onTouch(int action, int pointerIndex, int pointerCount, const in
                 }
             }
         }
+        if (playerOnly) return;
     } else {
         closePointerId = -1;
     }
