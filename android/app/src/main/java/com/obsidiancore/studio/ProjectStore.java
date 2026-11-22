@@ -307,7 +307,7 @@ final class ProjectStore {
             "    if not b or b == player or not b.Collidable:\n" +
             "        return false\n" +
             "    c = b.ClassName\n" +
-            "    return c == 'Box' or c == 'Wedge' or c == 'Sphere' or c == 'Cylinder' or c == 'Plane' or c == 'Part'\n\n" +
+            "    return c == 'Box' or c == 'Wedge' or c == 'Sphere' or c == 'Cylinder' or c == 'Plane' or c == 'GltfModel' or c == 'Part'\n\n" +
             "func on_touch(int id, float x, float y, bool down):\n" +
             "    w, h, jx, jy, jr, bx, by, br = _joy_metrics()\n" +
             "    d_jump = math.sqrt((x - bx) * (x - bx) + (y - by) * (y - by))\n" +

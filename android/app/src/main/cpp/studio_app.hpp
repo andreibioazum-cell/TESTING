@@ -1,9 +1,11 @@
 #pragma once
+#include "gltf_loader.hpp"
 #include "studio_font.hpp"
 #include "studio_scene.hpp"
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct Rect {
@@ -23,6 +25,7 @@ struct StudioCallbacks {
     std::function<void(bool)> setKeyboardVisible;
     std::function<void()> openFontPicker;
     std::function<void(const std::string &projName, const std::string &nodeId)> openTexturePicker;
+    std::function<void(const std::string &projName, const std::string &nodeId)> openModelPicker;
     std::function<void(bool)> setOrientationPortrait;
     std::function<void(const std::string &kind, const std::string &name)> createProject;
     std::function<void(const std::string &oldName, const std::string &newName)> renameProject;
@@ -116,6 +119,9 @@ public:
     bool animPlaying = false;
     float animTime = 0.0f;
     float animScrollY = 0.0f;
+    int animBoneNodeIdx = 0;
+    float gltfLiveAnimTime = 0.0f;
+    std::unordered_map<std::string, GltfModelAsset> gltfCache;
 
     // 3D texture atlas (1024x1024, 4x4 tiles of 256x256)
     static constexpr uint32_t kTexAtlasSize = 1024;
@@ -154,6 +160,8 @@ public:
     void openProject(const std::string &projName, bool is3D);
     void applyFont(const std::string &customPath, int family);
     void applyNodeTexture(const std::string &nodeId, const std::string &relPath);
+    void applyNodeModel(const std::string &nodeId, const std::string &relPath);
+    GltfModelAsset *getOrLoadGltf(const std::string &relPath);
     void step(float dt);
     void buildFrame(float w, float h, float d);
     void onTouch(int action, int pointerIndex, int pointerCount, const int *ids, const float *xs, const float *ys);

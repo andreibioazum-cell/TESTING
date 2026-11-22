@@ -3,8 +3,11 @@ package com.obsidiancore.studio;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
+import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.view.Choreographer;
 import android.view.KeyEvent;
@@ -12,6 +15,8 @@ import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.View;
+import android.view.WindowManager;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -19,6 +24,9 @@ import android.view.inputmethod.InputMethodManager;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -43,6 +51,8 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     private long lastFrameNs = 0L;
     private String pendingTexProj = "";
     private String pendingTexNode = "";
+    private String pendingModelProj = "";
+    private String pendingModelNode = "";
 
     private final ActivityResultLauncher<String[]> fontPicker =
         registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
@@ -54,9 +64,39 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
             if (uri != null) importNodeTexture(uri);
         });
 
+    private final ActivityResultLauncher<String[]> modelPicker =
+        registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
+            if (uri != null) importNodeModel(uri);
+        });
+
+    @SuppressWarnings("deprecation")
+    private void hideSystemBars() {
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
+        View decor = getWindow().getDecorView();
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), decor);
+        if (controller != null) {
+            controller.hide(WindowInsetsCompat.Type.systemBars());
+            controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        }
+        decor.setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        );
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        hideSystemBars();
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         store = new ProjectStore(this);
         ensureDefaultProjects();
@@ -114,11 +154,18 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     @Override
     protected void onResume() {
         super.onResume();
+        hideSystemBars();
         if (!runningLoop) {
             runningLoop = true;
             lastFrameNs = 0L;
             Choreographer.getInstance().postFrameCallback(this);
         }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideSystemBars();
     }
 
     @Override
@@ -177,8 +224,51 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
                 imm.showSoftInput(surfaceView, InputMethodManager.SHOW_IMPLICIT);
             } else {
                 imm.hideSoftInputFromWindow(surfaceView.getWindowToken(), 0);
+                hideSystemBars();
             }
         });
+    }
+
+    private String queryDisplayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null) return n;
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    private void importNodeModel(Uri uri) {
+        if (pendingModelProj.isEmpty()) return;
+        try {
+            File projDir = new File(store.root, pendingModelProj);
+            File dir = new File(projDir, "assets");
+            if (!dir.exists()) dir.mkdirs();
+            byte[] data;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null) return;
+                data = in.readAllBytes();
+            }
+            boolean isGlb = data.length >= 4 && data[0] == 'g' && data[1] == 'l' && data[2] == 'T' && data[3] == 'F';
+            String dname = queryDisplayName(uri).toLowerCase();
+            if (!isGlb && dname.endsWith(".glb")) isGlb = true;
+            String ext = isGlb ? ".glb" : ".gltf";
+            String base = "model_" + System.currentTimeMillis();
+            if (!dname.isEmpty()) {
+                int dot = dname.lastIndexOf('.');
+                String stem = (dot > 0 ? dname.substring(0, dot) : dname).replaceAll("[^a-zA-Z0-9_-]", "_");
+                if (!stem.isEmpty()) base = stem + "_" + (System.currentTimeMillis() % 10000);
+            }
+            String relPath = "assets/" + base + ext;
+            File dst = new File(projDir, relPath);
+            try (OutputStream out = new FileOutputStream(dst)) {
+                out.write(data);
+            }
+            nativeStudioApplyModel(pendingModelNode, relPath);
+        } catch (Exception ignored) {
+        }
     }
 
     private void importNodeTexture(Uri uri) {
@@ -213,6 +303,13 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
         pendingTexProj = projectName != null ? projectName : "";
         pendingTexNode = nodeId != null ? nodeId : "";
         runOnUiThread(() -> texturePicker.launch(new String[]{"image/*"}));
+    }
+
+    @SuppressWarnings("unused")
+    public void nativeCbOpenModelPicker(String projectName, String nodeId) {
+        pendingModelProj = projectName != null ? projectName : "";
+        pendingModelNode = nodeId != null ? nodeId : "";
+        runOnUiThread(() -> modelPicker.launch(new String[]{"*/*"}));
     }
 
     @SuppressWarnings("unused")
@@ -396,6 +493,7 @@ public class MainActivity extends AppCompatActivity implements Choreographer.Fra
     private static native void nativeStudioKeyCode(int keyCode);
     private static native void nativeStudioSetCustomFont(String path);
     private static native void nativeStudioApplyTexture(String nodeId, String relPath);
+    private static native void nativeStudioApplyModel(String nodeId, String relPath);
     private static native void nativeStudioDestroy();
 
     private static native boolean nativeVulkanCreate(Surface surface, int width, int height);

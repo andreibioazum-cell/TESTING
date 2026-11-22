@@ -79,6 +79,20 @@ Java_com_obsidiancore_studio_MainActivity_nativeStudioInit(
         }
         e->DeleteLocalRef(cls);
     };
+    g_studio->callbacks.openModelPicker = [](const std::string &projName, const std::string &nodeId) {
+        JNIEnv *e = getEnv();
+        if (!e || !g_activity) return;
+        jclass cls = e->GetObjectClass(g_activity);
+        jmethodID mid = e->GetMethodID(cls, "nativeCbOpenModelPicker", "(Ljava/lang/String;Ljava/lang/String;)V");
+        if (mid) {
+            jstring jp = e->NewStringUTF(projName.c_str());
+            jstring jn = e->NewStringUTF(nodeId.c_str());
+            e->CallVoidMethod(g_activity, mid, jp, jn);
+            e->DeleteLocalRef(jp);
+            e->DeleteLocalRef(jn);
+        }
+        e->DeleteLocalRef(cls);
+    };
     g_studio->callbacks.setOrientationPortrait = [](bool portrait) {
         JNIEnv *e = getEnv();
         if (!e || !g_activity) return;
@@ -221,6 +235,14 @@ Java_com_obsidiancore_studio_MainActivity_nativeStudioApplyTexture(JNIEnv *env, 
     std::lock_guard<std::mutex> lk(g_studioMutex);
     if (g_studio) {
         g_studio->applyNodeTexture(fromJava(env, jNodeId), fromJava(env, jRelPath));
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_obsidiancore_studio_MainActivity_nativeStudioApplyModel(JNIEnv *env, jclass, jstring jNodeId, jstring jRelPath) {
+    std::lock_guard<std::mutex> lk(g_studioMutex);
+    if (g_studio) {
+        g_studio->applyNodeModel(fromJava(env, jNodeId), fromJava(env, jRelPath));
     }
 }
 

@@ -168,6 +168,54 @@ void StudioApp::applyNodeTexture(const std::string &nodeId, const std::string &r
     }
 }
 
+GltfModelAsset *StudioApp::getOrLoadGltf(const std::string &relPath) {
+    if (relPath.empty() || currentProjectDir.empty()) return nullptr;
+    std::string full = currentProjectDir + "/" + relPath;
+    auto it = gltfCache.find(full);
+    if (it != gltfCache.end()) return it->second.loaded ? &it->second : nullptr;
+    GltfModelAsset asset;
+    bool ok = GltfModelAsset::load(full, currentProjectDir, asset);
+    auto &slot = gltfCache[full];
+    if (ok) {
+        slot = std::move(asset);
+        return &slot;
+    }
+    slot.loaded = false;
+    return nullptr;
+}
+
+void StudioApp::applyNodeModel(const std::string &nodeId, const std::string &relPath) {
+    if (relPath.empty()) return;
+    std::string full = currentProjectDir + "/" + relPath;
+    gltfCache.erase(full);
+    SceneNode *n = nodeId.empty() ? nullptr : scene.findById(nodeId);
+    if (!n) {
+        SceneNode *parent = scene.findService("World3D");
+        if (!parent) return;
+        std::string baseName = relPath;
+        if (auto sl = baseName.find_last_of('/'); sl != std::string::npos) baseName = baseName.substr(sl + 1);
+        if (auto dot = baseName.find_last_of('.'); dot != std::string::npos) baseName = baseName.substr(0, dot);
+        n = scene.createNode(parent, "GltfModel", baseName);
+        if (!n) return;
+        n->posX = camTargetX; n->posY = 1.8f; n->posZ = camTargetZ;
+        n->sizeX = 3.2f; n->sizeY = 3.2f; n->sizeZ = 3.2f;
+        n->argbColor = 0xFFFFFFFF;
+        selectedId = n->id;
+    }
+    n->className = "GltfModel";
+    n->modelPath = relPath;
+    n->modelAnimIndex = 0;
+    GltfModelAsset *gm = getOrLoadGltf(relPath);
+    if (gm && !gm->animations.empty()) {
+        n->animAutoPlay = true;
+        n->animLoop = true;
+    }
+    scene.saveToFile(currentProjectDir + "/scene.json");
+    appendOutput(gm ? ("Loaded glTF: " + relPath + " (" + std::to_string(gm->animations.size()) + " anims)")
+                    : ("Failed to parse glTF: " + relPath),
+                 gm ? Col::text() : Col::muted());
+}
+
 void StudioApp::syncOrientation() {
     bool wantPortrait = (!showProjectsTab && !activeScript.empty()) ? editorPortrait : false;
     int code = wantPortrait ? 1 : 0;
@@ -196,9 +244,12 @@ void StudioApp::openProject(const std::string &projName, bool is3D) {
     propsScrollY = 0;
     animPlaying = false;
     animTime = 0.0f;
+    animBoneNodeIdx = 0;
+    gltfLiveAnimTime = 0.0f;
     showAnimator = false;
     activeAnimFile.clear();
     animTargetNodeId.clear();
+    gltfCache.clear();
     texAtlasRgba.clear();
     texAtlasPaths.clear();
     initTexAtlas();
@@ -388,6 +439,7 @@ void StudioApp::execCommand(const std::string &cmd) {
 }
 
 void StudioApp::step(float dt) {
+    gltfLiveAnimTime += dt;
     if (runningLua && g_obsidianProj) {
         obsidian_project_set_viewport(g_obsidianProj, (int)std::max(64.0f, rViewport.w), (int)std::max(64.0f, rViewport.h));
         char *raw = obsidian_project_step(g_obsidianProj, dt);
@@ -405,20 +457,30 @@ void StudioApp::step(float dt) {
             }
             if (currentIs3D) syncFromLua();
         }
-    } else if (!runningLua && animPlaying && !activeAnim.frames.empty()) {
-        animTime += dt;
-        float dur = activeAnim.duration();
-        if (animTime >= dur) {
-            if (activeAnim.loop) {
-                animTime = std::fmod(animTime, dur);
+    } else if (!runningLua && animPlaying) {
+        SceneNode *target = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+        if (target && target->className == "GltfModel" && !target->modelPath.empty()) {
+            if (GltfModelAsset *gm = getOrLoadGltf(target->modelPath);
+                gm && target->modelAnimIndex >= 0 && target->modelAnimIndex < (int)gm->animations.size()) {
+                animTime += dt;
+                float dur = std::max(0.1f, gm->animations[(size_t)target->modelAnimIndex].duration);
+                if (animTime >= dur) {
+                    if (target->animLoop) animTime = std::fmod(animTime, dur);
+                    else { animTime = dur; animPlaying = false; }
+                }
             } else {
-                animTime = dur;
                 animPlaying = false;
             }
-        }
-        SceneNode *target = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
-        if (target && target->is3DNode()) {
-            activeAnim.sample(animTime, *target);
+        } else if (!activeAnim.frames.empty()) {
+            animTime += dt;
+            float dur = activeAnim.duration();
+            if (animTime >= dur) {
+                if (activeAnim.loop) animTime = std::fmod(animTime, dur);
+                else { animTime = dur; animPlaying = false; }
+            }
+            if (target && target->is3DNode()) {
+                activeAnim.sample(animTime, *target);
+            }
         }
     }
 }
@@ -1158,15 +1220,37 @@ void StudioApp::build3DScene() {
 
     // 3D solid meshes + shadow casters
     initTexAtlas();
+    auto tileUv = [&](const std::string &texPath, float &u0, float &v0, float &u1, float &v1) {
+        int tile = ensureTextureTile(texPath);
+        int tx = tile % 4, ty = tile / 4;
+        float pad = 2.0f / (float)kTexAtlasSize;
+        u0 = tx * 0.25f + pad; u1 = (tx + 1) * 0.25f - pad;
+        v0 = ty * 0.25f + pad; v1 = (ty + 1) * 0.25f - pad;
+    };
     std::vector<const SceneNode *> meshes;
     scene.collectMeshes(meshes);
     for (const auto *p : meshes) {
         if (p->transparency >= 0.99f) continue;
-        int tile = ensureTextureTile(p->texturePath);
-        int tx = tile % 4, ty = tile / 4;
-        float pad = 2.0f / (float)kTexAtlasSize;
-        float u0 = tx * 0.25f + pad, u1 = (tx + 1) * 0.25f - pad;
-        float v0 = ty * 0.25f + pad, v1 = (ty + 1) * 0.25f - pad;
+        float u0 = 0, v0 = 0, u1 = 0.25f, v1 = 0.25f;
+        tileUv(p->texturePath, u0, v0, u1, v1);
+        if (p->className == "GltfModel" && !p->modelPath.empty()) {
+            if (GltfModelAsset *gm = getOrLoadGltf(p->modelPath)) {
+                int aIdx = -1;
+                float aTime = 0.0f;
+                if (showAnimator && (animTargetNodeId == p->id || (animTargetNodeId.empty() && selectedId == p->id))) {
+                    aIdx = p->modelAnimIndex;
+                    aTime = animTime;
+                } else if (p->animAutoPlay && p->modelAnimIndex >= 0 && p->modelAnimIndex < (int)gm->animations.size()) {
+                    aIdx = p->modelAnimIndex;
+                    aTime = gltfLiveAnimTime;
+                }
+                gm->appendMesh(*p, aIdx, aTime, frame3DMesh, u0, v0, u1, v1, tileUv);
+                if (showShadows && p->castShadow) {
+                    gm->appendMesh(*p, aIdx, aTime, frame3DShadowCasters, u0, v0, u1, v1, nullptr);
+                }
+                continue;
+            }
+        }
         StudioScene::appendPartMesh(*p, frame3DMesh, u0, v0, u1, v1);
         if (showShadows && p->castShadow) {
             StudioScene::appendPartMesh(*p, frame3DShadowCasters);
@@ -1454,6 +1538,9 @@ void StudioApp::buildTopRibbon() {
                 callbacks.openTexturePicker(currentProjectName, n->id);
             }
         });
+        ribBtn("+ glTF", false, 0, [this]() {
+            if (callbacks.openModelPicker) callbacks.openModelPicker(currentProjectName, "");
+        });
         ribBtn("Anim", showAnimator || animPlaying, 0, [this]() {
             if (showAnimator) { showAnimator = false; animPlaying = false; }
             else openAnimator(selectedNode());
@@ -1483,6 +1570,9 @@ void StudioApp::buildTopRibbon() {
         ribBtn("+ Sphere", false, 0, [quickAdd]() { quickAdd("Sphere"); });
         ribBtn("+ Cylinder", false, 0, [quickAdd]() { quickAdd("Cylinder"); });
         ribBtn("+ Plane", false, 0, [quickAdd]() { quickAdd("Plane"); });
+        ribBtn("+ glTF Model", false, 0, [this]() {
+            if (callbacks.openModelPicker) callbacks.openModelPicker(currentProjectName, "");
+        });
         ribBtn("+ Model", false, 0, [quickAdd]() { quickAdd("Model"); });
         ribBtn("+ Folder", false, 0, [quickAdd]() { quickAdd("Folder"); });
         ribBtn("+ CollisionBox", false, 0, [quickAdd]() { quickAdd("CollisionBox"); });
@@ -1689,16 +1779,33 @@ void StudioApp::buildRightDock() {
             }});
         }
         if (n->isMeshNode()) {
-            props.push_back({"Mesh", n->shape(), [this]() { modal = ModalKind::SHAPE; }});
-            props.push_back({"Segments", std::to_string(n->segments), [this, n]() {
-                promptTitle = "Polygon Segments (6..64)"; promptValue = std::to_string(n->segments);
-                promptTargetKey = "Segments"; modal = ModalKind::TEXT_PROMPT;
-            }});
-            if (n->shape() == "Box" || n->shape() == "Plane") {
-                props.push_back({"Roundness", fmtNum(n->cornerRadius), [this, n]() {
-                    promptTitle = "Corner Radius (0..0.48)"; promptValue = fmtNum(n->cornerRadius);
-                    promptTargetKey = "CornerRadius"; modal = ModalKind::TEXT_PROMPT;
+            if (n->className == "GltfModel") {
+                std::string mLbl = n->modelPath.empty() ? "None (Pick .glb/.gltf)" : n->modelPath;
+                if (auto sl = mLbl.find_last_of('/'); sl != std::string::npos) mLbl = mLbl.substr(sl + 1);
+                props.push_back({"Model File", mLbl, [this, n]() {
+                    if (callbacks.openModelPicker) callbacks.openModelPicker(currentProjectName, n->id);
                 }});
+                if (GltfModelAsset *gm = getOrLoadGltf(n->modelPath)) {
+                    std::string clipLbl = "None";
+                    if (n->modelAnimIndex >= 0 && n->modelAnimIndex < (int)gm->animations.size()) {
+                        clipLbl = gm->animations[(size_t)n->modelAnimIndex].name;
+                    }
+                    props.push_back({"glTF Clip", clipLbl + " (" + std::to_string(gm->animations.size()) + ")", [this, n]() {
+                        openAnimator(n);
+                    }});
+                }
+            } else {
+                props.push_back({"Mesh", n->shape(), [this]() { modal = ModalKind::SHAPE; }});
+                props.push_back({"Segments", std::to_string(n->segments), [this, n]() {
+                    promptTitle = "Polygon Segments (6..64)"; promptValue = std::to_string(n->segments);
+                    promptTargetKey = "Segments"; modal = ModalKind::TEXT_PROMPT;
+                }});
+                if (n->shape() == "Box" || n->shape() == "Plane") {
+                    props.push_back({"Roundness", fmtNum(n->cornerRadius), [this, n]() {
+                        promptTitle = "Corner Radius (0..0.48)"; promptValue = fmtNum(n->cornerRadius);
+                        promptTargetKey = "CornerRadius"; modal = ModalKind::TEXT_PROMPT;
+                    }});
+                }
             }
             props.push_back({"Color", "#", [this, n]() {
                 promptTargetKey.clear();
@@ -1729,15 +1836,26 @@ void StudioApp::buildRightDock() {
             }});
         }
         if (n->is3DNode()) {
-            std::string animLbl = n->animPath.empty() ? "None (Pick File)" : n->animPath;
-            auto sl = animLbl.find_last_of('/');
-            if (sl != std::string::npos) animLbl = animLbl.substr(sl + 1);
-            props.push_back({"Animation", animLbl, [this, n]() { openAnimator(n); }});
-            if (!n->animPath.empty()) {
+            if (n->className == "GltfModel") {
                 props.push_back({"AnimAuto", n->animAutoPlay ? "true" : "false", [this, n]() {
                     n->animAutoPlay = !n->animAutoPlay;
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }});
+                props.push_back({"AnimLoop", n->animLoop ? "true" : "false", [this, n]() {
+                    n->animLoop = !n->animLoop;
+                    scene.saveToFile(currentProjectDir + "/scene.json");
+                }});
+            } else {
+                std::string animLbl = n->animPath.empty() ? "None (Pick File)" : n->animPath;
+                auto sl = animLbl.find_last_of('/');
+                if (sl != std::string::npos) animLbl = animLbl.substr(sl + 1);
+                props.push_back({"Animation", animLbl, [this, n]() { openAnimator(n); }});
+                if (!n->animPath.empty()) {
+                    props.push_back({"AnimAuto", n->animAutoPlay ? "true" : "false", [this, n]() {
+                        n->animAutoPlay = !n->animAutoPlay;
+                        scene.saveToFile(currentProjectDir + "/scene.json");
+                    }});
+                }
             }
         }
         if (n->isMeshNode() || n->isCollisionNode()) {
@@ -1839,9 +1957,20 @@ void StudioApp::buildAnimatorDock(const Rect &area) {
     emitRect(area.x, area.y + hdrH - 1, area.w, 1, Col::border());
 
     SceneNode *tn = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+    GltfModelAsset *gm = (tn && tn->className == "GltfModel" && !tn->modelPath.empty())
+        ? getOrLoadGltf(tn->modelPath) : nullptr;
+    if (gm && !gm->nodes.empty()) {
+        animBoneNodeIdx = std::clamp(animBoneNodeIdx, 0, (int)gm->nodes.size() - 1);
+    }
+
     std::string targetName = (tn && tn->is3DNode()) ? tn->name : "None";
-    std::string fileLbl = activeAnimFile.empty() ? "No clip" : activeAnimFile;
-    if (auto sl = fileLbl.find_last_of('/'); sl != std::string::npos) fileLbl = fileLbl.substr(sl + 1);
+    std::string fileLbl = gm
+        ? ((tn->modelAnimIndex >= 0 && tn->modelAnimIndex < (int)gm->animations.size())
+            ? gm->animations[(size_t)tn->modelAnimIndex].name : "No glTF clip")
+        : (activeAnimFile.empty() ? "No clip" : activeAnimFile);
+    if (!gm) {
+        if (auto sl = fileLbl.find_last_of('/'); sl != std::string::npos) fileLbl = fileLbl.substr(sl + 1);
+    }
 
     float bx = area.x + pad;
     float by = area.y + 2 * density;
@@ -1857,96 +1986,148 @@ void StudioApp::buildAnimatorDock(const Rect &area) {
         bx += w + 3 * density;
     };
 
-    topBtn("+ New", false, [this]() {
-        promptTitle = "New Animation Name";
-        promptValue = "anim_" + std::to_string(scene.nextId);
-        promptTargetKey = "NewAnim";
-        modal = ModalKind::TEXT_PROMPT;
-    });
-    topBtn(animPlaying ? "Pause" : "Play", animPlaying, [this]() {
-        if (animPlaying) {
+    if (gm) {
+        topBtn("+ Clip", false, [this]() {
+            promptTitle = "New glTF Clip Name";
+            promptValue = "Clip_" + std::to_string(scene.nextId);
+            promptTargetKey = "NewGltfClip";
+            modal = ModalKind::TEXT_PROMPT;
+        });
+        topBtn(animPlaying ? "Pause" : "Play", animPlaying, [this, tn, gm]() {
+            if (animPlaying) animPlaying = false;
+            else if (tn->modelAnimIndex >= 0 && tn->modelAnimIndex < (int)gm->animations.size()) {
+                float dur = gm->animations[(size_t)tn->modelAnimIndex].duration;
+                if (dur > 1e-4f) {
+                    if (animTime >= dur) animTime = 0.0f;
+                    animPlaying = true;
+                }
+            }
+        });
+        topBtn(tn->animLoop ? "Loop:ON" : "Loop:OFF", tn->animLoop, [this, tn]() {
+            tn->animLoop = !tn->animLoop;
+            scene.saveToFile(currentProjectDir + "/scene.json");
+        });
+        topBtn("+ Key", false, [this, tn, gm]() {
+            if (gm->nodes.empty()) return;
+            if (tn->modelAnimIndex < 0 || tn->modelAnimIndex >= (int)gm->animations.size()) {
+                tn->modelAnimIndex = gm->addAnimationClip("Clip_0");
+            }
+            float tr[3], rq[4], sc[3];
+            gm->sampleNodeTRS(tn->modelAnimIndex, animBoneNodeIdx, animTime, tr, rq, sc);
+            gm->setNodeKeyframe(tn->modelAnimIndex, animBoneNodeIdx, animTime, tr, rq, sc);
+            gm->saveAnimationsToFile();
+            tn->animAutoPlay = true;
+            scene.saveToFile(currentProjectDir + "/scene.json");
+            animTime += 0.4f;
+        });
+        topBtn("Del Key", false, [this, tn, gm]() {
+            if (tn->modelAnimIndex >= 0 && tn->modelAnimIndex < (int)gm->animations.size()) {
+                gm->removeKeyframeNear(tn->modelAnimIndex, animBoneNodeIdx, animTime);
+                gm->saveAnimationsToFile();
+            }
+        });
+        topBtn("t-", false, [this]() {
             animPlaying = false;
-        } else if (!activeAnim.frames.empty()) {
-            if (animTime >= activeAnim.duration()) animTime = 0.0f;
-            animPlaying = true;
-        }
-    });
-    topBtn(activeAnim.loop ? "Loop:ON" : "Loop:OFF", activeAnim.loop, [this]() {
-        activeAnim.loop = !activeAnim.loop;
-        if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
-        if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+            animTime = std::max(0.0f, animTime - 0.25f);
+        });
+        topBtn("t+", false, [this, tn, gm]() {
+            animPlaying = false;
+            float dur = (tn->modelAnimIndex >= 0 && tn->modelAnimIndex < (int)gm->animations.size())
+                ? gm->animations[(size_t)tn->modelAnimIndex].duration : 2.0f;
+            animTime = std::min(std::max(4.0f, dur + 1.0f), animTime + 0.25f);
+        });
+    } else {
+        topBtn("+ New", false, [this]() {
+            promptTitle = "New Animation Name";
+            promptValue = "anim_" + std::to_string(scene.nextId);
+            promptTargetKey = "NewAnim";
+            modal = ModalKind::TEXT_PROMPT;
+        });
+        topBtn(animPlaying ? "Pause" : "Play", animPlaying, [this]() {
+            if (animPlaying) {
+                animPlaying = false;
+            } else if (!activeAnim.frames.empty()) {
+                if (animTime >= activeAnim.duration()) animTime = 0.0f;
+                animPlaying = true;
+            }
+        });
+        topBtn(activeAnim.loop ? "Loop:ON" : "Loop:OFF", activeAnim.loop, [this]() {
+            activeAnim.loop = !activeAnim.loop;
+            if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+            if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+                n->animLoop = activeAnim.loop;
+                scene.saveToFile(currentProjectDir + "/scene.json");
+            }
+        });
+        topBtn("+ Key", false, [this]() {
+            SceneNode *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+            if (!n || !n->is3DNode()) {
+                appendOutput("Select a 3D object first.", Col::muted());
+                return;
+            }
+            if (activeAnimFile.empty()) {
+                activeAnimFile = "animations/" + n->name + "_anim.anim.json";
+                activeAnim = AnimClip{};
+                activeAnim.name = n->name + "_anim";
+            }
+            float tPos = animTime;
+            bool replaced = false;
+            for (auto &kf : activeAnim.frames) {
+                if (std::fabs(kf.t - tPos) < 0.05f) {
+                    kf = {tPos, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ};
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                activeAnim.frames.push_back({tPos, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ});
+            }
+            activeAnim.sortFrames();
+            std::string dirPath = currentProjectDir + "/animations";
+            mkdir(dirPath.c_str(), 0755);
+            activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+            n->animPath = activeAnimFile;
+            n->animAutoPlay = true;
             n->animLoop = activeAnim.loop;
             scene.saveToFile(currentProjectDir + "/scene.json");
-        }
-    });
-    topBtn("+ Key", false, [this]() {
-        SceneNode *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
-        if (!n || !n->is3DNode()) {
-            appendOutput("Select a 3D object first.", Col::muted());
-            return;
-        }
-        if (activeAnimFile.empty()) {
-            activeAnimFile = "animations/" + n->name + "_anim.anim.json";
-            activeAnim = AnimClip{};
-            activeAnim.name = n->name + "_anim";
-        }
-        float tPos = animPlaying ? animTime : (activeAnim.frames.empty() ? 0.0f : animTime);
-        bool replaced = false;
-        for (auto &kf : activeAnim.frames) {
-            if (std::fabs(kf.t - tPos) < 0.05f) {
-                kf = {tPos, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ};
-                replaced = true;
-                break;
+            animTime = tPos + 0.5f;
+        });
+        topBtn("Del Key", false, [this]() {
+            if (activeAnim.frames.empty()) return;
+            size_t bestIdx = 0;
+            float bestDist = 1e9f;
+            for (size_t i = 0; i < activeAnim.frames.size(); ++i) {
+                float d = std::fabs(activeAnim.frames[i].t - animTime);
+                if (d < bestDist) { bestDist = d; bestIdx = i; }
             }
-        }
-        if (!replaced) {
-            activeAnim.frames.push_back({tPos, n->posX, n->posY, n->posZ, n->rotX, n->rotY, n->rotZ, n->sizeX, n->sizeY, n->sizeZ});
-        }
-        activeAnim.sortFrames();
-        std::string dirPath = currentProjectDir + "/animations";
-        mkdir(dirPath.c_str(), 0755);
-        activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
-        n->animPath = activeAnimFile;
-        n->animAutoPlay = true;
-        n->animLoop = activeAnim.loop;
-        scene.saveToFile(currentProjectDir + "/scene.json");
-        animTime = tPos + 0.5f;
-    });
-    topBtn("Del Key", false, [this]() {
-        if (activeAnim.frames.empty()) return;
-        size_t bestIdx = 0;
-        float bestDist = 1e9f;
-        for (size_t i = 0; i < activeAnim.frames.size(); ++i) {
-            float d = std::fabs(activeAnim.frames[i].t - animTime);
-            if (d < bestDist) { bestDist = d; bestIdx = i; }
-        }
-        if (bestDist <= 0.35f || activeAnim.frames.size() == 1) {
-            activeAnim.frames.erase(activeAnim.frames.begin() + (ptrdiff_t)bestIdx);
-        } else {
-            activeAnim.frames.pop_back();
-        }
-        if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
-    });
-    topBtn("t-", false, [this]() {
-        animPlaying = false;
-        animTime = std::max(0.0f, animTime - 0.25f);
-        if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode() && !activeAnim.frames.empty()) {
-            activeAnim.sample(animTime, *n);
-        }
-    });
-    topBtn("t+", false, [this]() {
-        animPlaying = false;
-        animTime = std::min(std::max(4.0f, activeAnim.duration() + 1.0f), animTime + 0.25f);
-        if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode() && !activeAnim.frames.empty()) {
-            activeAnim.sample(animTime, *n);
-        }
-    });
+            if (bestDist <= 0.35f || activeAnim.frames.size() == 1) {
+                activeAnim.frames.erase(activeAnim.frames.begin() + (ptrdiff_t)bestIdx);
+            } else {
+                activeAnim.frames.pop_back();
+            }
+            if (!activeAnimFile.empty()) activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+        });
+        topBtn("t-", false, [this]() {
+            animPlaying = false;
+            animTime = std::max(0.0f, animTime - 0.25f);
+            if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode() && !activeAnim.frames.empty()) {
+                activeAnim.sample(animTime, *n);
+            }
+        });
+        topBtn("t+", false, [this]() {
+            animPlaying = false;
+            animTime = std::min(std::max(4.0f, activeAnim.duration() + 1.0f), animTime + 0.25f);
+            if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode() && !activeAnim.frames.empty()) {
+                activeAnim.sample(animTime, *n);
+            }
+        });
+    }
     addBtn({area.x + area.w - 40 * density, by, 36 * density, bh}, "Close", Col::btn(), Col::muted(), fs, [this]() {
         showAnimator = false;
         animPlaying = false;
     });
 
-    // Body: left = clip files list, right = visual timeline + keyframe strip
+    // Body: left = clip list (glTF clips or .anim.json files), right = bone/timeline controls
     Rect body{area.x, area.y + hdrH, area.w, std::max(24.0f, area.h - hdrH)};
     float listW = std::min(130.0f * density, body.w * 0.28f);
     Rect fileRect{body.x, body.y, listW, body.h};
@@ -1954,34 +2135,126 @@ void StudioApp::buildAnimatorDock(const Rect &area) {
 
     pushBatch(true, fileRect);
     emitRect(fileRect.x + fileRect.w - 1, fileRect.y, 1, fileRect.h, Col::border());
-    auto files = listAnimationFiles();
     float fy = fileRect.y + 3 * density;
-    for (const auto &fp : files) {
-        if (fy + 18 * density > fileRect.y + fileRect.h) break;
-        std::string fn = fp;
-        if (auto sl = fn.find_last_of('/'); sl != std::string::npos) fn = fn.substr(sl + 1);
-        bool sel = (fp == activeAnimFile);
-        addBtn({fileRect.x + 3 * density, fy, fileRect.w - 6 * density, 16 * density}, fn,
-               sel ? Col::btnAct() : Col::btn(), Col::text(), 7.3f * density, [this, fp]() {
-                   activeAnimFile = fp;
-                   AnimClip loaded;
-                   if (AnimClip::loadFromFile(currentProjectDir + "/" + fp, loaded)) {
-                       activeAnim = std::move(loaded);
-                   }
-                   animTime = 0.0f;
-                   animPlaying = false;
-                   if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
-                       n->animPath = fp;
-                       n->animAutoPlay = true;
-                       n->animLoop = activeAnim.loop;
-                       activeAnim.sample(0.0f, *n);
+    if (gm) {
+        for (size_t ci = 0; ci < gm->animations.size(); ++ci) {
+            if (fy + 18 * density > fileRect.y + fileRect.h) break;
+            bool sel = (tn->modelAnimIndex == (int)ci);
+            addBtn({fileRect.x + 3 * density, fy, fileRect.w - 6 * density, 16 * density},
+                   gm->animations[ci].name, sel ? Col::btnAct() : Col::btn(), Col::text(), 7.3f * density, [this, tn, ci]() {
+                       tn->modelAnimIndex = (int)ci;
+                       animTime = 0.0f;
+                       animPlaying = false;
                        scene.saveToFile(currentProjectDir + "/scene.json");
-                   }
-               });
-        fy += 18 * density;
+                   });
+            fy += 18 * density;
+        }
+        if (gm->animations.empty()) {
+            emitText("Tap + Clip", fileRect.x + 4 * density, fy + 2 * density, 7.3f * density, Col::muted(), fileRect.w - 8 * density);
+        }
+    } else {
+        auto files = listAnimationFiles();
+        for (const auto &fp : files) {
+            if (fy + 18 * density > fileRect.y + fileRect.h) break;
+            std::string fn = fp;
+            if (auto sl = fn.find_last_of('/'); sl != std::string::npos) fn = fn.substr(sl + 1);
+            bool sel = (fp == activeAnimFile);
+            addBtn({fileRect.x + 3 * density, fy, fileRect.w - 6 * density, 16 * density}, fn,
+                   sel ? Col::btnAct() : Col::btn(), Col::text(), 7.3f * density, [this, fp]() {
+                       activeAnimFile = fp;
+                       AnimClip loaded;
+                       if (AnimClip::loadFromFile(currentProjectDir + "/" + fp, loaded)) {
+                           activeAnim = std::move(loaded);
+                       }
+                       animTime = 0.0f;
+                       animPlaying = false;
+                       if (auto *n = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId); n && n->is3DNode()) {
+                           n->animPath = fp;
+                           n->animAutoPlay = true;
+                           n->animLoop = activeAnim.loop;
+                           activeAnim.sample(0.0f, *n);
+                           scene.saveToFile(currentProjectDir + "/scene.json");
+                       }
+                   });
+            fy += 18 * density;
+        }
     }
 
     pushBatch(true, tlRect);
+    if (gm) {
+        float curDur = (tn->modelAnimIndex >= 0 && tn->modelAnimIndex < (int)gm->animations.size())
+            ? gm->animations[(size_t)tn->modelAnimIndex].duration : 0.0f;
+        float maxT = std::max(2.5f, curDur);
+        float rx = tlRect.x + pad;
+        float row1Y = tlRect.y + 3 * density;
+        std::string boneName = gm->nodes.empty() ? "No nodes" : gm->nodes[(size_t)animBoneNodeIdx].name;
+        addBtn({rx, row1Y, 18 * density, 16 * density}, "<", Col::btn(), Col::text(), 7.5f * density, [this, gm]() {
+            if (!gm->nodes.empty()) animBoneNodeIdx = (animBoneNodeIdx + (int)gm->nodes.size() - 1) % (int)gm->nodes.size();
+        });
+        float bnW = std::min(100.0f * density, tlRect.w * 0.25f);
+        emitText("Bone: " + boneName, rx + 21 * density, row1Y + 2 * density, 7.3f * density, Col::text(), bnW);
+        addBtn({rx + 23 * density + bnW, row1Y, 18 * density, 16 * density}, ">", Col::btn(), Col::text(), 7.5f * density, [this, gm]() {
+            if (!gm->nodes.empty()) animBoneNodeIdx = (animBoneNodeIdx + 1) % (int)gm->nodes.size();
+        });
+
+        // Quick bone rotation buttons (+/- 15 deg) that keyframe immediately into the glTF clip
+        float rotBx = rx + 46 * density + bnW;
+        struct RotCmd { const char *lbl; int axis; float deg; };
+        static const RotCmd rCmds[] = {{"RX-",0,-15},{"RX+",0,15},{"RY-",1,-15},{"RY+",1,15},{"RZ-",2,-15},{"RZ+",2,15}};
+        float rbw = 26 * density;
+        for (int i = 0; i < 6; ++i) {
+            if (rotBx + rbw > tlRect.x + tlRect.w - pad) break;
+            addBtn({rotBx, row1Y, rbw, 16 * density}, rCmds[i].lbl, Col::btn(), Col::text(), 7.0f * density, [this, tn, gm, i]() {
+                if (gm->nodes.empty()) return;
+                if (tn->modelAnimIndex < 0 || tn->modelAnimIndex >= (int)gm->animations.size()) {
+                    tn->modelAnimIndex = gm->addAnimationClip("Clip_0");
+                }
+                float tr[3], rq[4], sc[3];
+                gm->sampleNodeTRS(tn->modelAnimIndex, animBoneNodeIdx, animTime, tr, rq, sc);
+                float ex = 0, ey = 0, ez = 0;
+                GltfModelAsset::eulerDegFromQuat(rq, ex, ey, ez);
+                if (rCmds[i].axis == 0) ex += rCmds[i].deg;
+                else if (rCmds[i].axis == 1) ey += rCmds[i].deg;
+                else ez += rCmds[i].deg;
+                GltfModelAsset::quatFromEulerDeg(ex, ey, ez, rq);
+                gm->setNodeKeyframe(tn->modelAnimIndex, animBoneNodeIdx, animTime, tr, rq, sc);
+                gm->saveAnimationsToFile();
+                tn->animAutoPlay = true;
+                scene.saveToFile(currentProjectDir + "/scene.json");
+            });
+            rotBx += rbw + 2 * density;
+        }
+
+        float row2Y = tlRect.y + 22 * density;
+        emitText("t=" + fmtNum(animTime) + "s / " + fmtNum(maxT) + "s",
+                 tlRect.x + pad, row2Y, 7.4f * density, Col::muted(), tlRect.w - pad * 2);
+
+        Rect track{tlRect.x + pad, tlRect.y + 36 * density, std::max(40.0f, tlRect.w - pad * 2), 24 * density};
+        emitRect(track.x, track.y, track.w, track.h, Col::bg());
+        emitRectOutline(track.x, track.y, track.w, track.h, 1.0f, Col::border());
+        float prog = std::clamp(animTime / maxT, 0.0f, 1.0f);
+        emitRect(track.x, track.y, track.w * prog, track.h, StudioFont::rgba(52, 52, 52, 180));
+        emitRect(track.x + track.w * prog - 1.5f * density, track.y, 3.0f * density, track.h, Col::accent());
+        for (int s = 0; s < 8; ++s) {
+            float sw = track.w / 8.0f;
+            addHitBox({track.x + s * sw, track.y, sw, track.h}, [this, s, maxT]() {
+                animPlaying = false;
+                animTime = ((float)s + 0.5f) / 8.0f * maxT;
+            });
+        }
+        if (tn->modelAnimIndex >= 0 && tn->modelAnimIndex < (int)gm->animations.size()) {
+            for (const auto &ch : gm->animations[(size_t)tn->modelAnimIndex].channels) {
+                if (ch.targetNode != animBoneNodeIdx) continue;
+                for (const auto &kf : ch.keys) {
+                    float u = std::clamp(kf.t / maxT, 0.0f, 1.0f);
+                    emitRect(track.x + u * track.w - 2 * density, track.y + 3 * density, 4 * density, track.h - 6 * density, Col::text());
+                }
+                break;
+            }
+        }
+        return;
+    }
+
     float maxT = std::max(2.5f, activeAnim.duration());
     emitText("t=" + fmtNum(animTime) + "s / " + fmtNum(maxT) + "s   Keys: " + std::to_string(activeAnim.frames.size()),
              tlRect.x + pad, tlRect.y + 3 * density, 7.6f * density, Col::muted(), tlRect.w - pad * 2);
@@ -2318,17 +2591,23 @@ void StudioApp::buildModal() {
         closeBtn("Add Node (3D / Group / Logic)");
         const char *cls[] = {
             "Box", "Wedge", "Sphere", "Cylinder",
-            "Plane", "Model", "Folder", "StaticBody3D",
-            "RigidBody3D", "CollisionBox", "CollisionSphere", "Area3D",
-            "Camera3D", "DirectionalLight3D", "PointLight3D", "Script"
+            "Plane", "GltfModel", "Model", "Folder",
+            "StaticBody3D", "RigidBody3D", "CollisionBox", "CollisionSphere",
+            "Area3D", "Camera3D", "DirectionalLight3D", "PointLight3D",
+            "Script"
         };
         float cw = (mw - pad * 3) * 0.5f;
-        for (int i = 0; i < 16; ++i) {
+        for (int i = 0; i < 17; ++i) {
             float x = box.x + pad + (i % 2) * (cw + pad);
-            float ry = y + (i / 2) * 26 * density;
-            if (ry + 22 * density > box.y + box.h - 4) break;
+            float ry = y + (i / 2) * 22 * density;
+            if (ry + 19 * density > box.y + box.h - 4) break;
             std::string cn = cls[i];
-            addBtn({x, ry, cw, 22 * density}, cn, Col::btn(), Col::text(), 8.3f * density, [this, cn]() {
+            addBtn({x, ry, cw, 19 * density}, cn, Col::btn(), Col::text(), 8.1f * density, [this, cn]() {
+                if (cn == "GltfModel") {
+                    modal = ModalKind::NONE;
+                    if (callbacks.openModelPicker) callbacks.openModelPicker(currentProjectName, "");
+                    return;
+                }
                 SceneNode *parent = insertParentId.empty() ? nullptr : scene.findById(insertParentId);
                 if (!parent) {
                     if (cn == "Script") parent = scene.findService("Scripts");
@@ -2740,6 +3019,20 @@ void StudioApp::buildModal() {
                     scene.saveToFile(currentProjectDir + "/scene.json");
                 }
                 activeAnim.saveToFile(currentProjectDir + "/" + activeAnimFile);
+                showAnimator = true;
+                modal = ModalKind::NONE;
+            } else if (promptTargetKey == "NewGltfClip") {
+                SceneNode *tn = animTargetNodeId.empty() ? selectedNode() : scene.findById(animTargetNodeId);
+                if (tn && tn->className == "GltfModel") {
+                    if (GltfModelAsset *gm = getOrLoadGltf(tn->modelPath)) {
+                        int idx = gm->addAnimationClip(promptValue);
+                        tn->modelAnimIndex = idx;
+                        tn->animAutoPlay = true;
+                        gm->saveAnimationsToFile();
+                        scene.saveToFile(currentProjectDir + "/scene.json");
+                        animTime = 0.0f;
+                    }
+                }
                 showAnimator = true;
                 modal = ModalKind::NONE;
             } else if (promptTargetKey == "HexColor") {

@@ -70,6 +70,8 @@ struct SceneNode {
     uint32_t skyTopColor = 0xFF1E6EC4;
     uint32_t skyBotColor = 0xFF8CC4F2;
     std::string texturePath;
+    std::string modelPath;
+    int modelAnimIndex = 0;
     int segments = 24;
     float cornerRadius = 0.0f;
 
@@ -78,7 +80,7 @@ struct SceneNode {
     bool isMeshNode() const {
         return className == "Box" || className == "Wedge" ||
                className == "Sphere" || className == "Cylinder" ||
-               className == "Plane" ||
+               className == "Plane" || className == "GltfModel" ||
                className == "Part" || className == "WedgePart";
     }
     bool isCollisionNode() const {
@@ -100,6 +102,7 @@ struct SceneNode {
         if (className == "Sphere" || className == "CollisionSphere") return "Sphere";
         if (className == "Cylinder") return "Cylinder";
         if (className == "Plane") return "Plane";
+        if (className == "GltfModel") return "GltfModel";
         return "Box";
     }
     void setShape(const std::string &s) {
@@ -893,6 +896,8 @@ private:
            << ",\"skyTopColor\":" << (int32_t)n.skyTopColor
            << ",\"skyBotColor\":" << (int32_t)n.skyBotColor
            << ",\"texturePath\":" << MiniJson::esc(n.texturePath)
+           << ",\"modelPath\":" << MiniJson::esc(n.modelPath)
+           << ",\"modelAnimIndex\":" << n.modelAnimIndex
            << ",\"segments\":" << n.segments
            << ",\"cornerRadius\":" << n.cornerRadius
            << ",\"children\":[";
@@ -936,6 +941,8 @@ private:
         n.skyTopColor = (uint32_t)(int64_t)j.d("skyTopColor", (double)(int32_t)0xFF1E6EC4);
         n.skyBotColor = (uint32_t)(int64_t)j.d("skyBotColor", (double)(int32_t)0xFF8CC4F2);
         n.texturePath = j.s("texturePath", "");
+        n.modelPath = j.s("modelPath", "");
+        n.modelAnimIndex = (int)j.d("modelAnimIndex", 0);
         n.segments = std::clamp((int)j.d("segments", 24), 6, 64);
         n.cornerRadius = std::clamp((float)j.d("cornerRadius", 0.0), 0.0f, 0.48f);
         if (const JsonVal *kids = j.get("children")) {
