@@ -23,6 +23,7 @@ import android.widget.Toast;
 import android.widget.ViewFlipper;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -57,9 +58,10 @@ public class MainActivity extends AppCompatActivity {
     private EditText chatInput;
     private Button sendStopBtn;
     private volatile boolean aiBusy = false;
-    private int streamingPos = -1;
     private int statusPos = -1;
-    private boolean receivedFirstToken = false;
+    private volatile boolean writingShown = false;
+    private boolean autoScrollEnabled = true;
+    private boolean userTouchingChat = false;
 
     // Repos tab
     private EditText tokenInput;
@@ -195,6 +197,9 @@ public class MainActivity extends AppCompatActivity {
         clearBtn.setOnClickListener(v -> {
             agent.clearHistory();
             chatAdapter.clear();
+            statusPos = -1;
+            writingShown = false;
+            autoScrollEnabled = true;
         });
         topBar.addView(clearBtn);
 
@@ -248,6 +253,27 @@ public class MainActivity extends AppCompatActivity {
         chatRecycler.setItemAnimator(null);
         chatAdapter = new ChatAdapter();
         chatRecycler.setAdapter(chatAdapter);
+        chatRecycler.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(@NonNull RecyclerView rv, int newState) {
+                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                    userTouchingChat = true;
+                    autoScrollEnabled = false;
+                } else if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                    userTouchingChat = false;
+                    autoScrollEnabled = isRecyclerAtBottom();
+                }
+            }
+
+            @Override
+            public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
+                if (dy < 0) {
+                    autoScrollEnabled = false;
+                } else if (!userTouchingChat && rv.getScrollState() == RecyclerView.SCROLL_STATE_IDLE && isRecyclerAtBottom()) {
+                    autoScrollEnabled = true;
+                }
+            }
+        });
         box.addView(chatRecycler, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
@@ -542,13 +568,14 @@ public class MainActivity extends AppCompatActivity {
         chatInput.setText("");
 
         chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.USER, "", text));
-        scrollToBottom();
+        autoScrollEnabled = true;
+        forceScrollToBottom();
 
         aiBusy = true;
         sendStopBtn.setText("Stop");
-        streamingPos = -1;
         statusPos = -1;
-        receivedFirstToken = false;
+        writingShown = false;
+        showOrUpdateStatus("Thinking...");
 
         String token = prefs.getString("github_token", "");
         aiExec.execute(() -> {
@@ -556,82 +583,61 @@ public class MainActivity extends AppCompatActivity {
                 8, temperature, coolDelayMs, true, new AgentRuntime.Listener() {
                 @Override
                 public void onStatus(String status) {
+                    writingShown = false;
                     runOnUiThread(() -> {
-                        if (receivedFirstToken) return;
-                        if (statusPos < 0) {
-                            statusPos = chatAdapter.getItemCount();
-                            chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.STATUS, "", status));
-                        } else {
-                            chatAdapter.replaceItem(statusPos,
-                                new ChatAdapter.Item(ChatAdapter.ItemType.STATUS, "", status));
-                        }
-                        scrollToBottom();
+                        showOrUpdateStatus(status);
+                        scrollToBottomIfFollowing();
                     });
                 }
 
                 @Override
                 public void onStreamToken(String tok) {
+                    if (writingShown) return;
+                    writingShown = true;
                     runOnUiThread(() -> {
-                        clearStatusItem();
-                        if (streamingPos < 0) {
-                            streamingPos = chatAdapter.startStreamingAssistant();
-                            receivedFirstToken = false;
-                        }
-                        if (!receivedFirstToken) {
-                            receivedFirstToken = true;
-                            chatAdapter.replaceItem(streamingPos,
-                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "", tok));
-                        } else {
-                            chatAdapter.appendStream(streamingPos, tok);
-                        }
-                        scrollToBottom();
+                        showOrUpdateStatus("Writing...");
+                        scrollToBottomIfFollowing();
                     });
                 }
 
                 @Override
                 public void onCodeMessage(String title, String lang, String code) {
+                    writingShown = false;
                     runOnUiThread(() -> {
                         clearStatusItem();
-                        finishOrDropStream();
                         chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.CODE_MESSAGE, title, lang, code));
-                        scrollToBottom();
+                        scrollToBottomIfFollowing();
                     });
                 }
 
                 @Override
                 public void onBlocked(String toolName, String reason) {
+                    writingShown = false;
                     runOnUiThread(() -> {
                         clearStatusItem();
-                        finishOrDropStream();
                         chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.BLOCKED, "Safety Guard", reason));
-                        scrollToBottom();
+                        scrollToBottomIfFollowing();
                     });
                 }
 
                 @Override
                 public void onAssistantMessage(String message) {
+                    writingShown = false;
                     runOnUiThread(() -> {
                         clearStatusItem();
-                        if (streamingPos >= 0) {
-                            chatAdapter.replaceItem(streamingPos,
-                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "", message));
-                            streamingPos = -1;
-                        } else {
-                            chatAdapter.addItem(new ChatAdapter.Item(
-                                ChatAdapter.ItemType.ASSISTANT, "", message));
-                        }
-                        receivedFirstToken = false;
-                        scrollToBottom();
+                        chatAdapter.addItem(new ChatAdapter.Item(
+                            ChatAdapter.ItemType.ASSISTANT, "", message));
+                        scrollToBottomIfFollowing();
                     });
                 }
 
                 @Override
                 public void onError(String error) {
+                    writingShown = false;
                     runOnUiThread(() -> {
                         clearStatusItem();
-                        finishOrDropStream();
                         chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.ERROR, "", error));
-                        scrollToBottom();
+                        scrollToBottomIfFollowing();
                     });
                 }
 
@@ -651,25 +657,53 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    private void showOrUpdateStatus(String status) {
+        if (statusPos < 0) {
+            statusPos = chatAdapter.getItemCount();
+            chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.STATUS, "", status));
+        } else {
+            chatAdapter.replaceItem(statusPos,
+                new ChatAdapter.Item(ChatAdapter.ItemType.STATUS, "", status));
+        }
+    }
+
     private void clearStatusItem() {
         if (statusPos >= 0) {
             chatAdapter.removeItem(statusPos);
-            if (streamingPos > statusPos) streamingPos--;
             statusPos = -1;
         }
     }
 
-    private void finishOrDropStream() {
-        if (streamingPos >= 0) {
-            chatAdapter.removeItem(streamingPos);
-            streamingPos = -1;
-        }
-        receivedFirstToken = false;
+    private boolean isRecyclerAtBottom() {
+        if (chatRecycler == null) return true;
+        int range = chatRecycler.computeVerticalScrollRange();
+        int extent = chatRecycler.computeVerticalScrollExtent();
+        int offset = chatRecycler.computeVerticalScrollOffset();
+        if (range <= extent) return true;
+        return (offset + extent) >= (range - dpInt(36));
     }
 
-    private void scrollToBottom() {
+    private void forceScrollToBottom() {
         int count = chatAdapter.getItemCount();
-        if (count > 0) chatRecycler.scrollToPosition(count - 1);
+        if (count > 0) {
+            chatRecycler.post(() -> {
+                int c = chatAdapter.getItemCount();
+                if (c > 0) chatRecycler.scrollToPosition(c - 1);
+            });
+        }
+    }
+
+    private void scrollToBottomIfFollowing() {
+        if (!autoScrollEnabled || userTouchingChat) return;
+        if (chatRecycler.getScrollState() != RecyclerView.SCROLL_STATE_IDLE) return;
+        int count = chatAdapter.getItemCount();
+        if (count <= 0) return;
+        chatRecycler.post(() -> {
+            if (!autoScrollEnabled || userTouchingChat) return;
+            if (chatRecycler.getScrollState() != RecyclerView.SCROLL_STATE_IDLE) return;
+            int c = chatAdapter.getItemCount();
+            if (c > 0) chatRecycler.scrollToPosition(c - 1);
+        });
     }
 
     // -------------------------------------------------------------------------

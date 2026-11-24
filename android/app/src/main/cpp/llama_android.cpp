@@ -140,23 +140,6 @@ std::string formatChatPrompt(const llama_model *model, const std::vector<std::st
     return prompt;
 }
 
-size_t utf8ValidPrefixLen(const std::string &s) {
-    size_t i = 0;
-    const size_t n = s.size();
-    while (i < n) {
-        unsigned char c = (unsigned char)s[i];
-        size_t need = 1;
-        if (c < 0x80) need = 1;
-        else if ((c & 0xE0) == 0xC0) need = 2;
-        else if ((c & 0xF0) == 0xE0) need = 3;
-        else if ((c & 0xF8) == 0xF0) need = 4;
-        else { i++; continue; }
-        if (i + need > n) break;
-        i += need;
-    }
-    return i;
-}
-
 } // namespace
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -352,11 +335,10 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeGenerate(
     }
 
     std::string generated;
-    std::string pendingUtf8;
     bool suppressingThink = false;
+    bool firstVisibleSignaled = false;
     int thinkTokensSkipped = 0;
     const int limit = std::min((int)maxTokens, std::max(64, g_nCtx - nPos));
-    auto lastFlush = std::chrono::steady_clock::now();
 
     for (int step = 0; !failed && !g_abort.load() && step < limit; ++step) {
         llama_token tok = llama_sampler_sample(smpl, g_ctx, -1);
@@ -365,45 +347,29 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeGenerate(
         char piece[256];
         int n = llama_token_to_piece(vocab, tok, piece, sizeof(piece), 0, true);
         if (n > 0) {
-            std::string pStr(piece, (size_t)n);
-            generated.append(pStr);
+            generated.append(piece, (size_t)n);
 
             // Safety fallback: if a model still emitted "<think>" split across tokens, fast-skip or suppress visible output
             if (!suppressingThink && generated.size() <= 32 && generated.find("<think>") != std::string::npos) {
                 suppressingThink = true;
-                pendingUtf8.clear();
             }
             if (suppressingThink) {
                 thinkTokensSkipped++;
                 size_t closePos = generated.find("</think>");
                 if (closePos != std::string::npos) {
                     suppressingThink = false;
-                    std::string after = generated.substr(closePos + 8);
-                    generated = after;
-                    pendingUtf8 = after;
+                    generated = generated.substr(closePos + 8);
                 } else if (thinkTokensSkipped >= 48) {
                     // Cut off runaway thinking early
                     break;
                 }
-            } else {
-                pendingUtf8.append(pStr);
             }
 
-            if (!suppressingThink) {
-                size_t valid = utf8ValidPrefixLen(pendingUtf8);
-                if (valid > 0 && jCallback && cbTokMid) {
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFlush).count();
-                    bool hasNewline = pendingUtf8.find('\n') != std::string::npos;
-                    if (valid >= 24 || hasNewline || elapsedMs >= 45) {
-                        std::string chunkStr = pendingUtf8.substr(0, valid);
-                        pendingUtf8.erase(0, valid);
-                        jstring jChunk = env->NewStringUTF(chunkStr.c_str());
-                        env->CallVoidMethod(jCallback, cbTokMid, jChunk);
-                        env->DeleteLocalRef(jChunk);
-                        lastFlush = now;
-                    }
-                }
+            if (!suppressingThink && !firstVisibleSignaled && jCallback && cbTokMid) {
+                firstVisibleSignaled = true;
+                jstring jFirst = env->NewStringUTF("");
+                env->CallVoidMethod(jCallback, cbTokMid, jFirst);
+                env->DeleteLocalRef(jFirst);
             }
         }
 
@@ -417,15 +383,6 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeGenerate(
 
         if (coolDelayMs > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(std::min(15, (int)coolDelayMs)));
-        }
-    }
-
-    if (!suppressingThink && !pendingUtf8.empty() && jCallback && cbTokMid) {
-        size_t valid = utf8ValidPrefixLen(pendingUtf8);
-        if (valid > 0) {
-            jstring jChunk = env->NewStringUTF(pendingUtf8.substr(0, valid).c_str());
-            env->CallVoidMethod(jCallback, cbTokMid, jChunk);
-            env->DeleteLocalRef(jChunk);
         }
     }
 
