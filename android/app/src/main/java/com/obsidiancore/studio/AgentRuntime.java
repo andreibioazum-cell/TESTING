@@ -69,13 +69,17 @@ final class AgentRuntime {
             } catch (Exception ignored) {
             }
         }
-        return "You are Obsidian AI on Android. Repo: " + repoDesc + " (token: " + tokenPresent + ").\n"
-            + "RULES: No <think> tags or monologues. Work autonomously (read, edit, test, push, actions) without asking user to press buttons. "
-            + "For existing files call read_file then edit_file (never rewrite from scratch; write_new_file only for new files). "
-            + "Wrap code in ```lang ... ``` blocks. Never delete repo, .git, or main/master.\n"
-            + "Tool syntax (one per turn):\n"
+        return "You are Obsidian AI, an elite autonomous software engineer on Android. Repo: "
+            + repoDesc + " (token: " + tokenPresent + ").\n"
+            + "QUALITY & WORKFLOW:\n"
+            + "- No <think> tags or filler. Reply concisely in the user's language.\n"
+            + "- Work autonomously end-to-end: inspect files, make minimal clean edits, run tests/checks, and let changes auto-push.\n"
+            + "- Write complete, idiomatic, bug-free code with proper edge-case & error handling; never leave TODOs or placeholders.\n"
+            + "- Always read_file before editing existing code; use edit_file with exact context (write_new_file only for new files).\n"
+            + "- Put all code in ```lang ... ``` blocks. Never delete repo, .git, or main/master.\n"
+            + "TOOLS (1 valid JSON call per turn):\n"
             + "<tool_call>{\"name\":\"TOOL\",\"arguments\":{...}}</tool_call>\n"
-            + "Tools: list_files(dir,max_depth), read_file(path,start_line,end_line), grep_search(query,path), "
+            + "list_files(dir,max_depth), read_file(path,start_line,end_line), grep_search(query,path), "
             + "edit_file(path,old_text,new_text), write_new_file(path,content), run_bash(command), "
             + "git_status_diff(), github_push_commit(message,branch), github_list_workflows(), "
             + "github_run_action(workflow,ref,inputs), github_action_status(run_id), "
@@ -176,7 +180,7 @@ final class AgentRuntime {
                 contents[i] = msgs.get(i).content;
             }
 
-            String raw = LlamaEngine.nativeGenerate(roles, contents, 320, temperature, coolDelayMs,
+            String raw = LlamaEngine.nativeGenerate(roles, contents, 512, temperature, coolDelayMs,
                 new LlamaEngine.TokenCallback() {
                     @Override public void onToken(String tokenPiece) {
                         listener.onStreamToken(tokenPiece);
@@ -229,8 +233,8 @@ final class AgentRuntime {
                 }
 
                 String obs = res.output;
-                if (obs.length() > 3600) {
-                    obs = obs.substring(0, 3400) + "\n... (truncated)";
+                if (obs.length() > 2400) {
+                    obs = obs.substring(0, 2250) + "\n... (truncated)";
                 }
                 history.add(new ChatMessage("user", "<tool_result name=\"" + parsed.toolName + "\">\n" + obs + "\n</tool_result>"));
                 trimHistory();
@@ -408,8 +412,11 @@ final class AgentRuntime {
     }
 
     private void trimHistory() {
-        while (history.size() > 20) {
-            history.remove(0);
+        // Drop oldest 4 messages at once so subsequent steps keep hitting the KV-cache prefix
+        if (history.size() > 22) {
+            for (int i = 0; i < 4 && !history.isEmpty(); i++) {
+                history.remove(0);
+            }
         }
     }
 }

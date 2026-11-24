@@ -179,13 +179,16 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeLoadModel(
 
     int ctxSz = std::max(512, std::min(8192, (int)nCtx));
     int thr = std::max(1, std::min(8, (int)nThreads));
-    const int nBatch = 128;
+    int hwCores = (int)std::thread::hardware_concurrency();
+    int batchThr = std::max(thr, std::min(6, hwCores > 0 ? hwCores : thr));
+    const int nBatch = 512;
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = (uint32_t)ctxSz;
     cparams.n_batch = (uint32_t)nBatch;
+    cparams.n_ubatch = (uint32_t)nBatch;
     cparams.n_threads = thr;
-    cparams.n_threads_batch = thr;
+    cparams.n_threads_batch = batchThr;
     cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
     cparams.type_k = GGML_TYPE_Q8_0;
     cparams.type_v = GGML_TYPE_Q8_0;
@@ -321,7 +324,7 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeGenerate(
     jmethodID cbTokMid = cbCls ? env->GetMethodID(cbCls, "onToken", "(Ljava/lang/String;)V") : nullptr;
     jmethodID cbProgMid = cbCls ? env->GetMethodID(cbCls, "onPrefillProgress", "(II)V") : nullptr;
 
-    const int nBatch = 128;
+    const int nBatch = 512;
     const int nPromptTokens = (int)tokens.size();
     const int toProcess = nPromptTokens - lcp;
     int processed = 0;
@@ -340,7 +343,7 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeGenerate(
         g_kvTokens.insert(g_kvTokens.end(), tokens.begin() + off, tokens.begin() + off + chunk);
         nPos += chunk;
         processed += chunk;
-        if (jCallback && cbProgMid) {
+        if (jCallback && cbProgMid && toProcess > nBatch) {
             env->CallVoidMethod(jCallback, cbProgMid, processed, toProcess);
         }
         if (coolDelayMs > 0) {
@@ -353,6 +356,7 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeGenerate(
     bool suppressingThink = false;
     int thinkTokensSkipped = 0;
     const int limit = std::min((int)maxTokens, std::max(64, g_nCtx - nPos));
+    auto lastFlush = std::chrono::steady_clock::now();
 
     for (int step = 0; !failed && !g_abort.load() && step < limit; ++step) {
         llama_token tok = llama_sampler_sample(smpl, g_ctx, -1);
@@ -388,11 +392,17 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeGenerate(
             if (!suppressingThink) {
                 size_t valid = utf8ValidPrefixLen(pendingUtf8);
                 if (valid > 0 && jCallback && cbTokMid) {
-                    std::string chunkStr = pendingUtf8.substr(0, valid);
-                    pendingUtf8.erase(0, valid);
-                    jstring jChunk = env->NewStringUTF(chunkStr.c_str());
-                    env->CallVoidMethod(jCallback, cbTokMid, jChunk);
-                    env->DeleteLocalRef(jChunk);
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFlush).count();
+                    bool hasNewline = pendingUtf8.find('\n') != std::string::npos;
+                    if (valid >= 24 || hasNewline || elapsedMs >= 45) {
+                        std::string chunkStr = pendingUtf8.substr(0, valid);
+                        pendingUtf8.erase(0, valid);
+                        jstring jChunk = env->NewStringUTF(chunkStr.c_str());
+                        env->CallVoidMethod(jCallback, cbTokMid, jChunk);
+                        env->DeleteLocalRef(jChunk);
+                        lastFlush = now;
+                    }
                 }
             }
         }

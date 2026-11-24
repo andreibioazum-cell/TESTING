@@ -97,9 +97,9 @@ public class MainActivity extends AppCompatActivity {
     private boolean selectedModelIsUri = false;
     private String selectedModelName = "";
     private int nCtx = 2048;
-    private int nThreads = 2;
-    private float temperature = 0.2f;
-    private int coolDelayMs = 2;
+    private int nThreads = 4;
+    private float temperature = 0.15f;
+    private int coolDelayMs = 0;
 
     private final ActivityResultLauncher<String[]> modelPicker =
         registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onPickedModelUri);
@@ -115,10 +115,11 @@ public class MainActivity extends AppCompatActivity {
         selectedModelPathOrUri = prefs.getString("selected_model_path", "");
         selectedModelIsUri = prefs.getBoolean("selected_model_is_uri", false);
         selectedModelName = prefs.getString("selected_model_name", "");
+        int defaultThreads = Math.min(4, Math.max(2, Runtime.getRuntime().availableProcessors() / 2));
         nCtx = prefs.getInt("n_ctx", 2048);
-        nThreads = prefs.getInt("n_threads", 2);
-        temperature = prefs.getFloat("temperature", 0.2f);
-        coolDelayMs = prefs.getInt("cool_delay_ms", 2);
+        nThreads = prefs.getInt("n_threads", defaultThreads);
+        temperature = prefs.getFloat("temperature", 0.15f);
+        coolDelayMs = prefs.getInt("cool_delay_ms", 0);
 
         if (!activeOwner.isEmpty() && !activeRepo.isEmpty()) {
             activeWorkspace = new RepoWorkspace(repoDirFor(activeOwner, activeRepo));
@@ -244,6 +245,7 @@ public class MainActivity extends AppCompatActivity {
 
         chatRecycler = new RecyclerView(this);
         chatRecycler.setLayoutManager(new LinearLayoutManager(this));
+        chatRecycler.setItemAnimator(null);
         chatAdapter = new ChatAdapter();
         chatRecycler.setAdapter(chatAdapter);
         box.addView(chatRecycler, new LinearLayout.LayoutParams(
@@ -373,14 +375,14 @@ public class MainActivity extends AppCompatActivity {
             ctxBtn.setText("Ctx: " + nCtx);
         });
         threadsBtn = smallBtn("Threads: " + nThreads, v -> {
-            nThreads = (nThreads == 2) ? 3 : (nThreads == 3 ? 4 : 2);
+            nThreads = (nThreads == 2) ? 3 : (nThreads == 3 ? 4 : (nThreads == 4 ? 6 : 2));
             prefs.edit().putInt("n_threads", nThreads).apply();
             threadsBtn.setText("Threads: " + nThreads);
         });
-        tempBtn = smallBtn(String.format(Locale.US, "T:%.1f", temperature), v -> {
-            temperature = (temperature < 0.1f) ? 0.2f : (temperature < 0.5f ? 0.6f : 0.0f);
+        tempBtn = smallBtn(String.format(Locale.US, "T:%.2f", temperature), v -> {
+            temperature = (temperature < 0.05f) ? 0.15f : (temperature < 0.30f ? 0.40f : 0.0f);
             prefs.edit().putFloat("temperature", temperature).apply();
-            tempBtn.setText(String.format(Locale.US, "T:%.1f", temperature));
+            tempBtn.setText(String.format(Locale.US, "T:%.2f", temperature));
         });
         coolBtn = smallBtn(coolDelayMs > 0 ? "Cool" : "Turbo", v -> {
             coolDelayMs = (coolDelayMs > 0) ? 0 : 2;
