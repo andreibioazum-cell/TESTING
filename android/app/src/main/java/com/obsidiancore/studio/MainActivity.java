@@ -48,9 +48,8 @@ public class MainActivity extends AppCompatActivity {
     private ViewFlipper flipper;
     private Button[] navButtons = new Button[4];
 
-    // Top status bar
-    private TextView statusModelText;
-    private TextView statusRepoText;
+    // Minimal header
+    private TextView headerTitleText;
 
     // Chat tab
     private RecyclerView chatRecycler;
@@ -59,6 +58,8 @@ public class MainActivity extends AppCompatActivity {
     private Button sendStopBtn;
     private volatile boolean aiBusy = false;
     private int streamingPos = -1;
+    private int statusPos = -1;
+    private boolean receivedFirstToken = false;
 
     // Repos tab
     private EditText tokenInput;
@@ -68,7 +69,6 @@ public class MainActivity extends AppCompatActivity {
     private EditText manualBranchInput;
     private LinearLayout repoListBox;
     private TextView repoChangesText;
-    private EditText commitMsgInput;
     private final List<GitHubClient.RepoInfo> fetchedRepos = new ArrayList<>();
 
     // Models tab
@@ -100,7 +100,6 @@ public class MainActivity extends AppCompatActivity {
     private int nThreads = 2;
     private float temperature = 0.2f;
     private int coolDelayMs = 2;
-    private boolean receivedFirstToken = false;
 
     private final ActivityResultLauncher<String[]> modelPicker =
         registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onPickedModelUri);
@@ -126,12 +125,16 @@ public class MainActivity extends AppCompatActivity {
         }
 
         buildUi();
-        refreshStatusBar();
+        refreshHeader();
         refreshLocalModelsList();
         refreshRepoChangesUi();
 
         if (!prefs.getString("github_token", "").isEmpty()) {
             verifyTokenAndLoadRepos(true);
+        }
+        // Auto-load previously selected model silently so user can start chatting right away
+        if (!selectedModelPathOrUri.isEmpty() && !LlamaEngine.nativeIsLoaded()) {
+            loadSelectedModel(true);
         }
     }
 
@@ -158,7 +161,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // -------------------------------------------------------------------------
-    // UI Construction (Monochrome Obsidian Core Palette)
+    // UI Construction (Clean Minimal Monochrome)
     // -------------------------------------------------------------------------
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
@@ -166,46 +169,38 @@ public class MainActivity extends AppCompatActivity {
         root.setBackgroundColor(0xFF101010);
         root.setFitsSystemWindows(true);
 
-        // Top compact status bar
+        // Clean single-line header
         LinearLayout topBar = new LinearLayout(this);
-        topBar.setOrientation(LinearLayout.VERTICAL);
-        topBar.setBackgroundColor(0xFF181818);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setBackgroundColor(0xFF161616);
         topBar.setPadding(dpInt(12), dpInt(8), dpInt(12), dpInt(8));
 
-        LinearLayout headerRow = new LinearLayout(this);
-        headerRow.setOrientation(LinearLayout.HORIZONTAL);
-        headerRow.setGravity(Gravity.CENTER_VERTICAL);
+        headerTitleText = new TextView(this);
+        headerTitleText.setTextColor(Color.WHITE);
+        headerTitleText.setTypeface(Typeface.DEFAULT_BOLD);
+        headerTitleText.setTextSize(14f);
+        headerTitleText.setOnClickListener(v -> {
+            if (activeOwner.isEmpty()) switchTab(1);
+            else if (selectedModelName.isEmpty()) switchTab(2);
+        });
+        topBar.addView(headerTitleText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView brand = new TextView(this);
-        brand.setText("OBSIDIAN AI");
-        brand.setTextColor(Color.WHITE);
-        brand.setTypeface(Typeface.DEFAULT_BOLD);
-        brand.setTextSize(15f);
-        headerRow.addView(brand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        Button syncQuickBtn = smallBtn("Sync", v -> syncActiveRepo());
-        Button pushQuickBtn = smallBtn("Push", v -> switchTab(1));
-        headerRow.addView(syncQuickBtn);
-        headerRow.addView(spaceW(6));
-        headerRow.addView(pushQuickBtn);
-        topBar.addView(headerRow);
-
-        statusModelText = new TextView(this);
-        statusModelText.setTextSize(12f);
-        statusModelText.setTextColor(0xFFD0D0D0);
-        statusModelText.setPadding(0, dpInt(4), 0, 0);
-        topBar.addView(statusModelText);
-
-        statusRepoText = new TextView(this);
-        statusRepoText.setTextSize(12f);
-        statusRepoText.setTextColor(0xFFB8B8B8);
-        topBar.addView(statusRepoText);
+        TextView clearBtn = new TextView(this);
+        clearBtn.setText("New Chat");
+        clearBtn.setTextSize(12f);
+        clearBtn.setTextColor(0xFFB8B8B8);
+        clearBtn.setPadding(dpInt(8), dpInt(4), dpInt(4), dpInt(4));
+        clearBtn.setOnClickListener(v -> {
+            agent.clearHistory();
+            chatAdapter.clear();
+        });
+        topBar.addView(clearBtn);
 
         root.addView(topBar, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(divider());
 
-        // Main content flipper
         flipper = new ViewFlipper(this);
         flipper.addView(buildChatTab());
         flipper.addView(buildReposTab());
@@ -216,7 +211,6 @@ public class MainActivity extends AppCompatActivity {
 
         root.addView(divider());
 
-        // Bottom navigation bar
         LinearLayout navBar = new LinearLayout(this);
         navBar.setOrientation(LinearLayout.HORIZONTAL);
         navBar.setBackgroundColor(0xFF161616);
@@ -252,44 +246,26 @@ public class MainActivity extends AppCompatActivity {
         chatRecycler.setLayoutManager(new LinearLayoutManager(this));
         chatAdapter = new ChatAdapter();
         chatRecycler.setAdapter(chatAdapter);
-        chatAdapter.addItem(new ChatAdapter.Item(
-            ChatAdapter.ItemType.ASSISTANT,
-            "Obsidian AI Agent",
-            "1. Open Repos -> paste your GitHub token and sync a repository.\n"
-            + "2. Open Models -> download a GGUF model or pick one from your phone, then tap Load.\n"
-            + "3. Ask me to analyze code, make incremental edits (read_file + edit_file), run bash tests, push commits, or trigger GitHub Actions.\n"
-            + "Safety Guard is active: repository deletion and destructive commands are blocked."
-        ));
         box.addView(chatRecycler, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         box.addView(divider());
 
         LinearLayout composer = new LinearLayout(this);
-        composer.setOrientation(LinearLayout.VERTICAL);
+        composer.setOrientation(LinearLayout.HORIZONTAL);
+        composer.setGravity(Gravity.BOTTOM);
         composer.setBackgroundColor(0xFF181818);
         composer.setPadding(dpInt(10), dpInt(8), dpInt(10), dpInt(8));
 
-        chatInput = styledEdit("Ask AI to inspect, edit files, run bash, push, or trigger Actions...");
+        chatInput = styledEdit("Message...");
         chatInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        chatInput.setMinLines(2);
+        chatInput.setMinLines(1);
         chatInput.setMaxLines(5);
-        composer.addView(chatInput, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        composer.addView(chatInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        composer.addView(spaceW(8));
 
-        LinearLayout btnRow = new LinearLayout(this);
-        btnRow.setOrientation(LinearLayout.HORIZONTAL);
-        btnRow.setPadding(0, dpInt(6), 0, 0);
-
-        Button clearBtn = smallBtn("Clear", v -> {
-            agent.clearHistory();
-            chatAdapter.clear();
-        });
         sendStopBtn = primaryBtn("Send", v -> onSendOrStopClicked());
-        btnRow.addView(clearBtn);
-        btnRow.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
-        btnRow.addView(sendStopBtn);
-        composer.addView(btnRow);
+        composer.addView(sendStopBtn);
 
         box.addView(composer, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -302,7 +278,7 @@ public class MainActivity extends AppCompatActivity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dpInt(12), dpInt(12), dpInt(12), dpInt(16));
 
-        box.addView(sectionTitle("GitHub Access Token"));
+        box.addView(sectionTitle("GitHub Token"));
         tokenInput = styledEdit("ghp_... or github_pat_...");
         tokenInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         tokenInput.setText(prefs.getString("github_token", ""));
@@ -311,12 +287,12 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout tokBtns = new LinearLayout(this);
         tokBtns.setOrientation(LinearLayout.HORIZONTAL);
         tokBtns.setPadding(0, dpInt(6), 0, dpInt(6));
-        tokBtns.addView(primaryBtn("Connect & Load Repos", v -> {
+        tokBtns.addView(primaryBtn("Connect", v -> {
             prefs.edit().putString("github_token", tokenInput.getText().toString().trim()).apply();
             verifyTokenAndLoadRepos(false);
         }));
         tokBtns.addView(spaceW(8));
-        tokBtns.addView(smallBtn("Clear Key", v -> {
+        tokBtns.addView(smallBtn("Clear", v -> {
             tokenInput.setText("");
             prefs.edit().remove("github_token").apply();
             accountText.setText("Not connected");
@@ -329,7 +305,7 @@ public class MainActivity extends AppCompatActivity {
         box.addView(accountText);
 
         box.addView(spaceH(10));
-        box.addView(sectionTitle("Manual Repository / Branch Sync"));
+        box.addView(sectionTitle("Active Repository"));
         LinearLayout manRow = new LinearLayout(this);
         manRow.setOrientation(LinearLayout.HORIZONTAL);
         manualRepoInput = styledEdit("owner/repo");
@@ -346,7 +322,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout syncRow = new LinearLayout(this);
         syncRow.setOrientation(LinearLayout.HORIZONTAL);
         syncRow.setPadding(0, dpInt(6), 0, dpInt(6));
-        syncRow.addView(primaryBtn("Clone / Sync Repo", v -> {
+        syncRow.addView(primaryBtn("Select Repo", v -> {
             String full = manualRepoInput.getText().toString().trim();
             String br = manualBranchInput.getText().toString().trim();
             int sl = full.indexOf('/');
@@ -357,27 +333,15 @@ public class MainActivity extends AppCompatActivity {
             selectAndSyncRepo(full.substring(0, sl).trim(), full.substring(sl + 1).trim(), br);
         }));
         syncRow.addView(spaceW(8));
-        syncRow.addView(smallBtn("Browse Files", v -> openRepoFileBrowser()));
+        syncRow.addView(smallBtn("Files", v -> openRepoFileBrowser()));
         box.addView(syncRow);
 
-        box.addView(spaceH(10));
-        box.addView(sectionTitle("Local Changes & Push"));
-        repoChangesText = infoText("No repository synced");
+        repoChangesText = infoText("");
         box.addView(repoChangesText);
 
-        commitMsgInput = styledEdit("Commit message (e.g. Fix bug in parser)");
-        box.addView(commitMsgInput);
-        LinearLayout pushRow = new LinearLayout(this);
-        pushRow.setOrientation(LinearLayout.HORIZONTAL);
-        pushRow.setPadding(0, dpInt(6), 0, dpInt(6));
-        pushRow.addView(primaryBtn("Commit & Push", v -> pushActiveRepo()));
-        pushRow.addView(spaceW(8));
-        pushRow.addView(smallBtn("Refresh Diff", v -> refreshRepoChangesUi()));
-        box.addView(pushRow);
-
-        box.addView(spaceH(10));
-        box.addView(sectionTitle("Your GitHub Repositories"));
-        repoFilterInput = styledEdit("Filter repositories...");
+        box.addView(spaceH(8));
+        box.addView(sectionTitle("Repositories"));
+        repoFilterInput = styledEdit("Filter...");
         repoFilterInput.addTextChangedListener(new SimpleTextWatcher(s -> renderRepoList()));
         box.addView(repoFilterInput);
 
@@ -396,11 +360,10 @@ public class MainActivity extends AppCompatActivity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dpInt(12), dpInt(12), dpInt(12), dpInt(16));
 
-        box.addView(sectionTitle("Active Local Model (GGUF)"));
-        activeModelInfoText = infoText("No model loaded");
+        box.addView(sectionTitle("Model"));
+        activeModelInfoText = infoText("No model selected");
         box.addView(activeModelInfoText);
 
-        // Inference params row
         LinearLayout paramRow = new LinearLayout(this);
         paramRow.setOrientation(LinearLayout.HORIZONTAL);
         paramRow.setPadding(0, dpInt(6), 0, dpInt(6));
@@ -436,24 +399,24 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout loadRow = new LinearLayout(this);
         loadRow.setOrientation(LinearLayout.HORIZONTAL);
         loadRow.setPadding(0, dpInt(4), 0, dpInt(8));
-        loadRow.addView(primaryBtn("Load Selected", v -> loadSelectedModel()));
+        loadRow.addView(primaryBtn("Load", v -> loadSelectedModel(false)));
         loadRow.addView(spaceW(6));
         loadRow.addView(smallBtn("Unload", v -> {
             LlamaEngine.unload();
-            refreshStatusBar();
-            toast("Model unloaded");
+            refreshHeader();
+            activeModelInfoText.setText(selectedModelName.isEmpty() ? "No model selected" : selectedModelName);
         }));
         loadRow.addView(spaceW(6));
-        loadRow.addView(smallBtn("Pick .gguf File", v -> modelPicker.launch(new String[]{"*/*"})));
+        loadRow.addView(smallBtn("Pick .gguf", v -> modelPicker.launch(new String[]{"*/*"})));
         box.addView(loadRow);
 
-        box.addView(sectionTitle("Downloaded & Phone GGUF Models"));
+        box.addView(sectionTitle("Local Models"));
         localModelsBox = new LinearLayout(this);
         localModelsBox.setOrientation(LinearLayout.VERTICAL);
         box.addView(localModelsBox);
 
         box.addView(spaceH(12));
-        box.addView(sectionTitle("Download Model from Catalog or URL"));
+        box.addView(sectionTitle("Download Model"));
 
         downloadProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         downloadProgress.setMax(100);
@@ -463,7 +426,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout dlStatusRow = new LinearLayout(this);
         dlStatusRow.setOrientation(LinearLayout.HORIZONTAL);
         dlStatusRow.setGravity(Gravity.CENTER_VERTICAL);
-        downloadStatusText = infoText("Idle");
+        downloadStatusText = infoText("");
         downloadStatusText.setVisibility(View.GONE);
         cancelDownloadBtn = smallBtn("Cancel", v -> downloadCancel.set(true));
         cancelDownloadBtn.setVisibility(View.GONE);
@@ -476,7 +439,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout customRow = new LinearLayout(this);
         customRow.setOrientation(LinearLayout.HORIZONTAL);
         customRow.setPadding(0, dpInt(6), 0, dpInt(10));
-        customRow.addView(primaryBtn("Download Custom URL", v -> {
+        customRow.addView(primaryBtn("Download URL", v -> {
             String u = customUrlInput.getText().toString().trim();
             if (u.isEmpty()) { toast("Enter GGUF URL"); return; }
             startModelDownload(u, "");
@@ -524,19 +487,19 @@ public class MainActivity extends AppCompatActivity {
         box.addView(workflowsBox);
 
         box.addView(spaceH(8));
-        box.addView(sectionTitle("Recent Workflow Runs"));
+        box.addView(sectionTitle("Workflow Runs"));
         runsBox = new LinearLayout(this);
         runsBox.setOrientation(LinearLayout.VERTICAL);
         box.addView(runsBox);
 
         box.addView(spaceH(12));
-        box.addView(sectionTitle("Repo Bash Sandbox (Safety Guard Protected)"));
-        bashInput = styledEdit("e.g. ls -la && python3 -m unittest");
+        box.addView(sectionTitle("Bash Sandbox"));
+        bashInput = styledEdit("e.g. ls -la");
         box.addView(bashInput);
         LinearLayout bashBtnRow = new LinearLayout(this);
         bashBtnRow.setOrientation(LinearLayout.HORIZONTAL);
         bashBtnRow.setPadding(0, dpInt(6), 0, dpInt(6));
-        bashBtnRow.addView(primaryBtn("Run Bash", v -> runManualBash()));
+        bashBtnRow.addView(primaryBtn("Run", v -> runManualBash()));
         box.addView(bashBtnRow);
 
         bashOutputText = new TextView(this);
@@ -546,7 +509,7 @@ public class MainActivity extends AppCompatActivity {
         bashOutputText.setBackgroundColor(0xFF161616);
         bashOutputText.setPadding(dpInt(10), dpInt(10), dpInt(10), dpInt(10));
         bashOutputText.setTextIsSelectable(true);
-        bashOutputText.setText("Ready.");
+        bashOutputText.setText("");
         box.addView(bashOutputText);
 
         sv.addView(box);
@@ -564,51 +527,50 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // -------------------------------------------------------------------------
-    // Chat / Agent Loop
+    // Chat / Autonomous Agent Loop
     // -------------------------------------------------------------------------
     private void onSendOrStopClicked() {
         if (aiBusy) {
             agent.abort();
-            sendStopBtn.setText("Stopping...");
+            sendStopBtn.setText("...");
             return;
         }
         String text = chatInput.getText().toString().trim();
         if (text.isEmpty()) return;
         chatInput.setText("");
 
-        chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.USER, "You", text));
+        chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.USER, "", text));
         scrollToBottom();
 
         aiBusy = true;
         sendStopBtn.setText("Stop");
-        streamingPos = chatAdapter.startStreamingAssistant();
+        streamingPos = -1;
+        statusPos = -1;
         receivedFirstToken = false;
-        chatAdapter.replaceItem(streamingPos,
-            new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "Obsidian AI", "Reading prompt..."));
-        scrollToBottom();
 
         String token = prefs.getString("github_token", "");
         aiExec.execute(() -> {
-            agent.runTurn(text, token, activeWorkspace, 8, temperature, coolDelayMs, new AgentRuntime.Listener() {
+            agent.runTurn(text, token, activeWorkspace, activeOwner, activeRepo, activeBranch,
+                8, temperature, coolDelayMs, true, new AgentRuntime.Listener() {
                 @Override
-                public void onPrefillProgress(int done, int total) {
+                public void onStatus(String status) {
                     runOnUiThread(() -> {
-                        if (streamingPos < 0) {
-                            streamingPos = chatAdapter.startStreamingAssistant();
-                            receivedFirstToken = false;
+                        if (receivedFirstToken) return;
+                        if (statusPos < 0) {
+                            statusPos = chatAdapter.getItemCount();
+                            chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.STATUS, "", status));
+                        } else {
+                            chatAdapter.replaceItem(statusPos,
+                                new ChatAdapter.Item(ChatAdapter.ItemType.STATUS, "", status));
                         }
-                        if (!receivedFirstToken) {
-                            int pct = total > 0 ? Math.min(100, (done * 100) / total) : 100;
-                            chatAdapter.replaceItem(streamingPos,
-                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "Obsidian AI",
-                                    String.format(Locale.US, "Reading prompt: %d%% (%d/%d tokens)...", pct, done, total)));
-                        }
+                        scrollToBottom();
                     });
                 }
 
                 @Override
                 public void onStreamToken(String tok) {
                     runOnUiThread(() -> {
+                        clearStatusItem();
                         if (streamingPos < 0) {
                             streamingPos = chatAdapter.startStreamingAssistant();
                             receivedFirstToken = false;
@@ -616,7 +578,7 @@ public class MainActivity extends AppCompatActivity {
                         if (!receivedFirstToken) {
                             receivedFirstToken = true;
                             chatAdapter.replaceItem(streamingPos,
-                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "Obsidian AI", tok));
+                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "", tok));
                         } else {
                             chatAdapter.appendStream(streamingPos, tok);
                         }
@@ -625,28 +587,21 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 @Override
-                public void onThought(String thought) {
-                    // Thinking is disabled globally; ignore empty/residual think blocks
-                }
-
-                @Override
-                public void onToolCall(String name, String argsSummary) {
+                public void onCodeMessage(String title, String lang, String code) {
                     runOnUiThread(() -> {
+                        clearStatusItem();
                         finishOrDropStream();
-                        chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.TOOL_CALL, "Tool: " + name, argsSummary));
+                        chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.CODE_MESSAGE, title, lang, code));
                         scrollToBottom();
                     });
                 }
 
                 @Override
-                public void onToolResult(String name, String result, boolean isDiff, boolean blocked) {
+                public void onBlocked(String toolName, String reason) {
                     runOnUiThread(() -> {
-                        ChatAdapter.ItemType type = blocked
-                            ? ChatAdapter.ItemType.BLOCKED
-                            : (isDiff ? ChatAdapter.ItemType.DIFF : ChatAdapter.ItemType.TOOL_RESULT);
-                        String title = blocked ? "Blocked by Safety Guard (" + name + ")"
-                            : (isDiff ? "File Diff (" + name + ")" : "Result (" + name + ")");
-                        chatAdapter.addItem(new ChatAdapter.Item(type, title, result));
+                        clearStatusItem();
+                        finishOrDropStream();
+                        chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.BLOCKED, "Safety Guard", reason));
                         scrollToBottom();
                     });
                 }
@@ -654,14 +609,16 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onAssistantMessage(String message) {
                     runOnUiThread(() -> {
+                        clearStatusItem();
                         if (streamingPos >= 0) {
                             chatAdapter.replaceItem(streamingPos,
-                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "Obsidian AI", message));
+                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "", message));
                             streamingPos = -1;
                         } else {
                             chatAdapter.addItem(new ChatAdapter.Item(
-                                ChatAdapter.ItemType.ASSISTANT, "Obsidian AI", message));
+                                ChatAdapter.ItemType.ASSISTANT, "", message));
                         }
+                        receivedFirstToken = false;
                         scrollToBottom();
                     });
                 }
@@ -669,15 +626,19 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onError(String error) {
                     runOnUiThread(() -> {
+                        clearStatusItem();
                         finishOrDropStream();
-                        chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.ERROR, "Notice", error));
+                        chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.ERROR, "", error));
                         scrollToBottom();
                     });
                 }
 
                 @Override
                 public void onRepoChanged() {
-                    runOnUiThread(() -> refreshRepoChangesUi());
+                    runOnUiThread(() -> {
+                        refreshHeader();
+                        refreshRepoChangesUi();
+                    });
                 }
             });
 
@@ -686,6 +647,14 @@ public class MainActivity extends AppCompatActivity {
                 sendStopBtn.setText("Send");
             });
         });
+    }
+
+    private void clearStatusItem() {
+        if (statusPos >= 0) {
+            chatAdapter.removeItem(statusPos);
+            if (streamingPos > statusPos) streamingPos--;
+            statusPos = -1;
+        }
     }
 
     private void finishOrDropStream() {
@@ -710,13 +679,13 @@ public class MainActivity extends AppCompatActivity {
             if (!silent) toast("Enter your GitHub Personal Access Token");
             return;
         }
-        accountText.setText("Connecting to GitHub...");
+        accountText.setText("Connecting...");
         netExec.execute(() -> {
             try {
                 GitHubClient.UserInfo user = GitHubClient.verifyToken(token);
                 List<GitHubClient.RepoInfo> repos = GitHubClient.listRepositories(token);
                 runOnUiThread(() -> {
-                    accountText.setText("Connected as @" + user.login + " (" + repos.size() + " repos)");
+                    accountText.setText("@" + user.login + " (" + repos.size() + " repos)");
                     fetchedRepos.clear();
                     fetchedRepos.addAll(repos);
                     renderRepoList();
@@ -734,20 +703,21 @@ public class MainActivity extends AppCompatActivity {
             if (!filter.isEmpty() && !r.fullName.toLowerCase(Locale.US).contains(filter)) continue;
             LinearLayout card = cardContainer();
             TextView title = new TextView(this);
-            title.setText(r.fullName + (r.isPrivate ? " [private]" : " [public]"));
+            title.setText(r.fullName + (r.isPrivate ? " [private]" : ""));
             title.setTextColor(Color.WHITE);
             title.setTypeface(Typeface.DEFAULT_BOLD);
             title.setTextSize(14f);
             TextView sub = new TextView(this);
-            sub.setText("Branch: " + r.defaultBranch
-                + (r.language.isEmpty() ? "" : " • " + r.language)
-                + (r.description.isEmpty() ? "" : "\n" + r.description));
+            sub.setText(r.defaultBranch + (r.language.isEmpty() ? "" : " • " + r.language));
             sub.setTextColor(0xFFC0C0C0);
             sub.setTextSize(12f);
             sub.setPadding(0, dpInt(2), 0, dpInt(6));
             card.addView(title);
             card.addView(sub);
-            card.addView(smallBtn("Select & Sync", v -> selectAndSyncRepo(r.owner, r.name, r.defaultBranch)));
+            card.addView(smallBtn("Select", v -> {
+                selectAndSyncRepo(r.owner, r.name, r.defaultBranch);
+                switchTab(0);
+            }));
             repoListBox.addView(card);
         }
     }
@@ -764,22 +734,14 @@ public class MainActivity extends AppCompatActivity {
         activeWorkspace = new RepoWorkspace(repoDirFor(activeOwner, activeRepo));
         if (manualRepoInput != null) manualRepoInput.setText(activeOwner + "/" + activeRepo);
         if (manualBranchInput != null) manualBranchInput.setText(activeBranch);
+        refreshHeader();
         syncActiveRepo();
     }
 
     private void syncActiveRepo() {
-        if (activeOwner.isEmpty() || activeRepo.isEmpty()) {
-            toast("Select a repository in the Repos tab first");
-            switchTab(1);
-            return;
-        }
+        if (activeOwner.isEmpty() || activeRepo.isEmpty()) return;
         String token = prefs.getString("github_token", "").trim();
-        if (token.isEmpty()) {
-            toast("Enter your GitHub token in the Repos tab");
-            switchTab(1);
-            return;
-        }
-        statusRepoText.setText("Repo: syncing " + activeOwner + "/" + activeRepo + "...");
+        if (token.isEmpty()) return;
         netExec.execute(() -> {
             try {
                 if (activeWorkspace == null) {
@@ -790,36 +752,12 @@ public class MainActivity extends AppCompatActivity {
                 activeBranch = m.branch;
                 runOnUiThread(() -> {
                     prefs.edit().putString("active_branch", activeBranch).apply();
-                    refreshStatusBar();
+                    refreshHeader();
                     refreshRepoChangesUi();
                     toast(msg);
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> {
-                    refreshStatusBar();
-                    toast("Sync error: " + e.getMessage());
-                });
-            }
-        });
-    }
-
-    private void pushActiveRepo() {
-        if (activeWorkspace == null || activeOwner.isEmpty()) {
-            toast("No synced repository");
-            return;
-        }
-        String token = prefs.getString("github_token", "").trim();
-        String msg = commitMsgInput.getText().toString().trim();
-        netExec.execute(() -> {
-            try {
-                String res = GitHubClient.pushChanges(token, activeOwner, activeRepo, activeBranch, msg, activeWorkspace);
-                runOnUiThread(() -> {
-                    commitMsgInput.setText("");
-                    refreshRepoChangesUi();
-                    toast(res);
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> toast("Push error: " + e.getMessage()));
+                runOnUiThread(() -> toast("Sync error: " + e.getMessage()));
             }
         });
     }
@@ -827,19 +765,19 @@ public class MainActivity extends AppCompatActivity {
     private void refreshRepoChangesUi() {
         if (repoChangesText == null) return;
         if (activeWorkspace == null || !activeWorkspace.repoRoot.isDirectory()) {
-            repoChangesText.setText("No repository synced yet.");
+            repoChangesText.setText("");
             return;
         }
         try {
             repoChangesText.setText(activeWorkspace.statusSummary());
         } catch (Exception e) {
-            repoChangesText.setText("Status error: " + e.getMessage());
+            repoChangesText.setText("");
         }
     }
 
     private void openRepoFileBrowser() {
         if (activeWorkspace == null || !activeWorkspace.repoRoot.isDirectory()) {
-            toast("Sync a repository first");
+            toast("Select a repository first");
             return;
         }
         try {
@@ -855,7 +793,7 @@ public class MainActivity extends AppCompatActivity {
             if (files.isEmpty()) { toast("Repository is empty"); return; }
             String[] arr = files.toArray(new String[0]);
             new AlertDialog.Builder(this)
-                .setTitle(activeOwner + "/" + activeRepo + " Files")
+                .setTitle(activeOwner + "/" + activeRepo)
                 .setItems(arr, (d, which) -> showFileViewerDialog(arr[which]))
                 .setNegativeButton("Close", null)
                 .show();
@@ -879,9 +817,9 @@ public class MainActivity extends AppCompatActivity {
             new AlertDialog.Builder(this)
                 .setTitle(relPath)
                 .setView(sv)
-                .setPositiveButton("Ask AI About File", (d, w) -> {
+                .setPositiveButton("Ask AI", (d, w) -> {
                     switchTab(0);
-                    chatInput.setText("Inspect `" + relPath + "` and explain or suggest improvements.");
+                    chatInput.setText("Check " + relPath);
                 })
                 .setNegativeButton("Close", null)
                 .show();
@@ -895,35 +833,34 @@ public class MainActivity extends AppCompatActivity {
         String token = prefs.getString("github_token", "").trim();
         if (token.isEmpty() || activeOwner.isEmpty() || activeRepo.isEmpty()) {
             workflowsBox.removeAllViews();
-            workflowsBox.addView(infoText("Connect GitHub token and select a repository in the Repos tab."));
+            workflowsBox.addView(infoText("Connect token and select a repository in Repos."));
             runsBox.removeAllViews();
             return;
         }
         workflowsBox.removeAllViews();
-        workflowsBox.addView(infoText("Loading workflows..."));
+        workflowsBox.addView(infoText("Loading..."));
         netExec.execute(() -> {
             try {
                 List<GitHubClient.WorkflowInfo> wfs = GitHubClient.listWorkflows(token, activeOwner, activeRepo);
                 List<GitHubClient.RunInfo> runs = GitHubClient.listWorkflowRuns(token, activeOwner, activeRepo);
                 runOnUiThread(() -> {
                     workflowsBox.removeAllViews();
-                    if (wfs.isEmpty()) workflowsBox.addView(infoText("No workflows in .github/workflows/"));
+                    if (wfs.isEmpty()) workflowsBox.addView(infoText("No workflows"));
                     for (GitHubClient.WorkflowInfo w : wfs) {
                         LinearLayout card = cardContainer();
-                        TextView tv = infoText(w.name + " (" + w.path + ") [" + w.state + "]");
-                        card.addView(tv);
-                        card.addView(smallBtn("Run Workflow (" + activeBranch + ")", v -> triggerWorkflowUi(w)));
+                        card.addView(infoText(w.name + " (" + w.path + ")"));
+                        card.addView(smallBtn("Run (" + activeBranch + ")", v -> triggerWorkflowUi(w)));
                         workflowsBox.addView(card);
                     }
                     runsBox.removeAllViews();
-                    if (runs.isEmpty()) runsBox.addView(infoText("No workflow runs yet."));
+                    if (runs.isEmpty()) runsBox.addView(infoText("No runs yet"));
                     for (GitHubClient.RunInfo r : runs) {
                         LinearLayout card = cardContainer();
                         String statusLine = "#" + r.id + " " + r.name + "\n"
                             + r.status + (r.conclusion.isEmpty() ? "" : " / " + r.conclusion)
-                            + " • " + r.branch + " (" + r.event + ")";
+                            + " • " + r.branch;
                         card.addView(infoText(statusLine));
-                        card.addView(smallBtn("View Jobs & Steps", v -> showRunJobsDialog(r.id)));
+                        card.addView(smallBtn("Jobs", v -> showRunJobsDialog(r.id)));
                         runsBox.addView(card);
                     }
                 });
@@ -957,7 +894,7 @@ public class MainActivity extends AppCompatActivity {
             try {
                 String details = GitHubClient.getWorkflowRunJobs(token, activeOwner, activeRepo, runId);
                 runOnUiThread(() -> new AlertDialog.Builder(this)
-                    .setTitle("Run #" + runId + " Jobs")
+                    .setTitle("Run #" + runId)
                     .setMessage(details)
                     .setPositiveButton("OK", null)
                     .show());
@@ -969,12 +906,12 @@ public class MainActivity extends AppCompatActivity {
 
     private void runManualBash() {
         if (activeWorkspace == null || !activeWorkspace.repoRoot.isDirectory()) {
-            toast("Sync a repository first");
+            toast("Select a repository first");
             return;
         }
         String cmd = bashInput.getText().toString().trim();
         if (cmd.isEmpty()) return;
-        bashOutputText.setText("$ " + cmd + "\nRunning...");
+        bashOutputText.setText("$ " + cmd + "\n...");
         netExec.execute(() -> {
             String out = activeWorkspace.runBash(cmd);
             runOnUiThread(() -> {
@@ -985,7 +922,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // -------------------------------------------------------------------------
-    // Models Management (Download + SAF File Picker + llama.cpp Load)
+    // Models Management
     // -------------------------------------------------------------------------
     private void onPickedModelUri(Uri uri) {
         if (uri == null) return;
@@ -993,7 +930,7 @@ public class MainActivity extends AppCompatActivity {
             getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (Exception ignored) {
         }
-        String name = "picked-model.gguf";
+        String name = "model.gguf";
         long size = 0;
         try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
             if (c != null && c.moveToFirst()) {
@@ -1006,22 +943,22 @@ public class MainActivity extends AppCompatActivity {
         }
         try (InputStream in = getContentResolver().openInputStream(uri)) {
             if (in == null || !LlamaEngine.isGMagicValid(in)) {
-                toast("Selected file is not a valid GGUF model");
+                toast("Not a valid GGUF file");
                 return;
             }
         } catch (Exception e) {
-            toast("Cannot read selected file: " + e.getMessage());
+            toast("Cannot read file: " + e.getMessage());
             return;
         }
         ModelCatalog.addPickedUriModel(prefs, name, uri.toString(), size);
         selectModel(name, uri.toString(), true);
         refreshLocalModelsList();
-        toast("Added model: " + name + ". Tap Load Selected.");
+        loadSelectedModel(false);
     }
 
     private void startModelDownload(String url, String filename) {
         if (downloading) {
-            toast("A download is already in progress");
+            toast("Download already in progress");
             return;
         }
         downloading = true;
@@ -1029,7 +966,7 @@ public class MainActivity extends AppCompatActivity {
         downloadProgress.setVisibility(View.VISIBLE);
         downloadProgress.setProgress(0);
         downloadStatusText.setVisibility(View.VISIBLE);
-        downloadStatusText.setText("Connecting...");
+        downloadStatusText.setText("Downloading...");
         cancelDownloadBtn.setVisibility(View.VISIBLE);
 
         netExec.execute(() -> {
@@ -1047,7 +984,7 @@ public class MainActivity extends AppCompatActivity {
                     cancelDownloadBtn.setVisibility(View.GONE);
                     selectModel(out.getName(), out.getAbsolutePath(), false);
                     refreshLocalModelsList();
-                    toast("Downloaded: " + out.getName());
+                    loadSelectedModel(false);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
@@ -1069,15 +1006,15 @@ public class MainActivity extends AppCompatActivity {
             .putString("selected_model_path", pathOrUri)
             .putBoolean("selected_model_is_uri", isUri)
             .apply();
-        refreshStatusBar();
+        refreshHeader();
     }
 
-    private void loadSelectedModel() {
+    private void loadSelectedModel(boolean silent) {
         if (selectedModelPathOrUri.isEmpty()) {
-            toast("Select or download a GGUF model first");
+            if (!silent) toast("Select a GGUF model first");
             return;
         }
-        activeModelInfoText.setText("Loading " + selectedModelName + "...");
+        if (activeModelInfoText != null) activeModelInfoText.setText("Loading " + selectedModelName + "...");
         aiExec.execute(() -> {
             String res;
             if (selectedModelIsUri) {
@@ -1086,9 +1023,11 @@ public class MainActivity extends AppCompatActivity {
                 res = LlamaEngine.loadFromFile(selectedModelPathOrUri, nCtx, nThreads);
             }
             runOnUiThread(() -> {
-                refreshStatusBar();
-                activeModelInfoText.setText(res);
-                toast(res.startsWith("OK:") ? "Model loaded!" : res);
+                refreshHeader();
+                if (activeModelInfoText != null) {
+                    activeModelInfoText.setText(res.startsWith("OK:") ? selectedModelName : res);
+                }
+                if (!silent) toast(res.startsWith("OK:") ? "Loaded " + selectedModelName : res);
             });
         });
     }
@@ -1098,28 +1037,22 @@ public class MainActivity extends AppCompatActivity {
         localModelsBox.removeAllViews();
         List<ModelCatalog.LocalModel> list = ModelCatalog.listLocalModels(this, prefs);
         if (list.isEmpty()) {
-            localModelsBox.addView(infoText("No local models yet. Pick a .gguf from your phone or download one below."));
+            localModelsBox.addView(infoText("No local models yet."));
             return;
         }
         for (ModelCatalog.LocalModel m : list) {
             boolean selected = m.pathOrUri.equals(selectedModelPathOrUri);
             LinearLayout card = cardContainer();
             String sz = m.sizeBytes > 0 ? String.format(Locale.US, " (%.1f MB)", m.sizeBytes / (1024.0 * 1024.0)) : "";
-            TextView tv = infoText((selected ? "● [Selected] " : "○ ") + m.name + sz + (m.isUri ? " [Phone File]" : ""));
-            card.addView(tv);
+            card.addView(infoText((selected ? "● " : "") + m.name + sz));
 
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setPadding(0, dpInt(4), 0, 0);
-            row.addView(smallBtn("Select", v -> {
+            row.addView(smallBtn("Use", v -> {
                 selectModel(m.name, m.pathOrUri, m.isUri);
                 refreshLocalModelsList();
-            }));
-            row.addView(spaceW(6));
-            row.addView(smallBtn("Select & Load", v -> {
-                selectModel(m.name, m.pathOrUri, m.isUri);
-                refreshLocalModelsList();
-                loadSelectedModel();
+                loadSelectedModel(false);
             }));
             row.addView(spaceW(6));
             row.addView(smallBtn("Remove", v -> {
@@ -1133,21 +1066,13 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void refreshStatusBar() {
-        boolean loaded = LlamaEngine.nativeIsLoaded();
-        String mLabel = selectedModelName.isEmpty() ? "none" : selectedModelName;
-        statusModelText.setText((loaded ? "● Model Ready: " : "○ Model: ") + mLabel);
-        if (activeModelInfoText != null && !loaded) {
-            activeModelInfoText.setText(selectedModelName.isEmpty()
-                ? "No model selected"
-                : "Selected (not loaded): " + selectedModelName);
-        }
-        if (activeOwner.isEmpty() || activeRepo.isEmpty()) {
-            statusRepoText.setText("○ Repo: not selected");
+    private void refreshHeader() {
+        if (!activeOwner.isEmpty() && !activeRepo.isEmpty()) {
+            headerTitleText.setText(activeOwner + "/" + activeRepo);
+        } else if (!selectedModelName.isEmpty()) {
+            headerTitleText.setText(selectedModelName);
         } else {
-            boolean synced = activeWorkspace != null && activeWorkspace.metaFile().isFile();
-            statusRepoText.setText((synced ? "● Repo: " : "○ Repo (unsynced): ")
-                + activeOwner + "/" + activeRepo + " @ " + activeBranch);
+            headerTitleText.setText("Obsidian AI");
         }
     }
 

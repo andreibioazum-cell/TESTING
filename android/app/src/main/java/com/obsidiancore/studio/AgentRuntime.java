@@ -2,6 +2,7 @@ package com.obsidiancore.studio;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -9,18 +10,17 @@ import org.json.JSONObject;
 
 final class AgentRuntime {
     interface Listener {
-        void onPrefillProgress(int done, int total);
+        void onStatus(String status);
         void onStreamToken(String token);
-        void onThought(String thought);
-        void onToolCall(String name, String argsSummary);
-        void onToolResult(String name, String result, boolean isDiff, boolean blocked);
+        void onCodeMessage(String title, String lang, String code);
+        void onBlocked(String toolName, String reason);
         void onAssistantMessage(String message);
         void onError(String error);
         void onRepoChanged();
     }
 
     static final class ChatMessage {
-        final String role; // "system", "user", "assistant"
+        final String role;
         final String content;
         ChatMessage(String role, String content) {
             this.role = role;
@@ -64,23 +64,22 @@ final class AgentRuntime {
             try {
                 RepoWorkspace.Meta m = ws.loadMeta();
                 if (!m.owner.isEmpty() && !m.repo.isEmpty()) {
-                    repoDesc = m.owner + "/" + m.repo + " (branch: " + m.branch + ")";
+                    repoDesc = m.owner + "/" + m.repo + " (" + m.branch + ")";
                 }
             } catch (Exception ignored) {
             }
         }
         return "You are Obsidian AI on Android. Repo: " + repoDesc + " (token: " + tokenPresent + ").\n"
-            + "RULES: No <think> tags or long monologues. Act immediately. "
+            + "RULES: No <think> tags or long monologues. Act autonomously and complete everything yourself (read, edit, test, push, actions) without asking the user to click buttons. "
             + "To modify an existing file, call read_file first then edit_file (never rewrite from scratch; use write_new_file only for new files). "
-            + "Never delete the repo, .git, or main/master.\n"
+            + "Wrap any code in your messages with ```lang ... ``` blocks. Never delete the repo, .git, or main/master.\n"
             + "Tool syntax (one per turn):\n"
             + "<tool_call>{\"name\":\"TOOL\",\"arguments\":{...}}</tool_call>\n"
             + "Tools: list_files(dir,max_depth), read_file(path,start_line,end_line), grep_search(query,path), "
             + "edit_file(path,old_text,new_text), write_new_file(path,content), run_bash(command), "
             + "git_status_diff(), github_push_commit(message,branch), github_list_workflows(), "
             + "github_run_action(workflow,ref,inputs), github_action_status(run_id), "
-            + "github_create_branch(from_branch,new_branch), github_create_pr(title,body,head,base).\n"
-            + "When finished, reply concisely without <tool_call>.";
+            + "github_create_branch(from_branch,new_branch), github_create_pr(title,body,head,base).";
     }
 
     static ParsedTurn parseResponse(String raw) {
@@ -116,21 +115,14 @@ final class AgentRuntime {
                     JSONObject args = obj.optJSONObject("arguments");
                     if (args == null) args = obj.optJSONObject("args");
                     toolArgs = args != null ? args : new JSONObject();
-                    String before = work.substring(0, m.start()).trim();
-                    if (!before.isEmpty() && thought.length() == 0) {
-                        thought.append(before);
-                    }
                     work = "";
                 }
             } catch (Exception ignored) {
             }
         }
 
-        // Also handle unclosed <think> if model stopped early
         int openThink = work.indexOf("<think>");
         if (openThink >= 0) {
-            String tail = work.substring(openThink + 7).trim();
-            if (thought.length() == 0) thought.append(tail);
             work = work.substring(0, openThink).trim();
         }
 
@@ -138,21 +130,41 @@ final class AgentRuntime {
     }
 
     void runTurn(String userMessage, String githubToken, RepoWorkspace ws,
-                 int maxSteps, float temperature, int coolDelayMs, Listener listener) {
+                 String activeOwner, String activeRepo, String activeBranch,
+                 int maxSteps, float temperature, int coolDelayMs, boolean autoPush, Listener listener) {
         aborted.set(false);
         if (!LlamaEngine.nativeIsLoaded()) {
-            listener.onError("No GGUF model loaded. Open the Models tab to download or pick a model and tap Load.");
+            listener.onError("Select and load a model in the Models tab first.");
             return;
         }
+
+        // Auto-sync selected repository if not synced locally yet
+        boolean hasToken = githubToken != null && !githubToken.trim().isEmpty();
+        if (ws != null && !ws.metaFile().isFile() && hasToken
+            && activeOwner != null && !activeOwner.isEmpty()
+            && activeRepo != null && !activeRepo.isEmpty()) {
+            try {
+                listener.onStatus("Syncing " + activeOwner + "/" + activeRepo + "...");
+                String syncMsg = GitHubClient.cloneOrSyncRepo(githubToken, activeOwner, activeRepo, activeBranch, ws);
+                listener.onStatus(syncMsg);
+                listener.onRepoChanged();
+            } catch (Exception e) {
+                listener.onStatus("Sync skipped: " + e.getMessage());
+            }
+        }
+
         history.add(new ChatMessage("user", userMessage));
         trimHistory();
 
+        boolean anyFileMutated = false;
+        boolean explicitPushed = false;
+
         for (int step = 0; step < Math.max(1, maxSteps); step++) {
             if (aborted.get()) {
-                listener.onError("Stopped by user.");
+                listener.onError("Stopped.");
                 return;
             }
-            String sysPrompt = buildSystemPrompt(ws, (githubToken != null && !githubToken.trim().isEmpty()) ? "yes" : "no");
+            String sysPrompt = buildSystemPrompt(ws, hasToken ? "yes" : "no");
             List<ChatMessage> msgs = new ArrayList<>(history.size() + 1);
             msgs.add(new ChatMessage("system", sysPrompt));
             msgs.addAll(history);
@@ -170,7 +182,8 @@ final class AgentRuntime {
                         listener.onStreamToken(tokenPiece);
                     }
                     @Override public void onPrefillProgress(int done, int total) {
-                        listener.onPrefillProgress(done, total);
+                        int pct = total > 0 ? Math.min(100, (done * 100) / total) : 100;
+                        listener.onStatus("Processing " + pct + "%...");
                     }
                 });
             if (raw == null || raw.startsWith("ERROR:")) {
@@ -178,31 +191,68 @@ final class AgentRuntime {
                 return;
             }
             if (aborted.get()) {
-                listener.onError("Stopped by user.");
+                listener.onError("Stopped.");
                 return;
             }
 
             ParsedTurn parsed = parseResponse(raw);
-            if (!parsed.thought.isEmpty()) {
-                listener.onThought(parsed.thought);
-            }
-
             if (parsed.toolName != null) {
                 history.add(new ChatMessage("assistant", raw));
-                String argsText = parsed.toolArgs != null ? parsed.toolArgs.toString() : "{}";
-                listener.onToolCall(parsed.toolName, argsText);
+                JSONObject args = parsed.toolArgs != null ? parsed.toolArgs : new JSONObject();
 
-                ToolExecResult res = executeTool(parsed.toolName, parsed.toolArgs, githubToken, ws);
-                listener.onToolResult(parsed.toolName, res.output, res.isDiff, res.blocked);
-                if (res.repoMutated) listener.onRepoChanged();
+                emitToolStatus(parsed.toolName, args, listener);
+                ToolExecResult res = executeTool(parsed.toolName, args, githubToken, ws);
+
+                if (res.blocked) {
+                    listener.onBlocked(parsed.toolName, res.output);
+                } else if ("edit_file".equals(parsed.toolName) && res.isDiff) {
+                    String path = args.optString("path", "file");
+                    listener.onCodeMessage(path, guessLang(path), res.output);
+                } else if ("write_new_file".equals(parsed.toolName) && res.repoMutated) {
+                    String path = args.optString("path", "file");
+                    listener.onCodeMessage(path + " (new)", guessLang(path), args.optString("content", ""));
+                } else if ("run_bash".equals(parsed.toolName)) {
+                    String cmd = args.optString("command", "");
+                    listener.onCodeMessage("$ " + cmd, "bash", res.output);
+                } else if ("github_push_commit".equals(parsed.toolName) && res.repoMutated) {
+                    explicitPushed = true;
+                    listener.onStatus(res.output);
+                } else if (parsed.toolName.startsWith("github_")) {
+                    listener.onStatus(res.output);
+                }
+
+                if (res.repoMutated) {
+                    if (!"github_push_commit".equals(parsed.toolName)) {
+                        anyFileMutated = true;
+                    }
+                    listener.onRepoChanged();
+                }
 
                 String obs = res.output;
-                if (obs.length() > 4000) {
-                    obs = obs.substring(0, 3800) + "\n... (truncated)";
+                if (obs.length() > 3600) {
+                    obs = obs.substring(0, 3400) + "\n... (truncated)";
                 }
                 history.add(new ChatMessage("user", "<tool_result name=\"" + parsed.toolName + "\">\n" + obs + "\n</tool_result>"));
                 trimHistory();
                 continue;
+            }
+
+            // Auto commit & push if agent modified files and did not already push manually
+            if (autoPush && anyFileMutated && !explicitPushed && hasToken && ws != null) {
+                try {
+                    RepoWorkspace.Meta m = ws.loadMeta();
+                    if (!m.owner.isEmpty() && !m.repo.isEmpty() && !ws.computeChangedFiles().isEmpty()) {
+                        listener.onStatus("Auto-pushing changes to " + m.owner + "/" + m.repo + "...");
+                        String shortMsg = userMessage.replace('\n', ' ').trim();
+                        if (shortMsg.length() > 60) shortMsg = shortMsg.substring(0, 60);
+                        String pushOut = GitHubClient.pushChanges(
+                            githubToken, m.owner, m.repo, m.branch, "AI: " + shortMsg, ws);
+                        listener.onStatus(pushOut);
+                        listener.onRepoChanged();
+                    }
+                } catch (Exception e) {
+                    listener.onStatus("Auto-push failed: " + e.getMessage());
+                }
             }
 
             String finalMsg = parsed.visibleText.isEmpty() ? raw : parsed.visibleText;
@@ -210,7 +260,37 @@ final class AgentRuntime {
             listener.onAssistantMessage(finalMsg);
             return;
         }
-        listener.onError("Reached max reasoning steps (" + maxSteps + "). Send a follow-up message to continue.");
+        listener.onError("Reached max steps (" + maxSteps + ").");
+    }
+
+    private static void emitToolStatus(String name, JSONObject args, Listener listener) {
+        switch (name) {
+            case "read_file":
+                listener.onStatus("Reading " + args.optString("path", "file") + "...");
+                break;
+            case "list_files":
+                listener.onStatus("Listing " + args.optString("dir", ".") + "...");
+                break;
+            case "grep_search":
+                listener.onStatus("Searching \"" + args.optString("query", "") + "\"...");
+                break;
+            case "github_run_action":
+                listener.onStatus("Starting GitHub Action " + args.optString("workflow", "") + "...");
+                break;
+            case "github_push_commit":
+                listener.onStatus("Pushing to GitHub...");
+                break;
+            default:
+                break;
+        }
+    }
+
+    static String guessLang(String path) {
+        if (path == null) return "code";
+        String lower = path.toLowerCase(Locale.US);
+        int dot = lower.lastIndexOf('.');
+        if (dot < 0 || dot == lower.length() - 1) return "code";
+        return lower.substring(dot + 1);
     }
 
     static final class ToolExecResult {
@@ -231,7 +311,7 @@ final class AgentRuntime {
         if (args == null) args = new JSONObject();
         try {
             if (ws == null) {
-                return new ToolExecResult("ERROR: No repository synced. Ask the user to sync a repo in the Repos tab.", false, false, false);
+                return new ToolExecResult("ERROR: No repository selected. Pick a repo in the Repos tab.", false, false, false);
             }
             switch (name) {
                 case "list_files":
@@ -328,7 +408,7 @@ final class AgentRuntime {
     }
 
     private void trimHistory() {
-        while (history.size() > 24) {
+        while (history.size() > 20) {
             history.remove(0);
         }
     }
