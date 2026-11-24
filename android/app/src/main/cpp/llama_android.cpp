@@ -118,7 +118,6 @@ Java_com_obsidiancore_studio_LlamaEngine_nativeLoadModel(
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = 0; // CPU arm64 NEON
-    mparams.use_mmap = true;
 
     llama_model *m = llama_model_load_from_file(path.c_str(), mparams);
     if (!m) {
