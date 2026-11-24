@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(ObsidianAI LANGUAGES C CXX)
+project(ObsidianAI LANGUAGES C CXX ASM)
 
 include(FetchContent)
 
@@ -11,7 +11,6 @@ set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_APP OFF CACHE BOOL "" FORCE)
 set(LLAMA_OPENSSL OFF CACHE BOOL "" FORCE)
-set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
@@ -20,7 +19,6 @@ set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     llama_cpp
     URL https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/v1.0.0
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(llama_cpp)
 
