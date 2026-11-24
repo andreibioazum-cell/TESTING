@@ -35,7 +35,7 @@ final class SafetyGuard {
         "(^|[;&|`(]\\s*|\\s)(?:mkfs(?:\\.[a-z0-9]+)?|fdisk|parted|wipefs|dd\\s+if=|reboot|shutdown|poweroff|halt|su\\b|sudo\\b)"
     );
     private static final Pattern REPO_DELETE_CMD = Pattern.compile(
-        "(?:gh\\s+repo\\s+delete|api\\.github\\.com/repos/[^\\s]+.*(?:-X\\s*DELETE|--request\\s+DELETE))",
+        "(?:gh\\s+repo\\s+delete|api\\.github\\.com/repos/[^\\s]+.*(?:-X\\s*DELETE|--request\\s+DELETE)|(?:-X\\s*DELETE|--request\\s+DELETE).*api\\.github\\.com/repos/)",
         Pattern.CASE_INSENSITIVE
     );
     private static final Pattern SENSITIVE_PATHS = Pattern.compile(
