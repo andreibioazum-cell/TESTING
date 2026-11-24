@@ -78,7 +78,7 @@ public class MainActivity extends AppCompatActivity {
     private Button cancelDownloadBtn;
     private LinearLayout localModelsBox;
     private EditText customUrlInput;
-    private Button ctxBtn, threadsBtn, tempBtn;
+    private Button ctxBtn, threadsBtn, tempBtn, coolBtn;
     private final AtomicBoolean downloadCancel = new AtomicBoolean(false);
     private volatile boolean downloading = false;
 
@@ -96,9 +96,11 @@ public class MainActivity extends AppCompatActivity {
     private String selectedModelPathOrUri = "";
     private boolean selectedModelIsUri = false;
     private String selectedModelName = "";
-    private int nCtx = 4096;
-    private int nThreads = 4;
+    private int nCtx = 2048;
+    private int nThreads = 2;
     private float temperature = 0.2f;
+    private int coolDelayMs = 2;
+    private boolean receivedFirstToken = false;
 
     private final ActivityResultLauncher<String[]> modelPicker =
         registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onPickedModelUri);
@@ -114,9 +116,10 @@ public class MainActivity extends AppCompatActivity {
         selectedModelPathOrUri = prefs.getString("selected_model_path", "");
         selectedModelIsUri = prefs.getBoolean("selected_model_is_uri", false);
         selectedModelName = prefs.getString("selected_model_name", "");
-        nCtx = prefs.getInt("n_ctx", 4096);
-        nThreads = prefs.getInt("n_threads", 4);
+        nCtx = prefs.getInt("n_ctx", 2048);
+        nThreads = prefs.getInt("n_threads", 2);
         temperature = prefs.getFloat("temperature", 0.2f);
+        coolDelayMs = prefs.getInt("cool_delay_ms", 2);
 
         if (!activeOwner.isEmpty() && !activeRepo.isEmpty()) {
             activeWorkspace = new RepoWorkspace(repoDirFor(activeOwner, activeRepo));
@@ -402,25 +405,32 @@ public class MainActivity extends AppCompatActivity {
         paramRow.setOrientation(LinearLayout.HORIZONTAL);
         paramRow.setPadding(0, dpInt(6), 0, dpInt(6));
         ctxBtn = smallBtn("Ctx: " + nCtx, v -> {
-            nCtx = (nCtx == 2048) ? 4096 : (nCtx == 4096 ? 8192 : 2048);
+            nCtx = (nCtx == 1024) ? 2048 : (nCtx == 2048 ? 4096 : 1024);
             prefs.edit().putInt("n_ctx", nCtx).apply();
             ctxBtn.setText("Ctx: " + nCtx);
         });
         threadsBtn = smallBtn("Threads: " + nThreads, v -> {
-            nThreads = (nThreads == 2) ? 4 : (nThreads == 4 ? 6 : 2);
+            nThreads = (nThreads == 2) ? 3 : (nThreads == 3 ? 4 : 2);
             prefs.edit().putInt("n_threads", nThreads).apply();
             threadsBtn.setText("Threads: " + nThreads);
         });
-        tempBtn = smallBtn(String.format(Locale.US, "Temp: %.1f", temperature), v -> {
+        tempBtn = smallBtn(String.format(Locale.US, "T:%.1f", temperature), v -> {
             temperature = (temperature < 0.1f) ? 0.2f : (temperature < 0.5f ? 0.6f : 0.0f);
             prefs.edit().putFloat("temperature", temperature).apply();
-            tempBtn.setText(String.format(Locale.US, "Temp: %.1f", temperature));
+            tempBtn.setText(String.format(Locale.US, "T:%.1f", temperature));
+        });
+        coolBtn = smallBtn(coolDelayMs > 0 ? "Cool" : "Turbo", v -> {
+            coolDelayMs = (coolDelayMs > 0) ? 0 : 2;
+            prefs.edit().putInt("cool_delay_ms", coolDelayMs).apply();
+            coolBtn.setText(coolDelayMs > 0 ? "Cool" : "Turbo");
         });
         paramRow.addView(ctxBtn);
-        paramRow.addView(spaceW(6));
+        paramRow.addView(spaceW(4));
         paramRow.addView(threadsBtn);
-        paramRow.addView(spaceW(6));
+        paramRow.addView(spaceW(4));
         paramRow.addView(tempBtn);
+        paramRow.addView(spaceW(4));
+        paramRow.addView(coolBtn);
         box.addView(paramRow);
 
         LinearLayout loadRow = new LinearLayout(this);
@@ -571,29 +581,52 @@ public class MainActivity extends AppCompatActivity {
 
         aiBusy = true;
         sendStopBtn.setText("Stop");
-        streamingPos = -1;
+        streamingPos = chatAdapter.startStreamingAssistant();
+        receivedFirstToken = false;
+        chatAdapter.replaceItem(streamingPos,
+            new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "Obsidian AI", "Reading prompt..."));
+        scrollToBottom();
 
         String token = prefs.getString("github_token", "");
         aiExec.execute(() -> {
-            agent.runTurn(text, token, activeWorkspace, 10, temperature, new AgentRuntime.Listener() {
+            agent.runTurn(text, token, activeWorkspace, 8, temperature, coolDelayMs, new AgentRuntime.Listener() {
+                @Override
+                public void onPrefillProgress(int done, int total) {
+                    runOnUiThread(() -> {
+                        if (streamingPos < 0) {
+                            streamingPos = chatAdapter.startStreamingAssistant();
+                            receivedFirstToken = false;
+                        }
+                        if (!receivedFirstToken) {
+                            int pct = total > 0 ? Math.min(100, (done * 100) / total) : 100;
+                            chatAdapter.replaceItem(streamingPos,
+                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "Obsidian AI",
+                                    String.format(Locale.US, "Reading prompt: %d%% (%d/%d tokens)...", pct, done, total)));
+                        }
+                    });
+                }
+
                 @Override
                 public void onStreamToken(String tok) {
                     runOnUiThread(() -> {
                         if (streamingPos < 0) {
                             streamingPos = chatAdapter.startStreamingAssistant();
+                            receivedFirstToken = false;
                         }
-                        chatAdapter.appendStream(streamingPos, tok);
+                        if (!receivedFirstToken) {
+                            receivedFirstToken = true;
+                            chatAdapter.replaceItem(streamingPos,
+                                new ChatAdapter.Item(ChatAdapter.ItemType.ASSISTANT, "Obsidian AI", tok));
+                        } else {
+                            chatAdapter.appendStream(streamingPos, tok);
+                        }
                         scrollToBottom();
                     });
                 }
 
                 @Override
                 public void onThought(String thought) {
-                    runOnUiThread(() -> {
-                        finishOrDropStream();
-                        chatAdapter.addItem(new ChatAdapter.Item(ChatAdapter.ItemType.THOUGHT, "Thought", thought));
-                        scrollToBottom();
-                    });
+                    // Thinking is disabled globally; ignore empty/residual think blocks
                 }
 
                 @Override
@@ -660,6 +693,7 @@ public class MainActivity extends AppCompatActivity {
             chatAdapter.removeItem(streamingPos);
             streamingPos = -1;
         }
+        receivedFirstToken = false;
     }
 
     private void scrollToBottom() {

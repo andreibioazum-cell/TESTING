@@ -9,6 +9,7 @@ import org.json.JSONObject;
 
 final class AgentRuntime {
     interface Listener {
+        void onPrefillProgress(int done, int total);
         void onStreamToken(String token);
         void onThought(String thought);
         void onToolCall(String name, String argsSummary);
@@ -68,32 +69,18 @@ final class AgentRuntime {
             } catch (Exception ignored) {
             }
         }
-        return "You are Obsidian AI, an autonomous software engineering agent running locally on Android.\n"
-            + "Active repository: " + repoDesc + "\n"
-            + "GitHub token configured: " + tokenPresent + "\n\n"
-            + "RULES:\n"
-            + "1. Think carefully step-by-step inside <think>...</think> before acting.\n"
-            + "2. EDIT FILES INCREMENTALLY: Never rewrite an existing file from scratch! "
-            + "Always inspect relevant lines with `read_file` first, then apply targeted changes with `edit_file(path, old_text, new_text)`. "
-            + "Use `write_new_file` ONLY for brand-new files.\n"
-            + "3. SAFETY: Never delete the repository, never delete .git or workspace root, never force-push or delete main/master, and never run destructive system commands.\n"
-            + "4. To call a tool, output exactly ONE block per turn:\n"
-            + "<tool_call>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool_call>\n\n"
-            + "AVAILABLE TOOLS:\n"
-            + "- list_files: {\"dir\": \".\", \"max_depth\": 3}\n"
-            + "- read_file: {\"path\": \"relative/path\", \"start_line\": 1, \"end_line\": 120}\n"
-            + "- grep_search: {\"query\": \"text\", \"path\": \".\"}\n"
-            + "- edit_file: {\"path\": \"relative/path\", \"old_text\": \"exact lines\", \"new_text\": \"replacement lines\"}\n"
-            + "- write_new_file: {\"path\": \"relative/new_file\", \"content\": \"file content\"}\n"
-            + "- run_bash: {\"command\": \"shell command inside repo root\"}\n"
-            + "- git_status_diff: {}\n"
-            + "- github_push_commit: {\"message\": \"commit message\", \"branch\": \"optional branch\"}\n"
-            + "- github_list_workflows: {}\n"
-            + "- github_run_action: {\"workflow\": \"build.yml\", \"ref\": \"branch\", \"inputs\": {}}\n"
-            + "- github_action_status: {\"run_id\": 0}\n"
-            + "- github_create_branch: {\"from_branch\": \"main\", \"new_branch\": \"feature\"}\n"
-            + "- github_create_pr: {\"title\": \"...\", \"body\": \"...\", \"head\": \"...\", \"base\": \"main\"}\n\n"
-            + "When the task is complete, explain what you did concisely without a <tool_call> block.";
+        return "You are Obsidian AI on Android. Repo: " + repoDesc + " (token: " + tokenPresent + ").\n"
+            + "RULES: No <think> tags or long monologues. Act immediately. "
+            + "To modify an existing file, call read_file first then edit_file (never rewrite from scratch; use write_new_file only for new files). "
+            + "Never delete the repo, .git, or main/master.\n"
+            + "Tool syntax (one per turn):\n"
+            + "<tool_call>{\"name\":\"TOOL\",\"arguments\":{...}}</tool_call>\n"
+            + "Tools: list_files(dir,max_depth), read_file(path,start_line,end_line), grep_search(query,path), "
+            + "edit_file(path,old_text,new_text), write_new_file(path,content), run_bash(command), "
+            + "git_status_diff(), github_push_commit(message,branch), github_list_workflows(), "
+            + "github_run_action(workflow,ref,inputs), github_action_status(run_id), "
+            + "github_create_branch(from_branch,new_branch), github_create_pr(title,body,head,base).\n"
+            + "When finished, reply concisely without <tool_call>.";
     }
 
     static ParsedTurn parseResponse(String raw) {
@@ -151,7 +138,7 @@ final class AgentRuntime {
     }
 
     void runTurn(String userMessage, String githubToken, RepoWorkspace ws,
-                 int maxSteps, float temperature, Listener listener) {
+                 int maxSteps, float temperature, int coolDelayMs, Listener listener) {
         aborted.set(false);
         if (!LlamaEngine.nativeIsLoaded()) {
             listener.onError("No GGUF model loaded. Open the Models tab to download or pick a model and tap Load.");
@@ -177,7 +164,15 @@ final class AgentRuntime {
                 contents[i] = msgs.get(i).content;
             }
 
-            String raw = LlamaEngine.nativeGenerate(roles, contents, 1024, temperature, listener::onStreamToken);
+            String raw = LlamaEngine.nativeGenerate(roles, contents, 320, temperature, coolDelayMs,
+                new LlamaEngine.TokenCallback() {
+                    @Override public void onToken(String tokenPiece) {
+                        listener.onStreamToken(tokenPiece);
+                    }
+                    @Override public void onPrefillProgress(int done, int total) {
+                        listener.onPrefillProgress(done, total);
+                    }
+                });
             if (raw == null || raw.startsWith("ERROR:")) {
                 listener.onError(raw != null ? raw : "Generation error");
                 return;

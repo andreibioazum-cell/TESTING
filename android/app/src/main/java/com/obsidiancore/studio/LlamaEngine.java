@@ -9,6 +9,7 @@ import java.io.InputStream;
 final class LlamaEngine {
     interface TokenCallback {
         void onToken(String tokenPiece);
+        void onPrefillProgress(int done, int total);
     }
 
     static {
@@ -75,5 +76,5 @@ final class LlamaEngine {
     static native void nativeUnloadModel();
     static native void nativeStopGeneration();
     static native boolean nativeIsLoaded();
-    static native String nativeGenerate(String[] roles, String[] contents, int maxTokens, float temp, TokenCallback cb);
+    static native String nativeGenerate(String[] roles, String[] contents, int maxTokens, float temp, int coolDelayMs, TokenCallback cb);
 }

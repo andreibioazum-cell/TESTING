@@ -39,6 +39,13 @@ public class AgentRuntimeTest {
     }
 
     @Test
+    public void systemPromptDisablesThinkingAndIsCompact() {
+        String prompt = AgentRuntime.buildSystemPrompt(null, "no");
+        assertTrue(prompt.contains("No <think> tags"));
+        assertTrue(prompt.length() < 900);
+    }
+
+    @Test
     public void executesToolsAndEnforcesSafetyGuard() throws Exception {
         File dir = tmp.newFolder("agent_repo");
         RepoWorkspace ws = new RepoWorkspace(dir);

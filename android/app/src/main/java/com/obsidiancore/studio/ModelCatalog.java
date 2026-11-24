@@ -53,39 +53,39 @@ final class ModelCatalog {
 
     static final List<CatalogEntry> CATALOG = Arrays.asList(
         new CatalogEntry(
-            "qwen25_coder_1_5b",
-            "Qwen2.5-Coder 1.5B (Q4_K_M)",
-            "~1.1 GB • Recommended balance of speed & code edits",
-            "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
-            "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
-        ),
-        new CatalogEntry(
-            "qwen25_coder_3b",
-            "Qwen2.5-Coder 3B (Q4_K_M)",
-            "~2.1 GB • Stronger multi-file reasoning (8+ GB RAM)",
-            "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
-            "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
-        ),
-        new CatalogEntry(
-            "deepseek_r1_1_5b",
-            "DeepSeek-R1-Distill-Qwen 1.5B (Q4_K_M)",
-            "~1.1 GB • Step-by-step <think> reasoning",
-            "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf",
-            "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf"
+            "qwen25_coder_0_5b",
+            "Qwen2.5-Coder 0.5B (Q4_K_M)",
+            "~400 MB • Fastest coding model, cool & instant on phone",
+            "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
+            "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf"
         ),
         new CatalogEntry(
             "qwen25_0_5b",
             "Qwen2.5 0.5B (Q4_K_M)",
-            "~400 MB • Ultra-fast lightweight model",
+            "~400 MB • Ultra-fast lightweight general model",
             "qwen2.5-0.5b-instruct-q4_k_m.gguf",
             "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
         ),
         new CatalogEntry(
             "llama32_1b",
             "Llama-3.2 1B (Q4_K_M)",
-            "~808 MB • Fast general assistant & shell tasks",
+            "~808 MB • Fast assistant & shell tasks (no thinking)",
             "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
             "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+        ),
+        new CatalogEntry(
+            "qwen25_coder_1_5b",
+            "Qwen2.5-Coder 1.5B (Q4_K_M)",
+            "~1.1 GB • Stronger code edits (heavier on CPU)",
+            "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+            "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
+        ),
+        new CatalogEntry(
+            "qwen25_coder_3b",
+            "Qwen2.5-Coder 3B (Q4_K_M)",
+            "~2.1 GB • Large model (8+ GB RAM, slower on phone)",
+            "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+            "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
         )
     );
 
