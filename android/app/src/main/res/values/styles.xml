@@ -37,7 +37,6 @@
         <item name="android:windowBackground">#101010</item>
         <item name="android:navigationBarColor">#101010</item>
         <item name="android:statusBarColor">#101010</item>
-        <item name="android:windowFullscreen">true</item>
         <item name="android:windowNoTitle">true</item>
     </style>
     <style name="Widget.ObsidianCore.DialogButton" parent="Widget.Material3.Button.TextButton">
