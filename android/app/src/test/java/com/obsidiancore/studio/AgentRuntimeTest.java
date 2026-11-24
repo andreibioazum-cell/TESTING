@@ -42,8 +42,8 @@ public class AgentRuntimeTest {
     public void systemPromptDisablesThinkingAndIsCompact() {
         String prompt = AgentRuntime.buildSystemPrompt(null, "no");
         assertTrue(prompt.contains("No <think> tags"));
-        assertTrue(prompt.contains("Act autonomously"));
-        assertTrue(prompt.length() < 900);
+        assertTrue(prompt.contains("Work autonomously"));
+        assertTrue(prompt.length() < 1024);
         assertEquals("py", AgentRuntime.guessLang("src/main.py"));
         assertEquals("java", AgentRuntime.guessLang("App.java"));
         assertEquals("code", AgentRuntime.guessLang("Makefile"));

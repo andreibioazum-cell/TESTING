@@ -70,9 +70,9 @@ final class AgentRuntime {
             }
         }
         return "You are Obsidian AI on Android. Repo: " + repoDesc + " (token: " + tokenPresent + ").\n"
-            + "RULES: No <think> tags or long monologues. Act autonomously and complete everything yourself (read, edit, test, push, actions) without asking the user to click buttons. "
-            + "To modify an existing file, call read_file first then edit_file (never rewrite from scratch; use write_new_file only for new files). "
-            + "Wrap any code in your messages with ```lang ... ``` blocks. Never delete the repo, .git, or main/master.\n"
+            + "RULES: No <think> tags or monologues. Work autonomously (read, edit, test, push, actions) without asking user to press buttons. "
+            + "For existing files call read_file then edit_file (never rewrite from scratch; write_new_file only for new files). "
+            + "Wrap code in ```lang ... ``` blocks. Never delete repo, .git, or main/master.\n"
             + "Tool syntax (one per turn):\n"
             + "<tool_call>{\"name\":\"TOOL\",\"arguments\":{...}}</tool_call>\n"
             + "Tools: list_files(dir,max_depth), read_file(path,start_line,end_line), grep_search(query,path), "
