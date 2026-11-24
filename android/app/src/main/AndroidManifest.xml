@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="false" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <application
-        android:theme="@style/Theme.LuaC"
-        android:label="LuaC Studio"
+        android:theme="@style/Theme.ObsidianCore"
+        android:label="Obsidian AI"
         android:allowBackup="true"
+        android:largeHeap="true"
         android:supportsRtl="true">
         <activity
-            android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:screenOrientation="unspecified"
+            android:name="com.obsidiancore.studio.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard"
             android:windowSoftInputMode="adjustResize"
             android:exported="true">
             <intent-filter>

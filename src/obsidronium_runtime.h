@@ -1,7 +1,7 @@
-#ifndef LUAC_RUNTIME_H
-#define LUAC_RUNTIME_H
+#ifndef OBSIDRONIUM_RUNTIME_H
+#define OBSIDRONIUM_RUNTIME_H
 
-/* LuaC runtime: bump-pointer Arena Allocator, dense structs/classes, native values, and C draw commands. */
+/* Obsidronium runtime: bump-pointer Arena Allocator, dense structs/classes, native values, and C draw commands. */
 #if defined(__APPLE__) && !defined(_WIN32)
 /* Xcode 26 hides ucontext and RTLD_DEFAULT behind these feature macros when
    the runtime requests POSIX.1-2008 below. */
@@ -3289,7 +3289,7 @@ static LcValue lc_os_tmpname(LcContext *ctx, LcFunction *self, int argc, LcValue
 #ifdef _WIN32
     { char buffer[L_tmpnam]; if (!tmpnam(buffer)) { lc_error(ctx, "cannot create temporary filename"); return lc_nil(); } return lc_string(ctx, buffer); }
 #else
-    { char buffer[] = "/tmp/luac-XXXXXX"; int descriptor = mkstemp(buffer);
+    { char buffer[] = "/tmp/obsidian-XXXXXX"; int descriptor = mkstemp(buffer);
       if (descriptor < 0) return lc_file_failure(ctx, "tmpname");
       close(descriptor); unlink(buffer); return lc_string(ctx, buffer); }
 #endif
@@ -3331,8 +3331,8 @@ static void lc_add_native(LcContext *ctx, LcValue table, const char *name, LcNat
 }
 
 static void lc_audio_init(LcContext *ctx);
-#include "luac_libraries.h"
-#include "luac_audio.h"
+#include "obsidian_libraries.h"
+#include "obsidian_audio.h"
 
 static void lc_gc_mark_frames(LcContext *ctx, LcGcFrame *f) {
     int i;
@@ -3717,7 +3717,7 @@ static LcContext *lc_context_new(const char *source) {
     lc_set_global(ctx, "screen_height", lc_function_new(ctx, lc_builtin_screen_height, 0, NULL, "screen_height"));
     lc_set_global(ctx, "require", lc_function_new(ctx, lc_builtin_require, 0, NULL, "require"));
     lc_set_global(ctx, "_G", lc_retain(ctx->globals));
-    lc_set_global(ctx, "_VERSION", lc_string(ctx, "LuaC 0.5 (Incremental GC + Machine Code)"));
+    lc_set_global(ctx, "_VERSION", lc_string(ctx, "Obsidronium 1.0 (Obsidian Core)"));
     math = lc_table(ctx);
     for (i = 0; unary[i]; ++i) lc_add_native(ctx, math, unary[i], lc_math_unary);
     lc_add_native(ctx, math, "min", lc_math_minmax); lc_add_native(ctx, math, "max", lc_math_minmax);
@@ -3835,7 +3835,7 @@ static void lc_context_destroy(LcContext *ctx) {
 
 static int lc_report_error(LcContext *ctx) {
     if (!ctx->error) return 0;
-    fprintf(stderr, "%s:%d: %s\n", ctx->source ? ctx->source : "luac", ctx->line, ctx->message);
+    fprintf(stderr, "%s:%d: %s\n", ctx->source ? ctx->source : "obsidian", ctx->line, ctx->message);
     return 1;
 }
 

@@ -1,4 +1,4 @@
-name: Android Studio Build
+name: Obsidian AI Android Build
 
 on:
   push:
@@ -12,11 +12,11 @@ permissions:
 
 jobs:
   android:
-    name: Android Studio APK (NDK Clang)
+    name: Obsidian AI APK (NDK Clang + llama.cpp)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify Android Studio theme contrast
+      - name: Verify Obsidian Core theme contrast
         run: python3 android/tests/test_theme.py
       - uses: actions/setup-java@v5
         with:
@@ -39,20 +39,20 @@ jobs:
             yes | "$SDKMANAGER" --licenses >/dev/null || true
             "$SDKMANAGER" 'ndk;27.2.12479018' 'cmake;3.22.1' 'platforms;android-35' 'build-tools;35.0.0'
           fi
-      - name: Assemble APK
+      - name: Run Unit Tests & Assemble APK
         working-directory: android
         shell: bash
         run: |
-          if ! gradle --no-daemon --parallel assembleDebug > android-build.log 2>&1; then
-            message=$(grep -E '(^|[ :])error:|undefined reference|undefined symbol|FAILURE:|^e:' android-build.log | tail -c 3000 | tr '\r\n' '  ' || true)
+          if ! gradle --no-daemon --parallel testDebugUnitTest assembleDebug > android-build.log 2>&1; then
+            message=$(grep -E '(^|[ :])error:|CMake Error|undefined reference|undefined symbol|FAILURE:|^e:|FAILED' android-build.log | tail -c 3500 | tr '\r\n' '  ' || true)
             echo "::error file=android/app/build.gradle::${message}"
-            tail -100 android-build.log
+            tail -150 android-build.log
             exit 1
           fi
-          tail -20 android-build.log
+          tail -30 android-build.log
       - name: Package APK
-        run: mkdir -p dist && cp android/app/build/outputs/apk/debug/app-debug.apk dist/LuaC-Studio-debug.apk
+        run: mkdir -p dist && cp android/app/build/outputs/apk/debug/app-debug.apk dist/ObsidianAI-debug.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: LuaC-Studio-Android-APK
-          path: dist/LuaC-Studio-debug.apk
+          name: ObsidianAI-APK
+          path: dist/ObsidianAI-debug.apk

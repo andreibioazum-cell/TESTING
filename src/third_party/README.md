@@ -11,10 +11,10 @@
 
 The unmodified single-header distributions are included so offline source and
 release-archive builds can enable `LUAC_WITH_MINIAUDIO` and decode PNG/JPEG
-assets without a download step. LuaC uses miniaudio's native playback device
-API only; PCM/WAV/DSP code is LuaC's own implementation. stb_image supplies
+assets without a download step. Obsidian Core uses miniaudio's native playback device
+API only; PCM/WAV/DSP code is Obsidian Core's own implementation. stb_image supplies
 image decoding, while stb_truetype rasterizes Studio's embedded IBM Plex Mono
 font. No part of Lua or LuaJIT is included.
 
 mbedTLS is deliberately not vendored: use an installed, supported mbedTLS 3.x
-package and enable `LUAC_WITH_MBEDTLS` explicitly.
+package and enable `OBSIDIAN_WITH_MBEDTLS` explicitly.

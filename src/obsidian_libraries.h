@@ -1,5 +1,5 @@
-#ifndef LUAC_LIBRARIES_H
-#define LUAC_LIBRARIES_H
+#ifndef OBSIDIAN_LIBRARIES_H
+#define OBSIDIAN_LIBRARIES_H
 
 /* Optional native libraries. This file is included by runtime.h after the
    ownership, table and function APIs are defined. No interpreter or external
@@ -787,7 +787,7 @@ static LcValue lc_socket_select(LcContext *ctx,LcFunction *self,int argc,LcValue
 static LcValue lc_socket_quick(LcContext *ctx,LcFunction *self,int argc,LcValue *argv){LcValue args[4],value;int server=!strcmp(lc_lib_name(self),"bind");args[0]=lc_socket_create(ctx,self,0,NULL);if(lc_first_value(args[0]).type!=LC_SOCKET)return args[0];args[1]=argv[0];args[2]=argv[1];value=server?lc_socket_bind(ctx,self,3,args):lc_socket_connect(ctx,self,3,args);if(lc_first_value(value).type==LC_NIL){lc_release(ctx,args[0]);return value;}lc_release(ctx,value);if(server){args[1]=lc_number(32);value=lc_socket_listen(ctx,self,2,args);lc_release(ctx,args[1]);if(lc_first_value(value).type==LC_NIL){lc_release(ctx,args[0]);return value;}lc_release(ctx,value);}return args[0];}
 
 /* -------------------------------- HTTP ---------------------------------- */
-#include "luac_tls.h"
+#include "obsidian_tls.h"
 static int lc_http_dechunk(LcContext *ctx,LcLibBuffer *body){LcLibBuffer decoded={0};size_t position=0;while(position<body->length){char *end;unsigned long size=strtoul(body->data+position,&end,16);const char *line=strstr(body->data+position,"\r\n");if(!line||end>line){free(decoded.data);return 0;}position=(size_t)(line-body->data)+2;if(size==0)break;if(size>body->length-position){free(decoded.data);return 0;}lc_lib_append(ctx,&decoded,body->data+position,size);position+=size;if(position+2>body->length||memcmp(body->data+position,"\r\n",2)){free(decoded.data);return 0;}position+=2;}free(body->data);*body=decoded;return 1;}
 static LcValue lc_http_request(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     LcString *url = lc_lib_string_arg(ctx, argc, argv, 0);
@@ -855,7 +855,7 @@ static LcValue lc_http_request(LcContext *ctx, LcFunction *self, int argc, LcVal
 #endif
         free(target.data); return lc_tls_failure(ctx, &tls);
     }
-    lc_lib_printf(ctx, &request, "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: LuaC/0.5\r\nAccept: */*\r\nConnection: close\r\n",
+    lc_lib_printf(ctx, &request, "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: ObsidianCore/1.0\r\nAccept: */*\r\nConnection: close\r\n",
                   method, target.data ? target.data : "/", host);
     free(target.data);
     if (body) {
@@ -931,7 +931,7 @@ static LcValue lc_http_request(LcContext *ctx, LcFunction *self, int argc, LcVal
 }
 static LcValue lc_http_tls_available(LcContext *ctx, LcFunction *self, int argc, LcValue *argv) {
     (void)self; (void)argc; (void)argv;
-#ifdef LUAC_WITH_MBEDTLS
+#ifdef OBSIDIAN_WITH_MBEDTLS
     return lc_bool(1);
 #else
     return lc_bool(0);
@@ -992,9 +992,9 @@ static LcValue lc_engine_tag(LcContext *ctx,LcFunction *self,int argc,LcValue *a
 static LcValue lc_engine_camera(LcContext *ctx,LcFunction *self,int argc,LcValue *argv){LcValue camera;(void)self;if(argc<1||!lc_engine_world(ctx,argv[0]))return lc_nil();camera=lc_engine_get(ctx,argv[0],"camera");if(argc>1)lc_engine_set_number(ctx,camera,"x",lc_lib_number_arg(ctx,argc,argv,1,0));if(argc>2)lc_engine_set_number(ctx,camera,"y",lc_lib_number_arg(ctx,argc,argv,2,0));if(argc>3)lc_engine_set_number(ctx,camera,"zoom",lc_lib_number_arg(ctx,argc,argv,3,1));return camera;}
 static LcValue lc_engine_project(LcContext *ctx,LcFunction *self,int argc,LcValue *argv){LcValue camera;double x,y,zoom,cx,cy;(void)self;if(argc<1||!lc_engine_world(ctx,argv[0]))return lc_nil();x=lc_lib_number_arg(ctx,argc,argv,1,0);y=lc_lib_number_arg(ctx,argc,argv,2,0);camera=lc_engine_get(ctx,argv[0],"camera");cx=lc_engine_number(ctx,camera,"x",0);cy=lc_engine_number(ctx,camera,"y",0);zoom=lc_engine_number(ctx,camera,"zoom",1);lc_release(ctx,camera);if(zoom==0)zoom=1;return !strcmp(lc_lib_name(self),"world_to_screen")?lc_vec_pair(ctx,(x-cx)*zoom,(y-cy)*zoom):lc_vec_pair(ctx,x/zoom+cx,y/zoom+cy);}
 
-#include "luac_ffi.h"
-#include "luac_websocket.h"
-#include "luac_game.h"
+#include "obsidian_ffi.h"
+#include "obsidian_websocket.h"
+#include "obsidian_game.h"
 
 /* --------------------------- library registration ----------------------- */
 static void lc_lib_register(LcContext *ctx,const char *name,LcValue table){
